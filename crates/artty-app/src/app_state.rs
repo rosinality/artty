@@ -145,6 +145,10 @@ fn connect_and_open(spec: PaneSpec, cx: &mut App) {
 
 /// Start the server if needed and attach to it.
 fn connect(cx: &mut App) -> std::io::Result<()> {
+    connect_once(cx, true)
+}
+
+fn connect_once(cx: &mut App, may_restart: bool) -> std::io::Result<()> {
     if !artty_server::running() {
         let exe = std::env::current_exe()?;
         // Apps launched from Finder have no locale; shells need one.
@@ -165,6 +169,27 @@ fn connect(cx: &mut App) -> std::io::Result<()> {
     let mut writer = stream.try_clone()?;
     writer.write_all(hello.as_bytes())?;
 
+    // Every version greets first with its protocol version. A server from
+    // another build can't talk to us: have it save and exit, and start ours,
+    // which reopens the tabs.
+    let mut reader = std::io::BufReader::new(stream.try_clone()?);
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let welcome = read_message::<ServerMessage>(&mut reader);
+    stream.set_read_timeout(None)?;
+    let compatible = matches!(welcome, Ok(ServerMessage::Welcome { version, .. }) if version == PROTOCOL_VERSION);
+    if !compatible {
+        drop((writer, reader, stream));
+        if !may_restart {
+            return Err(std::io::Error::other("the artty server speaks another protocol"));
+        }
+        restart_other_server()?;
+        crate::notify::post("artty", "Restarted the artty server to update it: tabs reopen and agents resume, but programs that were running in them restart.");
+        return connect_once(cx, false);
+    }
+    if let Ok(welcome) = welcome {
+        handle(welcome, cx);
+    }
+
     let (outgoing, to_send) = std::sync::mpsc::channel::<ClientMessage>();
     std::thread::Builder::new().name("artty-server-writer".into()).spawn(move || {
         for message in to_send {
@@ -176,7 +201,6 @@ fn connect(cx: &mut App) -> std::io::Result<()> {
     // `None` means the server went away.
     let (incoming, mut received) = mpsc::unbounded::<Option<ServerMessage>>();
     std::thread::Builder::new().name("artty-server-reader".into()).spawn(move || {
-        let mut reader = std::io::BufReader::new(stream);
         loop {
             match read_message::<ServerMessage>(&mut reader) {
                 Ok(message) => {
@@ -214,6 +238,24 @@ fn connect(cx: &mut App) -> std::io::Result<()> {
         }
     })
     .detach();
+    Ok(())
+}
+
+/// Ask the running server (from another build) to save its sessions and
+/// exit, over the JSON control channel every version has, and wait for it.
+fn restart_other_server() -> std::io::Result<()> {
+    let mut stream = UnixStream::connect(artty_core::control::server_socket_path())?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.write_all(b"{\"cmd\":\"restart-server\"}\n")?;
+    let mut answer = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(&stream), &mut answer)?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while artty_server::running() {
+        if Instant::now() > deadline {
+            return Err(std::io::Error::other("the old artty server didn't stop"));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     Ok(())
 }
 
