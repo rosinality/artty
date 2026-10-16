@@ -3,6 +3,7 @@ use artty_vt::event::EventListener;
 use artty_vt::grid::Dimensions;
 use artty_vt::term::Term;
 use artty_vt::term::cell::{Cell, Flags};
+use artty_vt::term::search::Match;
 
 use crate::theme::{Theme, dim};
 
@@ -30,6 +31,8 @@ pub struct FrameLine {
     pub backgrounds: Vec<FrameRect>,
     /// Selected cells, drawn over the backgrounds.
     pub selection: Vec<FrameRect>,
+    /// Search matches, drawn under the selection (which marks the current one).
+    pub matches: Vec<FrameRect>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,7 +76,7 @@ struct Style {
 }
 
 impl Frame {
-    pub(crate) fn capture<T: EventListener>(term: &Term<T>, theme: &Theme) -> Self {
+    pub(crate) fn capture<T: EventListener>(term: &Term<T>, theme: &Theme, matches: &[Match]) -> Self {
         let content = term.renderable_content();
         let colors = content.colors;
         let selection = content.selection;
@@ -130,7 +133,20 @@ impl Frame {
             color: colors[artty_vt::ansi::NamedColor::Cursor].unwrap_or(theme.cursor),
         });
 
-        Frame { columns: term.columns(), lines, cursor, display_offset, background, foreground }
+        // Search matches, in grid coordinates, onto the visible lines.
+        let columns = term.columns();
+        for found in matches {
+            let (start, end) = (*found.start(), *found.end());
+            for grid_line in start.line.0..=end.line.0 {
+                let Ok(line) = usize::try_from(grid_line + display_offset as i32) else { continue };
+                let Some(frame_line) = lines.get_mut(line) else { continue };
+                let first = if grid_line == start.line.0 { start.column.0 } else { 0 };
+                let last = if grid_line == end.line.0 { end.column.0 } else { columns - 1 };
+                frame_line.matches.push(FrameRect { column: first, width: last + 1 - first, color: theme.search_match });
+            }
+        }
+
+        Frame { columns, lines, cursor, display_offset, background, foreground }
     }
 }
 
@@ -278,7 +294,7 @@ mod tests {
         let size = TerminalSize { columns: 20, lines: 3, cell_width: 8, cell_height: 16 };
         let mut term = Term::new(Config::default(), &size, VoidListener);
         Processor::<artty_vt::ansi::StdSyncHandler>::new().advance(&mut term, bytes);
-        Frame::capture(&term, &Theme::default())
+        Frame::capture(&term, &Theme::default(), &[])
     }
 
     fn texts(line: &FrameLine) -> Vec<(usize, &str)> {
@@ -326,7 +342,7 @@ mod tests {
         selection.update(Point::new(Line(0), Column(4)), Side::Right);
         term.selection = Some(selection);
 
-        let frame = Frame::capture(&term, &Theme::default());
+        let frame = Frame::capture(&term, &Theme::default(), &[]);
         let rects: Vec<_> = frame.lines[0].selection.iter().map(|r| (r.column, r.width)).collect();
         assert_eq!(rects, vec![(1, 4)]);
         assert_eq!(term.selection_to_string().as_deref(), Some("ello"));

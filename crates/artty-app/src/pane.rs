@@ -66,6 +66,8 @@ pub struct Pane {
     /// Last notification or agent message.
     pub message: Option<String>,
     pub progress: Option<Progress>,
+    /// When the visual bell last rang.
+    pub flash: Option<Instant>,
     /// Agent state reported through `artty status` (agent hooks); trusted
     /// over heuristics while the agent runs.
     reported: Option<AgentState>,
@@ -112,6 +114,7 @@ impl Pane {
             attention: false,
             message: None,
             progress: None,
+            flash: None,
             reported: None,
             title_changes: Vec::new(),
             running: None,

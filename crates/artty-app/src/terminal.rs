@@ -72,31 +72,35 @@ pub fn hsla(rgb: Rgb) -> Hsla {
     gpui::rgb(u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b)).into()
 }
 
-/// How to draw the cursor.
-pub struct CursorState<'a> {
+/// Per-pane drawing state beyond the frame itself.
+pub struct PaintState<'a> {
     pub focused: bool,
     /// False during the "off" phase of a blink.
-    pub visible: bool,
+    pub cursor_visible: bool,
     /// IME composition text, drawn at the cursor instead of it.
     pub marked_text: Option<&'a str>,
     /// How much to fade the pane's content (0 = none), for unfocused splits.
     pub fade: f32,
+    /// A link to underline (⌘ held over it): line and columns.
+    pub link: Option<(usize, std::ops::Range<usize>)>,
+    /// Visual bell brightness, 0–1.
+    pub flash: f32,
 }
 
 pub fn paint(
     bounds: Bounds<Pixels>,
     frame: &Frame,
     metrics: &Metrics,
-    cursor_state: CursorState<'_>,
+    state: PaintState<'_>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let origin = bounds.origin;
-    let CursorState { focused, visible: cursor_visible, marked_text, fade } = cursor_state;
+    let PaintState { focused, cursor_visible, marked_text, fade, link, flash } = state;
     let faded = |color: Hsla| Hsla { a: color.a * (1. - fade), ..color };
 
     for (index, line) in frame.lines.iter().enumerate() {
-        for rect in line.backgrounds.iter().chain(&line.selection) {
+        for rect in line.backgrounds.iter().chain(&line.matches).chain(&line.selection) {
             window.paint_quad(fill(metrics.cell_bounds(origin, index, rect.column, rect.width), faded(hsla(rect.color))));
         }
     }
@@ -108,10 +112,21 @@ pub fn paint(
         }
     }
 
+    if let Some((line, columns)) = link {
+        let cells = metrics.cell_bounds(origin, line, columns.start, columns.len());
+        let y = cells.origin.y + cells.size.height - px(2.);
+        let underline = Bounds::new(point(cells.origin.x, y), size(cells.size.width, px(1.)));
+        window.paint_quad(fill(underline, hsla(frame.foreground)));
+    }
+
     if let Some(text) = marked_text.filter(|text| !text.is_empty()) {
         paint_marked_text(origin, frame, text, metrics, window, cx);
     } else if let Some(cursor) = frame.cursor.filter(|_| cursor_visible || !focused) {
         paint_cursor(origin, frame, cursor, focused, metrics, window, cx);
+    }
+
+    if flash > 0. {
+        window.paint_quad(fill(bounds, Hsla { a: 0.14 * flash, ..hsla(frame.foreground) }));
     }
 }
 

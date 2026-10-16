@@ -24,6 +24,14 @@ option-as-meta = true
 
 cursor-blink = true
 
+# The bell flashes the pane; it can also play the system alert sound. A bell
+# in a pane you can't see marks it in the sidebar and notifies instead.
+visual-bell = true
+bell-sound = false
+
+# Copy text to the clipboard as soon as it's selected.
+copy-on-select = false
+
 # Foreground programs shown as coding agents in the sidebar.
 agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"]
 
@@ -54,6 +62,7 @@ latest = "claude --continue"
 # background = "#161a22"
 # cursor = "#e6e6e6"
 # selection = "#3d5a8a"
+# search-match = "#6b5a2a"
 # The 16 ANSI colors: black, red, green, yellow, blue, magenta, cyan, white,
 # then their bright versions. A shorter list overrides only the first ones.
 # palette = [

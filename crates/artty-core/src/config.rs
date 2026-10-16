@@ -36,6 +36,12 @@ pub struct Config {
     pub notifications: bool,
     /// Set up zsh and bash to report prompts and commands (fish does natively).
     pub shell_integration: bool,
+    /// Flash the pane on the bell.
+    pub visual_bell: bool,
+    /// Play the system alert sound on the bell.
+    pub bell_sound: bool,
+    /// Copy text to the clipboard as soon as it's selected.
+    pub copy_on_select: bool,
     /// Reopen the previous tabs on launch.
     pub restore_sessions: bool,
     /// Lines of each tab's output to save and show again; 0 saves none.
@@ -88,6 +94,9 @@ impl Default for Config {
             agents: DEFAULT_AGENTS.iter().map(|&s| s.to_owned()).collect(),
             notifications: true,
             shell_integration: true,
+            visual_bell: true,
+            bell_sound: false,
+            copy_on_select: false,
             restore_sessions: true,
             restore_scrollback: 1000,
             resume_agents: true,
@@ -115,6 +124,8 @@ pub struct Colors {
     pub cursor: Option<Rgb>,
     #[serde(deserialize_with = "color")]
     pub selection: Option<Rgb>,
+    #[serde(deserialize_with = "color")]
+    pub search_match: Option<Rgb>,
     /// The 16 ANSI colors, normal then bright; may be shorter than 16.
     #[serde(deserialize_with = "palette")]
     pub palette: Vec<Rgb>,
@@ -174,6 +185,7 @@ impl Config {
         theme.background = colors.background.unwrap_or(theme.background);
         theme.cursor = colors.cursor.unwrap_or(theme.cursor);
         theme.selection = colors.selection.unwrap_or(theme.selection);
+        theme.search_match = colors.search_match.unwrap_or(theme.search_match);
         theme.ansi[..colors.palette.len()].copy_from_slice(&colors.palette);
         theme
     }

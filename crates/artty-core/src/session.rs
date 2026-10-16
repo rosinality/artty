@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
+use std::ops::Range;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
@@ -12,7 +13,7 @@ use artty_vt::grid::{Dimensions, Scroll};
 use artty_vt::index::{Boundary, Column, Direction, Line, Point, Side};
 use artty_vt::selection::{Selection, SelectionType};
 use artty_vt::sync::FairMutex;
-use artty_vt::term::search::RegexSearch;
+use artty_vt::term::search::{RegexIter, RegexSearch};
 use artty_vt::term::{ClipboardType, Config, Term};
 use artty_vt::tty;
 use log::warn;
@@ -250,9 +251,19 @@ impl Session {
         self.term.lock().selection_to_string().filter(|text| !text.is_empty())
     }
 
-    /// Snapshot of the visible screen for rendering.
-    pub fn frame(&self) -> Frame {
-        Frame::capture(&self.term.lock(), &self.theme)
+    /// Snapshot of the visible screen for rendering, with every visible
+    /// match of the current search.
+    pub fn frame(&mut self) -> Frame {
+        let term = self.term.lock();
+        let mut matches = Vec::new();
+        if let Some((_, regex)) = self.search.as_mut() {
+            let top = Line(-(term.grid().display_offset() as i32));
+            let bottom = Line(top.0 + term.screen_lines() as i32 - 1);
+            let (start, end) = (Point::new(top, Column(0)), Point::new(bottom, term.last_column()));
+            // Bounded: a pathological pattern can't stall rendering.
+            matches.extend(RegexIter::new(start, end, Direction::Right, &term, regex).take(1000));
+        }
+        Frame::capture(&term, &self.theme, &matches)
     }
 
     /// Whether the program wants mouse/keyboard input in a special mode, e.g.
@@ -348,12 +359,20 @@ impl Session {
 
     /// The link under a viewport cell: an OSC 8 hyperlink, or a URL in the text.
     pub fn link_at(&self, line: usize, column: usize) -> Option<String> {
+        self.link_span(line, column).map(|(url, _)| url)
+    }
+
+    /// The link under a viewport cell and the columns it covers on that line.
+    pub fn link_span(&self, line: usize, column: usize) -> Option<(String, Range<usize>)> {
         let term = self.term.lock();
         let point = viewport_point(&term, line, column);
-        if let Some(link) = term.grid()[point].hyperlink() {
-            return Some(link.uri().to_owned());
-        }
         let row = &term.grid()[point.line];
+        if let Some(link) = row[point.column].hyperlink() {
+            let same = |c: usize| row[Column(c)].hyperlink().is_some_and(|other| other.id() == link.id());
+            let start = (0..point.column.0).rev().take_while(|&c| same(c)).last().unwrap_or(point.column.0);
+            let end = (point.column.0..term.columns()).take_while(|&c| same(c)).last().unwrap_or(point.column.0) + 1;
+            return Some((link.uri().to_owned(), start..end));
+        }
         let text: Vec<char> = (0..term.columns()).map(|c| row[Column(c)].c).collect();
         url_at(&text, point.column.0)
     }
@@ -429,8 +448,8 @@ fn trim_lines(text: String) -> String {
     lines[..end].join("\n")
 }
 
-/// A URL in `line` covering `column`.
-fn url_at(line: &[char], column: usize) -> Option<String> {
+/// A URL in `line` covering `column`, and the columns it spans.
+fn url_at(line: &[char], column: usize) -> Option<(String, Range<usize>)> {
     const SCHEMES: [&str; 4] = ["https://", "http://", "file://", "mailto:"];
     let is_url_char = |c: char| !c.is_whitespace() && !matches!(c, '<' | '>' | '"' | '`' | '\0');
 
@@ -454,7 +473,9 @@ fn url_at(line: &[char], column: usize) -> Option<String> {
     while url.ends_with(')') && url.matches(')').count() > url.matches('(').count() {
         url.pop();
     }
-    Some(url)
+    let first = start + word[..offset].chars().count();
+    let span = first..first + url.chars().count();
+    span.contains(&column).then_some((url, span))
 }
 
 impl Drop for Session {
@@ -468,7 +489,7 @@ mod tests {
     use super::*;
 
     fn url(text: &str, column: usize) -> Option<String> {
-        url_at(&text.chars().collect::<Vec<_>>(), column)
+        url_at(&text.chars().collect::<Vec<_>>(), column).map(|(url, _)| url)
     }
 
     #[test]
@@ -478,6 +499,10 @@ mod tests {
         assert_eq!(url(text, 1), None);
         assert_eq!(url("go to http://x.io/y.", 8).as_deref(), Some("http://x.io/y"));
         assert_eq!(url("no link here", 3), None);
+        // Trailing punctuation isn't part of the link, or its span.
+        assert_eq!(url("go to http://x.io/y.", 19), None);
+        let (_, span) = url_at(&"see (https://a.io) x".chars().collect::<Vec<_>>(), 6).unwrap();
+        assert_eq!(span, 5..17);
     }
 
     /// A session running `printf` with `text`, once its output has arrived.
@@ -508,10 +533,15 @@ mod tests {
         assert_eq!(frame.lines[2].selection.first().map(|r| r.column), Some(4));
         assert_eq!(session.search("fo+", true), Ok(true));
         assert_eq!(session.frame().lines[0].selection.first().map(|r| r.column), Some(0));
+        // Every visible match is highlighted.
+        let lines = session.frame().lines;
+        let matched: Vec<_> = lines.iter().map(|l| l.matches.iter().map(|r| (r.column, r.width)).collect::<Vec<_>>()).collect();
+        assert_eq!(&matched[..3], &[vec![(0, 3)], vec![], vec![(4, 3)]]);
         assert_eq!(session.search("nothing", true), Ok(false));
         assert!(session.search("(", true).is_err());
 
         assert_eq!(session.link_at(1, 10).as_deref(), Some("https://example.com/x"));
+        assert_eq!(session.link_span(1, 10).map(|(_, span)| span), Some(4..25));
         assert_eq!(session.link_at(0, 1), None);
     }
 

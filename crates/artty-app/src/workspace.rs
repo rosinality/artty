@@ -81,6 +81,8 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 const SAVE_EVERY_POLLS: u32 = 5;
 /// Shown under a restored pane's old output.
 const RESTORED_BANNER: &str = "\r\n\x1b[2m── restored ──\x1b[0m\r\n";
+/// How long the visual bell flash lasts.
+const FLASH: Duration = Duration::from_millis(220);
 /// Background commands running at least this long notify when they finish.
 const LONG_COMMAND: Duration = Duration::from_secs(10);
 const MIN_FONT_SIZE: f32 = 6.;
@@ -182,6 +184,9 @@ pub struct Workspace {
     last_mouse_cell: Option<(usize, usize)>,
     /// Sub-line remainder of trackpad scrolling.
     scroll_remainder: f32,
+    mouse_position: Option<Point<Pixels>>,
+    /// The link under the pointer while ⌘ is held: pane, line, columns.
+    hover_link: Option<(PaneId, usize, Range<usize>)>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -196,6 +201,15 @@ fn agents_of(config: &Config) -> Arc<[String]> {
 
 fn bounds(rect: Rect) -> Bounds<Pixels> {
     Bounds::new(point(px(rect.x), px(rect.y)), size(px(rect.width), px(rect.height)))
+}
+
+/// Play the system alert sound.
+fn beep() {
+    let _ = std::process::Command::new("osascript")
+        .args(["-e", "beep"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 /// Post a macOS notification.
@@ -325,6 +339,8 @@ impl Workspace {
             reporting_button: None,
             last_mouse_cell: None,
             scroll_remainder: 0.,
+            mouse_position: None,
+            hover_link: None,
             _tasks: vec![events, requests, blink, poll, spinner],
             _subscriptions: vec![activation, quit],
         };
@@ -730,9 +746,16 @@ impl Workspace {
                 Notice::Title(title) => pane.set_title(Some(title)),
                 Notice::ResetTitle => pane.set_title(None),
                 Notice::Bell => {
-                    if !visible {
+                    if visible {
+                        if self.config.visual_bell {
+                            pane.flash = Some(Instant::now());
+                        }
+                    } else {
                         pane.alert(None);
                         self.notify_user(id, None, "Bell");
+                    }
+                    if self.config.bell_sound {
+                        beep();
                     }
                 }
                 Notice::Notification { title, body } => {
@@ -946,6 +969,35 @@ impl Workspace {
     fn spin(&mut self, cx: &mut Context<Self>) {
         if self.panes.values().any(|pane| pane.status.busy()) {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER.len();
+            cx.notify();
+        }
+        // Animate visual bells, and clear finished ones.
+        let mut flashing = false;
+        for pane in self.panes.values_mut() {
+            if pane.flash.is_some_and(|at| at.elapsed() > FLASH) {
+                pane.flash = None;
+                flashing = true;
+            }
+            flashing |= pane.flash.is_some();
+        }
+        if flashing {
+            cx.notify();
+        }
+    }
+
+    /// Underline the link under the pointer while ⌘ is held.
+    fn update_hover_link(&mut self, platform: bool, cx: &mut Context<Self>) {
+        let hover = platform
+            .then_some(self.mouse_position)
+            .flatten()
+            .and_then(|position| {
+                let (id, _) = self.pane_at(position)?;
+                let (line, column, _) = self.cell_at(id, position);
+                let (_, span) = self.panes.get(&id)?.session.link_span(line, column)?;
+                Some((id, line, span))
+            });
+        if hover != self.hover_link {
+            self.hover_link = hover;
             cx.notify();
         }
     }
@@ -1174,6 +1226,8 @@ impl Workspace {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        self.mouse_position = Some(event.position);
+        self.update_hover_link(event.modifiers.platform, cx);
         if let Some(divider) = &self.drag {
             let ratio = layout::drag_ratio(divider, event.position.x.into(), event.position.y.into(), SPLIT_GAP);
             let path = divider.path.clone();
@@ -1215,11 +1269,15 @@ impl Workspace {
         }
         if self.selecting {
             self.selecting = false;
-            // A plain click selects nothing; drop the empty selection.
-            if let Some(pane) = id.and_then(|id| self.panes.get(&id))
-                && pane.session.selection_text().is_none()
-            {
-                pane.session.clear_selection();
+            if let Some(pane) = id.and_then(|id| self.panes.get(&id)) {
+                match pane.session.selection_text() {
+                    Some(text) if self.config.copy_on_select => {
+                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    }
+                    Some(_) => {}
+                    // A plain click selects nothing; drop the empty selection.
+                    None => pane.session.clear_selection(),
+                }
             }
             cx.notify();
         }
@@ -1601,6 +1659,8 @@ struct PaneView {
     rect: Rect,
     frame: artty_core::Frame,
     focused: bool,
+    link: Option<(usize, Range<usize>)>,
+    flash: f32,
 }
 
 impl Render for Workspace {
@@ -1636,14 +1696,13 @@ impl Render for Workspace {
 
         let focused_id = self.focused_id();
         let split = self.pane_rects.len() > 1;
-        let views: Vec<PaneView> = self
-            .pane_rects
-            .iter()
-            .filter_map(|(id, rect)| {
-                let frame = self.panes.get(id)?.session.frame();
-                Some(PaneView { rect: *rect, frame, focused: Some(*id) == focused_id })
-            })
-            .collect();
+        let mut views = Vec::new();
+        for (id, rect) in self.pane_rects.clone() {
+            let Some(pane) = self.panes.get_mut(&id) else { continue };
+            let link = self.hover_link.as_ref().filter(|(pane, ..)| *pane == id).map(|(_, line, span)| (*line, span.clone()));
+            let flash = pane.flash.map_or(0., |at| 1. - (at.elapsed().as_secs_f32() / FLASH.as_secs_f32()).min(1.));
+            views.push(PaneView { rect, frame: pane.session.frame(), focused: Some(id) == focused_id, link, flash });
+        }
         self.cursor = views.iter().find(|view| view.focused).and_then(|view| view.frame.cursor);
 
         let window_focused = self.focus.is_focused(window) && self.window_active;
@@ -1737,6 +1796,9 @@ impl Render for Workspace {
                 this.set_font_size(this.config.font_size, window, cx)
             }))
             .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                this.update_hover_link(event.modifiers.platform, cx);
+            }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
@@ -1773,6 +1835,7 @@ impl Render for Workspace {
                             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
                             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
                             .on_scroll_wheel(cx.listener(Self::scroll))
+                            .when(self.hover_link.is_some(), |d| d.cursor_pointer())
                             .child(
                                 canvas(
                                     |_, _, _| {},
@@ -1781,13 +1844,15 @@ impl Render for Workspace {
                                             window.handle_input(&focus, ElementInputHandler::new(bounds(rect), entity), cx);
                                         }
                                         for view in &views {
-                                            let cursor = terminal::CursorState {
+                                            let state = terminal::PaintState {
                                                 focused: view.focused && typing,
-                                                visible: cursor_visible,
+                                                cursor_visible,
                                                 marked_text: marked_text.as_deref().filter(|_| view.focused),
                                                 fade: if split && !view.focused { UNFOCUSED_FADE } else { 0. },
+                                                link: view.link.clone(),
+                                                flash: view.flash,
                                             };
-                                            terminal::paint(bounds(view.rect), &view.frame, &metrics, cursor, window, cx);
+                                            terminal::paint(bounds(view.rect), &view.frame, &metrics, state, window, cx);
                                         }
                                         for line in &divider_lines {
                                             window.paint_quad(fill(*line, divider_color));
