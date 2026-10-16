@@ -28,11 +28,15 @@ pub struct FrameLine {
     pub runs: Vec<FrameRun>,
     /// Cells whose background differs from the default background.
     pub backgrounds: Vec<FrameRect>,
+    /// Selected cells, drawn over the backgrounds.
+    pub selection: Vec<FrameRect>,
 }
 
 #[derive(Clone, Debug)]
 pub struct FrameRun {
     pub column: usize,
+    /// Number of cells the run covers (2 for a double-width character).
+    pub cells: usize,
     pub text: String,
     pub fg: Rgb,
     pub bold: bool,
@@ -55,6 +59,7 @@ pub struct FrameCursor {
     pub shape: CursorShape,
     /// The cursor is on a double-width character.
     pub wide: bool,
+    pub blinking: bool,
     pub color: Rgb,
 }
 
@@ -71,6 +76,8 @@ impl Frame {
     pub(crate) fn capture<T: EventListener>(term: &Term<T>, theme: &Theme) -> Self {
         let content = term.renderable_content();
         let colors = content.colors;
+        let selection = content.selection;
+        let (cursor_point, cursor_shape) = (content.cursor.point, content.cursor.shape);
         let display_offset = content.display_offset;
         let background = theme.resolve(
             artty_vt::ansi::Color::Named(artty_vt::ansi::NamedColor::Background),
@@ -100,13 +107,17 @@ impl Frame {
                 }
             }
             let (_, b) = builder.as_mut().unwrap();
-            b.push(indexed.point.column.0, &indexed.cell, theme, colors, background);
+            let selected =
+                selection.is_some_and(|s| s.contains_cell(&indexed, cursor_point, cursor_shape));
+            if selected {
+                b.select(indexed.point.column.0, indexed.cell.flags, theme.selection);
+            }
+            b.push(indexed.point.column.0, indexed.cell, theme, colors, background);
         }
         if let Some((done, b)) = builder.take() {
             lines[done] = b.finish();
         }
 
-        let cursor_point = content.cursor.point;
         let cursor_line = cursor_point.line.0 + display_offset as i32;
         let cursor = (content.cursor.shape != CursorShape::Hidden
             && (0..screen_lines as i32).contains(&cursor_line))
@@ -115,6 +126,7 @@ impl Frame {
             column: cursor_point.column.0,
             shape: content.cursor.shape,
             wide: term.grid()[cursor_point].flags.contains(Flags::WIDE_CHAR),
+            blinking: term.cursor_style().blinking,
             color: colors[artty_vt::ansi::NamedColor::Cursor].unwrap_or(theme.cursor),
         });
 
@@ -129,6 +141,17 @@ struct LineBuilder {
 }
 
 impl LineBuilder {
+    fn select(&mut self, column: usize, flags: Flags, color: Rgb) {
+        if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+            return;
+        }
+        let width = if flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+        match self.line.selection.last_mut() {
+            Some(rect) if rect.column + rect.width == column => rect.width += width,
+            _ => self.line.selection.push(FrameRect { column, width, color }),
+        }
+    }
+
     fn push(
         &mut self,
         column: usize,
@@ -164,12 +187,11 @@ impl LineBuilder {
         if cell.c == ' ' && cell.zerowidth().is_none() || flags.contains(Flags::HIDDEN) {
             // Blank cells only matter as a gap: end the run unless it can absorb
             // the space and stay on the grid.
-            if let Some((run, _)) = &mut self.run {
-                if run.column + run.text.len() == column {
+            if let Some((run, _)) = &mut self.run
+                && run.column + run.text.len() == column {
                     run.text.push(' ');
                     return;
                 }
-            }
             self.flush();
             return;
         }
@@ -183,8 +205,8 @@ impl LineBuilder {
         };
         let ascii = cell.c.is_ascii() && cell.zerowidth().is_none();
 
-        if ascii {
-            if let Some((run, run_style)) = &mut self.run {
+        if ascii
+            && let Some((run, run_style)) = &mut self.run {
                 // `text.len()` equals the cell count only for all-ASCII runs,
                 // which are the only runs we ever extend.
                 if *run_style == style && run.column + run.text.len() == column {
@@ -192,7 +214,6 @@ impl LineBuilder {
                     return;
                 }
             }
-        }
 
         self.flush();
         let mut text = String::from(cell.c);
@@ -201,6 +222,7 @@ impl LineBuilder {
         }
         let run = FrameRun {
             column,
+            cells: width,
             text,
             fg: style.fg,
             bold: style.bold,
@@ -218,6 +240,7 @@ impl LineBuilder {
     fn flush(&mut self) {
         if let Some((mut run, _)) = self.run.take() {
             run.text.truncate(run.text.trim_end().len());
+            run.cells = run.text.len();
             self.line.runs.push(run);
         }
     }
@@ -259,6 +282,8 @@ mod tests {
     fn wide_and_non_ascii_chars_get_their_own_runs() {
         let frame = frame_for("a한b✳c".as_bytes());
         assert_eq!(texts(&frame.lines[0]), vec![(0, "a"), (1, "한"), (3, "b"), (4, "✳"), (5, "c")]);
+        let cells: Vec<_> = frame.lines[0].runs.iter().map(|r| r.cells).collect();
+        assert_eq!(cells, vec![1, 2, 1, 1, 1]);
     }
 
     #[test]
@@ -266,6 +291,24 @@ mod tests {
         let frame = frame_for(b"x\x1b[44mbg\x1b[0my");
         let rects: Vec<_> = frame.lines[0].backgrounds.iter().map(|r| (r.column, r.width)).collect();
         assert_eq!(rects, vec![(1, 2)]);
+    }
+
+    #[test]
+    fn selection_becomes_rects() {
+        use artty_vt::index::{Column, Line, Point, Side};
+        use artty_vt::selection::{Selection, SelectionType};
+
+        let size = TerminalSize { columns: 20, lines: 3, cell_width: 8, cell_height: 16 };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        Processor::<artty_vt::ansi::StdSyncHandler>::new().advance(&mut term, b"hello world");
+        let mut selection = Selection::new(SelectionType::Simple, Point::new(Line(0), Column(1)), Side::Left);
+        selection.update(Point::new(Line(0), Column(4)), Side::Right);
+        term.selection = Some(selection);
+
+        let frame = Frame::capture(&term, &Theme::default());
+        let rects: Vec<_> = frame.lines[0].selection.iter().map(|r| (r.column, r.width)).collect();
+        assert_eq!(rects, vec![(1, 4)]);
+        assert_eq!(term.selection_to_string().as_deref(), Some("ello"));
     }
 
     #[test]

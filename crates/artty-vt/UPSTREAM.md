@@ -18,3 +18,5 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
 - `term/mod.rs`: the secondary device attributes reply reports artty's version,
   so the test asserting an Alacritty-era version number was removed.
 - `tty/unix.rs`: children get `ARTTY_SESSION_ID` instead of `ALACRITTY_WINDOW_ID`.
+- `tty/unix.rs`: the login shell from the account database wins over `$SHELL`.
+- `lib.rs`: dropped `cfg_attr(clippy, deny(warnings))` so newer clippy lints in upstream code are warnings, not errors.

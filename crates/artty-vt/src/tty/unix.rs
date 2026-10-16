@@ -146,11 +146,13 @@ impl ShellUser {
             },
         };
 
-        let shell = match env::var("SHELL") {
-            Ok(shell) => shell,
-            Err(_) => match pw {
-                Ok(ref pw) => pw.shell.to_owned(),
-                Err(err) => return Err(err),
+        // Prefer the account's login shell: `$SHELL` is inherited from whatever
+        // launched us, which need not be the user's shell (artty change).
+        let shell = match pw {
+            Ok(ref pw) if !pw.shell.is_empty() => pw.shell.to_owned(),
+            _ => match env::var("SHELL") {
+                Ok(shell) => shell,
+                Err(_) => return Err(pw.err().unwrap_or_else(|| Error::other("no login shell"))),
             },
         };
 

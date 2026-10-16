@@ -2,28 +2,50 @@
 
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use artty_core::vt::event::Event;
+use artty_core::vt::index::Side;
+use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
-use artty_core::{FrameCursor, Notice, Session, SessionId, SessionOptions, TerminalSize, Theme};
+use artty_core::{
+    Config, FrameCursor, Notice, Session, SessionId, SessionOptions, TerminalSize, Theme,
+};
 use futures::StreamExt;
 use futures::channel::mpsc;
 use gpui::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    FontWeight, Hsla, KeyDownEvent, MouseButton, Pixels, ScrollDelta, ScrollWheelEvent,
-    SharedString, Task, UTF16Selection, Window, actions, canvas, div, prelude::*, px, rgba,
+    FontWeight, Hsla, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task,
+    UTF16Selection, Window, actions, canvas, div, point, prelude::*, px, rgba,
 };
 
 use crate::keys;
+use crate::mouse::{self, Action, Button};
 use crate::terminal::{self, Metrics, hsla};
 
-actions!(artty, [NewTab, CloseTab, NextTab, PreviousTab, Paste]);
+actions!(
+    artty,
+    [
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        Copy,
+        Paste,
+        IncreaseFontSize,
+        DecreaseFontSize,
+        ResetFontSize
+    ]
+);
 
 pub const SIDEBAR_WIDTH: f32 = 232.;
 const TAB_LABEL_WIDTH: f32 = 28.;
 const TITLEBAR_HEIGHT: f32 = 32.;
 const PADDING: f32 = 12.;
-const BACKGROUND_ALPHA: f32 = 0.72;
+const BLINK_INTERVAL: Duration = Duration::from_millis(530);
+const MIN_FONT_SIZE: f32 = 6.;
+const MAX_FONT_SIZE: f32 = 72.;
 
 struct Tab {
     session: Session,
@@ -40,7 +62,10 @@ impl Tab {
 
 pub struct Workspace {
     focus: FocusHandle,
+    config: Arc<Config>,
+    config_error: Option<String>,
     theme: Arc<Theme>,
+    font_size: f32,
     metrics: Metrics,
     tabs: Vec<Tab>,
     active: usize,
@@ -50,13 +75,31 @@ pub struct Workspace {
     marked_text: Option<String>,
     /// Cursor position from the last render, for placing the IME window.
     cursor: Option<FrameCursor>,
+    cursor_visible: bool,
+    /// Whether the cursor should blink, as of the last render.
+    blink_enabled: bool,
+    /// Skip one blink so the cursor stays solid while typing.
+    blink_hold: bool,
+    /// A mouse drag is extending the selection.
+    selecting: bool,
+    /// Button held down while the program receives mouse reports.
+    reporting_button: Option<Button>,
+    /// Last cell reported for motion, to avoid duplicate reports.
+    last_mouse_cell: Option<(usize, usize)>,
     /// Sub-line remainder of trackpad scrolling.
     scroll_remainder: f32,
-    _events: Task<()>,
+    _tasks: Vec<Task<()>>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        config: Config,
+        config_error: Option<String>,
+        command: Option<Vec<String>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (tx, mut rx) = mpsc::unbounded::<(SessionId, Event)>();
         let sink: Arc<dyn Fn(SessionId, Event) + Send + Sync> =
             Arc::new(move |id, event| {
@@ -76,23 +119,50 @@ impl Workspace {
                 }
             }
         });
+        let blink = cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(BLINK_INTERVAL).await;
+                if this.update(cx, |this, cx| this.blink(cx)).is_err() {
+                    break;
+                }
+            }
+        });
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.report_focus(window.is_window_active());
+            cx.notify();
+        });
+
+        if let Some(error) = &config_error {
+            log::error!("config: {error}");
+        }
 
         let focus = cx.focus_handle();
         focus.focus(window);
+        let font_size = config.font_size;
         let mut this = Self {
             focus,
-            theme: Arc::new(Theme::default()),
-            metrics: Metrics::measure(window),
+            theme: Arc::new(config.theme()),
+            metrics: Metrics::measure(window, &config, font_size),
+            font_size,
+            config: Arc::new(config),
+            config_error,
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
             sink,
             marked_text: None,
             cursor: None,
+            cursor_visible: true,
+            blink_enabled: false,
+            blink_hold: false,
+            selecting: false,
+            reporting_button: None,
+            last_mouse_cell: None,
             scroll_remainder: 0.,
-            _events: events,
+            _tasks: vec![events, blink],
+            _subscriptions: vec![activation],
         };
-        this.new_tab(window, cx);
+        this.open_tab(command, window, cx);
         this
     }
 
@@ -108,11 +178,35 @@ impl Workspace {
         }
     }
 
-    fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Top-left of the cell grid in window coordinates; matches the layout in
+    /// `render`.
+    fn grid_origin() -> Point<Pixels> {
+        point(px(SIDEBAR_WIDTH + PADDING), px(TITLEBAR_HEIGHT))
+    }
+
+    /// The viewport cell under a window position, and which half of it.
+    fn cell_at(&self, position: Point<Pixels>) -> (usize, usize, Side) {
+        let size = self.active_session().map(Session::size);
+        let (columns, lines) = size.map_or((1, 1), |s| (s.columns as usize, s.lines as usize));
+        let offset = position - Self::grid_origin();
+        let x = (offset.x / self.metrics.cell_width).max(0.);
+        let y = (offset.y / self.metrics.line_height).max(0.);
+        let column = (x as usize).min(columns - 1);
+        let side = if x.fract() < 0.5 || x as usize >= columns { Side::Left } else { Side::Right };
+        ((y as usize).min(lines - 1), column, side)
+    }
+
+    fn open_tab(&mut self, command: Option<Vec<String>>, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.next_id;
         self.next_id += 1;
+        let command = command.or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
+        let options = SessionOptions {
+            command: command.map(|mut c| (c.remove(0), c)),
+            scrollback: Some(self.config.scrollback),
+            ..Default::default()
+        };
         let size = self.terminal_size(window);
-        match Session::spawn(id, SessionOptions::default(), size, self.theme.clone(), self.sink.clone()) {
+        match Session::spawn(id, options, size, self.theme.clone(), self.sink.clone()) {
             Ok(session) => {
                 self.tabs.push(Tab { session, title: None, bell: false });
                 self.select(self.tabs.len() - 1, cx);
@@ -126,6 +220,8 @@ impl Workspace {
             tab.bell = false;
             self.active = index;
             self.marked_text = None;
+            self.selecting = false;
+            self.reporting_button = None;
             cx.notify();
         }
     }
@@ -174,6 +270,35 @@ impl Workspace {
         self.tabs.get(self.active).map(|tab| &tab.session)
     }
 
+    /// Send user input to the active session, keeping the cursor solid.
+    fn input(&mut self, bytes: Vec<u8>) {
+        if let Some(session) = self.active_session() {
+            session.write(bytes);
+        }
+        self.cursor_visible = true;
+        self.blink_hold = true;
+    }
+
+    fn blink(&mut self, cx: &mut Context<Self>) {
+        if self.blink_hold {
+            self.blink_hold = false;
+        } else if self.blink_enabled {
+            self.cursor_visible = !self.cursor_visible;
+            cx.notify();
+        } else if !self.cursor_visible {
+            self.cursor_visible = true;
+            cx.notify();
+        }
+    }
+
+    fn report_focus(&self, focused: bool) {
+        if let Some(session) = self.active_session()
+            && session.mode().contains(TermMode::FOCUS_IN_OUT)
+        {
+            session.write(if focused { &b"\x1b[I"[..] } else { &b"\x1b[O"[..] });
+        }
+    }
+
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform {
@@ -184,9 +309,90 @@ impl Workspace {
             return;
         }
         let Some(session) = self.active_session() else { return };
-        if let Some(bytes) = keys::to_esc(keystroke, session.mode()) {
-            session.write(bytes);
+        if let Some(bytes) = keys::to_esc(keystroke, session.mode(), self.config.option_as_meta) {
+            self.input(bytes);
             cx.stop_propagation();
+        }
+    }
+
+    /// Whether mouse events go to the program instead of selecting text.
+    /// Holding Shift always selects, as in other terminals.
+    fn mouse_reporting(&self, modifiers: &Modifiers) -> Option<TermMode> {
+        let mode = self.active_session()?.mode();
+        (mode.intersects(TermMode::MOUSE_MODE) && !modifiers.shift).then_some(mode)
+    }
+
+    fn report_mouse(&mut self, button: Button, action: Action, position: Point<Pixels>, modifiers: &Modifiers) {
+        let Some(mode) = self.mouse_reporting(modifiers) else { return };
+        let (line, column, _) = self.cell_at(position);
+        if action == Action::Motion && self.last_mouse_cell == Some((line, column)) {
+            return;
+        }
+        self.last_mouse_cell = Some((line, column));
+        if let Some(bytes) = mouse::report(button, action, line, column, modifiers, mode) {
+            self.input(bytes);
+        }
+    }
+
+    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window);
+        if self.mouse_reporting(&event.modifiers).is_some() {
+            if let Some(button) = Button::from_gpui(event.button) {
+                self.reporting_button = Some(button);
+                self.last_mouse_cell = None;
+                self.report_mouse(button, Action::Press, event.position, &event.modifiers);
+            }
+            return;
+        }
+        if event.button != MouseButton::Left {
+            return;
+        }
+        let (line, column, side) = self.cell_at(event.position);
+        let Some(session) = self.active_session() else { return };
+        if event.modifiers.shift && session.selection_text().is_some() {
+            session.update_selection(line, column, side);
+        } else {
+            let kind = match event.click_count {
+                0 | 1 => SelectionType::Simple,
+                2 => SelectionType::Semantic,
+                _ => SelectionType::Lines,
+            };
+            session.start_selection(kind, line, column, side);
+        }
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(button) = self.reporting_button {
+            self.report_mouse(button, Action::Motion, event.position, &event.modifiers);
+            return;
+        }
+        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
+            let (line, column, side) = self.cell_at(event.position);
+            if let Some(session) = self.active_session() {
+                session.update_selection(line, column, side);
+            }
+            cx.notify();
+        } else if event.pressed_button.is_none() && event.position.x > Self::grid_origin().x {
+            self.report_mouse(Button::None, Action::Motion, event.position, &event.modifiers);
+        }
+    }
+
+    fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(button) = self.reporting_button.take() {
+            self.report_mouse(button, Action::Release, event.position, &event.modifiers);
+            return;
+        }
+        if self.selecting {
+            self.selecting = false;
+            // A plain click selects nothing; drop the empty selection.
+            if let Some(session) = self.active_session()
+                && session.selection_text().is_none()
+            {
+                session.clear_selection();
+            }
+            cx.notify();
         }
     }
 
@@ -200,12 +406,17 @@ impl Workspace {
                 whole
             }
         } as i32;
-        let Some(session) = self.active_session() else { return };
         if lines == 0 {
             return;
         }
+        let Some(session) = self.active_session() else { return };
         let mode = session.mode();
-        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
+        if self.mouse_reporting(&event.modifiers).is_some() {
+            let button = if lines > 0 { Button::WheelUp } else { Button::WheelDown };
+            for _ in 0..lines.unsigned_abs() {
+                self.report_mouse(button, Action::Press, event.position, &event.modifiers);
+            }
+        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
             // Full-screen programs (less, vim) get arrow keys instead.
             let key = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
                 (true, true) => b"\x1bOA".as_slice(),
@@ -213,11 +424,17 @@ impl Workspace {
                 (false, true) => b"\x1bOB",
                 (false, false) => b"\x1b[B",
             };
-            session.write(key.repeat(lines.unsigned_abs() as usize));
+            self.input(key.repeat(lines.unsigned_abs() as usize));
         } else {
             session.scroll(lines);
         }
         cx.notify();
+    }
+
+    fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(text) = self.active_session().and_then(Session::selection_text) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
@@ -229,7 +446,13 @@ impl Workspace {
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")
         };
-        session.write(bytes.into_bytes());
+        self.input(bytes.into_bytes());
+    }
+
+    fn set_font_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
+        self.font_size = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        self.metrics = Metrics::measure(window, &self.config, self.font_size);
+        cx.notify();
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -283,6 +506,7 @@ impl Workspace {
             .border_color(rgba(0xffffff12))
             .pt(px(44.))
             .px(px(8.))
+            .pb(px(10.))
             .text_size(px(12.5))
             .child(
                 div()
@@ -303,29 +527,42 @@ impl Workspace {
                             .hover(|d| d.bg(rgba(0xffffff14)))
                             .text_size(px(14.))
                             .child("+")
-                            .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.open_tab(None, window, cx))),
                     ),
             )
-            .child(div().flex().flex_col().gap(px(3.)).children(rows))
+            .child(div().flex().flex_col().flex_1().gap(px(3.)).children(rows))
+            .when_some(self.config_error.clone(), |d, error| {
+                d.child(
+                    div()
+                        .px_2()
+                        .text_xs()
+                        .text_color(rgba(0xf7768eff))
+                        .child(format!("Config error — using defaults. {error}")),
+                )
+            })
     }
 }
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let size = self.terminal_size(window);
-        let frame = self.tabs.get_mut(self.active).map(|tab| {
+        for tab in &mut self.tabs {
             tab.session.resize(size);
-            tab.session.frame()
-        });
+        }
+        let frame = self.active_session().map(Session::frame);
         self.cursor = frame.as_ref().and_then(|frame| frame.cursor);
+
+        let focused = self.focus.is_focused(window) && window.is_window_active();
+        self.blink_enabled =
+            focused && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
         let title = self.tabs.get(self.active).map(Tab::title).unwrap_or_default();
         window.set_window_title(&title);
 
-        let tint = Hsla { a: BACKGROUND_ALPHA, ..hsla(self.theme.background) };
-        let focused = self.focus.is_focused(window);
+        let tint = Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
         let metrics = self.metrics.clone();
         let marked_text = self.marked_text.clone();
+        let cursor_visible = self.cursor_visible;
         let focus = self.focus.clone();
         let entity = cx.entity();
 
@@ -333,7 +570,7 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .key_context("Workspace")
             .on_key_down(cx.listener(Self::key_down))
-            .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| this.open_tab(None, window, cx)))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
                 if let Some(id) = this.active_session().map(Session::id) {
                     this.close(id, cx);
@@ -347,7 +584,21 @@ impl Render for Workspace {
                 let count = this.tabs.len().max(1);
                 this.select((this.active + count - 1) % count, cx);
             }))
+            .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .on_action(cx.listener(|this, _: &IncreaseFontSize, window, cx| {
+                this.set_font_size(this.font_size + 1., window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &DecreaseFontSize, window, cx| {
+                this.set_font_size(this.font_size - 1., window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ResetFontSize, window, cx| {
+                this.set_font_size(this.config.font_size, window, cx)
+            }))
+            .on_mouse_move(cx.listener(Self::mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
             .flex()
             .size_full()
             .bg(tint)
@@ -377,7 +628,9 @@ impl Render for Workspace {
                             .flex_1()
                             .min_h_0()
                             .px(px(PADDING))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, _| this.focus.focus(window)))
+                            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                            .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
+                            .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
                             .on_scroll_wheel(cx.listener(Self::scroll))
                             .child(
                                 canvas(
@@ -385,7 +638,12 @@ impl Render for Workspace {
                                     move |bounds, _, window, cx| {
                                         window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx);
                                         if let Some(frame) = frame {
-                                            terminal::paint(bounds, &frame, &metrics, focused, marked_text.as_deref(), window, cx);
+                                            let cursor = terminal::CursorState {
+                                                focused,
+                                                visible: cursor_visible,
+                                                marked_text: marked_text.as_deref(),
+                                            };
+                                            terminal::paint(bounds, &frame, &metrics, cursor, window, cx);
                                         }
                                     },
                                 )
@@ -439,9 +697,7 @@ impl EntityInputHandler for Workspace {
         cx: &mut Context<Self>,
     ) {
         self.marked_text = None;
-        if let Some(session) = self.active_session() {
-            session.write(text.as_bytes().to_vec());
-        }
+        self.input(text.as_bytes().to_vec());
         cx.notify();
     }
 
@@ -470,7 +726,7 @@ impl EntityInputHandler for Workspace {
 
     fn character_index_for_point(
         &mut self,
-        _point: gpui::Point<Pixels>,
+        _point: Point<Pixels>,
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<usize> {
@@ -479,11 +735,17 @@ impl EntityInputHandler for Workspace {
 }
 
 pub fn bind_keys(cx: &mut App) {
+    use gpui::KeyBinding;
     cx.bind_keys([
-        gpui::KeyBinding::new("cmd-t", NewTab, None),
-        gpui::KeyBinding::new("cmd-w", CloseTab, None),
-        gpui::KeyBinding::new("cmd-shift-]", NextTab, None),
-        gpui::KeyBinding::new("cmd-shift-[", PreviousTab, None),
-        gpui::KeyBinding::new("cmd-v", Paste, None),
+        KeyBinding::new("cmd-t", NewTab, None),
+        KeyBinding::new("cmd-w", CloseTab, None),
+        KeyBinding::new("cmd-shift-]", NextTab, None),
+        KeyBinding::new("cmd-shift-[", PreviousTab, None),
+        KeyBinding::new("cmd-c", Copy, None),
+        KeyBinding::new("cmd-v", Paste, None),
+        KeyBinding::new("cmd-=", IncreaseFontSize, None),
+        KeyBinding::new("cmd-+", IncreaseFontSize, None),
+        KeyBinding::new("cmd--", DecreaseFontSize, None),
+        KeyBinding::new("cmd-0", ResetFontSize, None),
     ]);
 }

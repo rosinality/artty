@@ -1,0 +1,37 @@
+# artty configuration. Copy to ~/.config/artty/config.toml and edit.
+# Every key is optional; the values below are the defaults.
+# Changes apply the next time artty starts.
+
+# Program for new tabs. Empty runs your account's login shell.
+# shell = ["/opt/homebrew/bin/fish", "--login"]
+shell = []
+
+# Font families, tried in order. "SF Mono" is the macOS system monospaced font.
+font-family = ["SF Mono", "Menlo"]
+font-size = 13          # ⌘= / ⌘- / ⌘0 change it for the session
+line-height = 1.35      # multiple of the font size
+
+# Background: opacity of the terminal color over the desktop (1 = opaque),
+# and whether what shows through is blurred.
+background-opacity = 0.72
+background-blur = true
+
+scrollback = 10000
+
+# Option acts as Meta (⌥B sends ESC b, for shell word movement).
+# Set to false to type characters like å or ∑ with Option.
+option-as-meta = true
+
+cursor-blink = true
+
+[colors]
+# foreground = "#d8dee9"
+# background = "#161a22"
+# cursor = "#e6e6e6"
+# selection = "#3d5a8a"
+# The 16 ANSI colors: black, red, green, yellow, blue, magenta, cyan, white,
+# then their bright versions. A shorter list overrides only the first ones.
+# palette = [
+#   "#3b4252", "#e06c75", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#d8dee9",
+#   "#616e88", "#f7768e", "#b9f27c", "#ffc777", "#8fb4ff", "#c7a9ff", "#a4e0ff", "#eceff4",
+# ]

@@ -7,6 +7,7 @@ pub struct Theme {
     pub foreground: Rgb,
     pub background: Rgb,
     pub cursor: Rgb,
+    pub selection: Rgb,
     /// The 16 ANSI colors: normal 0–7, then bright 8–15.
     pub ansi: [Rgb; 16],
 }
@@ -21,6 +22,7 @@ impl Default for Theme {
             foreground: rgb(0xd8dee9),
             background: rgb(0x161a22),
             cursor: rgb(0xe6e6e6),
+            selection: rgb(0x3d5a8a),
             ansi: [
                 rgb(0x3b4252),
                 rgb(0xe06c75),

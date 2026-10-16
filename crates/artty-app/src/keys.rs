@@ -8,7 +8,10 @@ use gpui::Keystroke;
 
 /// Bytes for keys that aren't plain text, or `None` to let the key through
 /// to app shortcuts or the input system.
-pub fn to_esc(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
+///
+/// With `option_as_meta`, Option sends an ESC prefix (⌥B → ESC b); without it,
+/// Option+letter is left to macOS so it can type characters like `å`.
+pub fn to_esc(keystroke: &Keystroke, mode: TermMode, option_as_meta: bool) -> Option<Vec<u8>> {
     let m = &keystroke.modifiers;
     if m.platform {
         return None;
@@ -32,8 +35,9 @@ pub fn to_esc(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
     let ss3 = |c: char| -> Vec<u8> {
         if param > 1 { format!("\x1b[1;{param}{c}") } else { format!("\x1bO{c}") }.into_bytes()
     };
+    let meta_key = m.alt && option_as_meta;
     let meta = |bytes: &[u8]| -> Vec<u8> {
-        if m.alt { [b"\x1b", bytes].concat() } else { bytes.to_vec() }
+        if meta_key { [b"\x1b", bytes].concat() } else { bytes.to_vec() }
     };
 
     let bytes = match keystroke.key.as_str() {
@@ -67,8 +71,7 @@ pub fn to_esc(keystroke: &Keystroke, mode: TermMode) -> Option<Vec<u8>> {
         "f11" => tilde(23),
         "f12" => tilde(24),
         key if m.control => meta(&[control_byte(key)?]),
-        // Option acts as Meta: ⌥B sends ESC b, as shells expect.
-        key if m.alt && key.chars().count() == 1 => {
+        key if meta_key && key.chars().count() == 1 => {
             let key = if m.shift { key.to_uppercase() } else { key.to_owned() };
             meta(key.as_bytes())
         }
@@ -97,7 +100,7 @@ mod tests {
     use super::*;
 
     fn esc(key: &str) -> Option<Vec<u8>> {
-        to_esc(&Keystroke::parse(key).unwrap(), TermMode::empty())
+        to_esc(&Keystroke::parse(key).unwrap(), TermMode::empty(), true)
     }
 
     #[test]
@@ -113,7 +116,7 @@ mod tests {
 
     #[test]
     fn app_cursor_mode() {
-        let up = to_esc(&Keystroke::parse("up").unwrap(), TermMode::APP_CURSOR);
+        let up = to_esc(&Keystroke::parse("up").unwrap(), TermMode::APP_CURSOR, true);
         assert_eq!(up.unwrap(), b"\x1bOA");
     }
 
@@ -123,6 +126,14 @@ mod tests {
         assert_eq!(esc("ctrl-[").unwrap(), b"\x1b");
         assert_eq!(esc("alt-b").unwrap(), b"\x1bb");
         assert_eq!(esc("ctrl-alt-a").unwrap(), b"\x1b\x01");
+    }
+
+    #[test]
+    fn option_without_meta_types_characters() {
+        let alt_b = Keystroke::parse("alt-b").unwrap();
+        assert_eq!(to_esc(&alt_b, TermMode::empty(), false), None);
+        let alt_left = Keystroke::parse("alt-left").unwrap();
+        assert_eq!(to_esc(&alt_left, TermMode::empty(), false).unwrap(), b"\x1b[1;3D");
     }
 
     #[test]

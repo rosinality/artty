@@ -7,6 +7,8 @@ use std::sync::{Arc, OnceLock};
 use artty_vt::event::{Event, EventListener, WindowSize};
 use artty_vt::event_loop::{EventLoop, EventLoopSender, Msg};
 use artty_vt::grid::{Dimensions, Scroll};
+use artty_vt::index::{Column, Line, Point, Side};
+use artty_vt::selection::{Selection, SelectionType};
 use artty_vt::sync::FairMutex;
 use artty_vt::term::{ClipboardType, Config, Term};
 use artty_vt::tty;
@@ -184,6 +186,30 @@ impl Session {
         self.term.lock().scroll_display(Scroll::Delta(lines));
     }
 
+    /// Start a selection at a viewport cell (`line` 0 is the top of the view).
+    pub fn start_selection(&self, kind: SelectionType, line: usize, column: usize, side: Side) {
+        let mut term = self.term.lock();
+        let point = viewport_point(&term, line, column);
+        term.selection = Some(Selection::new(kind, point, side));
+    }
+
+    pub fn update_selection(&self, line: usize, column: usize, side: Side) {
+        let mut term = self.term.lock();
+        let point = viewport_point(&term, line, column);
+        if let Some(selection) = term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    pub fn clear_selection(&self) {
+        self.term.lock().selection = None;
+    }
+
+    /// The selected text, or `None` if nothing is selected.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.lock().selection_to_string().filter(|text| !text.is_empty())
+    }
+
     /// Snapshot of the visible screen for rendering.
     pub fn frame(&self) -> Frame {
         Frame::capture(&self.term.lock(), &self.theme)
@@ -238,6 +264,12 @@ impl Session {
             warn!("session {}: PTY is gone: {err}", self.id);
         }
     }
+}
+
+fn viewport_point<T>(term: &Term<T>, line: usize, column: usize) -> Point {
+    let offset = term.grid().display_offset() as i32;
+    let line = (line as i32).min(term.screen_lines() as i32 - 1) - offset;
+    Point::new(Line(line), Column(column.min(term.columns() - 1)))
 }
 
 impl Drop for Session {

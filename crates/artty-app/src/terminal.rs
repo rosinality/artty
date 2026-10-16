@@ -1,14 +1,17 @@
 //! Painting a terminal [`Frame`] onto the cell grid.
 
 use artty_core::vt::ansi::{CursorShape, Rgb};
-use artty_core::{Frame, FrameCursor, FrameLine, FrameRun};
+use artty_core::{Config, Frame, FrameCursor, FrameLine, FrameRun};
+use crate::boxdraw;
 use gpui::{
     App, BorderStyle, Bounds, Font, FontStyle, FontWeight, Hsla, Pixels, StrikethroughStyle,
     TextRun, UnderlineStyle, Window, fill, font, outline, point, px, size,
 };
 
-pub const MONO_FONT: &str = "Menlo";
-pub const FONT_SIZE: f32 = 13.;
+/// The system's monospaced font (SF Mono), which isn't listed as a regular
+/// font family.
+const SYSTEM_MONO_FONT: &str = ".AppleSystemUIFontMonospaced";
+const FALLBACK_FONT: &str = "Menlo";
 
 /// Font and cell geometry shared by layout, painting, and the IME.
 #[derive(Clone)]
@@ -20,16 +23,20 @@ pub struct Metrics {
 }
 
 impl Metrics {
-    pub fn measure(window: &Window) -> Self {
-        let font = font(MONO_FONT);
-        let font_size = px(FONT_SIZE);
-        let font_id = window.text_system().resolve_font(&font);
-        let cell_width = window
-            .text_system()
-            .advance(font_id, font_size, 'm')
+    pub fn measure(window: &Window, config: &Config, font_size: f32) -> Self {
+        let font = pick_font(window, &config.font_family);
+        let text_system = window.text_system();
+        let font_id = text_system.resolve_font(&font);
+        let cell_width = text_system
+            .advance(font_id, px(font_size), 'm')
             .map(|advance| advance.width)
-            .unwrap_or(px(FONT_SIZE * 0.6));
-        Self { font, font_size, cell_width, line_height: px((FONT_SIZE * 1.35).round()) }
+            .unwrap_or(px(font_size * 0.6));
+        Self {
+            font,
+            font_size: px(font_size),
+            cell_width,
+            line_height: px((font_size * config.line_height).round()),
+        }
     }
 
     pub fn cell_bounds(&self, origin: gpui::Point<Pixels>, line: usize, column: usize, columns: usize) -> Bounds<Pixels> {
@@ -40,36 +47,67 @@ impl Metrics {
     }
 }
 
+/// The first configured family that exists. "SF Mono" maps to the system
+/// monospaced font.
+fn pick_font(window: &Window, families: &[String]) -> Font {
+    let text_system = window.text_system();
+    // `resolve_font` silently falls back, so detect a miss by comparing with
+    // a family that certainly doesn't exist.
+    let missing = text_system.resolve_font(&font("artty-missing-font"));
+    let candidates = families
+        .iter()
+        .map(|family| if family == "SF Mono" { SYSTEM_MONO_FONT } else { family.as_str() })
+        .chain([SYSTEM_MONO_FONT, FALLBACK_FONT]);
+    for family in candidates {
+        let candidate = font(family.to_owned());
+        if text_system.resolve_font(&candidate) != missing {
+            return candidate;
+        }
+        log::warn!("font {family:?} not found");
+    }
+    font(FALLBACK_FONT)
+}
+
 pub fn hsla(rgb: Rgb) -> Hsla {
     gpui::rgb(u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b)).into()
+}
+
+/// How to draw the cursor.
+pub struct CursorState<'a> {
+    pub focused: bool,
+    /// False during the "off" phase of a blink.
+    pub visible: bool,
+    /// IME composition text, drawn at the cursor instead of it.
+    pub marked_text: Option<&'a str>,
 }
 
 pub fn paint(
     bounds: Bounds<Pixels>,
     frame: &Frame,
     metrics: &Metrics,
-    focused: bool,
-    marked_text: Option<&str>,
+    cursor_state: CursorState<'_>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let origin = bounds.origin;
+    let CursorState { focused, visible: cursor_visible, marked_text } = cursor_state;
 
     for (index, line) in frame.lines.iter().enumerate() {
-        for rect in &line.backgrounds {
+        for rect in line.backgrounds.iter().chain(&line.selection) {
             window.paint_quad(fill(metrics.cell_bounds(origin, index, rect.column, rect.width), hsla(rect.color)));
         }
     }
 
     for (index, line) in frame.lines.iter().enumerate() {
         for run in &line.runs {
-            paint_text(metrics.cell_bounds(origin, index, run.column, 1).origin, &run.text, run, hsla(run.fg), metrics, window, cx);
+            let cell = metrics.cell_bounds(origin, index, run.column, run.cells);
+            paint_text(cell, &run.text, run, hsla(run.fg), metrics, window, cx);
         }
     }
 
     if let Some(text) = marked_text.filter(|text| !text.is_empty()) {
         paint_marked_text(origin, frame, text, metrics, window, cx);
-    } else if let Some(cursor) = frame.cursor {
+    } else if let Some(cursor) = frame.cursor.filter(|_| cursor_visible || !focused) {
         paint_cursor(origin, frame, cursor, focused, metrics, window, cx);
     }
 }
@@ -85,8 +123,10 @@ fn styled_font(metrics: &Metrics, run: &FrameRun) -> Font {
     font
 }
 
+/// Paint `text` starting at the left of `cells`. A lone non-ASCII character
+/// is centered in its cells, or drawn as a shape if it's a box character.
 fn paint_text(
-    at: gpui::Point<Pixels>,
+    cells: Bounds<Pixels>,
     text: &str,
     run: &FrameRun,
     color: Hsla,
@@ -94,6 +134,13 @@ fn paint_text(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let mut chars = text.chars();
+    let single = chars.next().filter(|_| chars.next().is_none() && !text.is_ascii());
+    if let Some(c) = single
+        && boxdraw::paint(c, cells, color, window)
+    {
+        return;
+    }
     let text_run = TextRun {
         len: text.len(),
         font: styled_font(metrics, run),
@@ -103,6 +150,11 @@ fn paint_text(
         strikethrough: run.strikeout.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
     };
     let shaped = window.text_system().shape_line(text.to_owned().into(), metrics.font_size, &[text_run], None);
+    let mut at = cells.origin;
+    if single.is_some() && shaped.width < cells.size.width {
+        // CJK glyphs are narrower than two cells; center them like other terminals.
+        at.x += ((cells.size.width - shaped.width) / 2.).floor();
+    }
     let _ = shaped.paint(at, metrics.line_height, window, cx);
 }
 
@@ -148,7 +200,7 @@ fn paint_cursor(
             window.paint_quad(fill(cell, color));
             // Redraw the character under the cursor so it stays readable.
             if let Some((run, text)) = frame.lines.get(cursor.line).and_then(|line| char_at(line, cursor.column)) {
-                paint_text(cell.origin, &text, run, hsla(frame.background), metrics, window, cx);
+                paint_text(cell, &text, run, hsla(frame.background), metrics, window, cx);
             }
         }
         CursorShape::Hidden => {}
