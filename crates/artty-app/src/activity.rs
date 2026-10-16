@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use artty_core::control::{PaneProcesses, ProcessRow, Request, Response, WorkspaceInfo};
+use artty_core::control::{PaneProcesses, ProcessRow, Request, Response, ServerUsage, WorkspaceInfo};
 
 use super::*;
 
@@ -26,6 +26,7 @@ pub(super) enum Group {
 pub(super) struct Activity {
     panes: Vec<PaneProcesses>,
     workspaces: Vec<WorkspaceInfo>,
+    server: Option<ServerUsage>,
     sort: Sort,
     collapsed: HashSet<Group>,
     filter: String,
@@ -37,6 +38,9 @@ pub(super) struct Activity {
     error: Option<String>,
 }
 
+/// Samples in a pane's history (one a second).
+const HISTORY: usize = 60;
+const GRAPH_WIDTH: f32 = 120.;
 const PID_WIDTH: f32 = 64.;
 const CPU_WIDTH: f32 = 112.;
 const MEMORY_WIDTH: f32 = 72.;
@@ -75,6 +79,30 @@ fn status_icon(status: &str) -> &str {
         "waiting" | "failed" | "done" => status,
         _ => "",
     }
+}
+
+/// Panes' histories added up, aligned at the newest sample.
+fn total_history(panes: &[&PaneProcesses]) -> Vec<(f32, u64)> {
+    let len = panes.iter().map(|p| p.history.len()).max().unwrap_or(0);
+    (0..len)
+        .map(|i| {
+            panes
+                .iter()
+                .filter_map(|p| p.history.get((p.history.len() + i).checked_sub(len)?))
+                .fold((0., 0), |(c, m), (pc, pm)| (c + pc, m + pm))
+        })
+        .collect()
+}
+
+/// A bar graph of the last minute, newest on the right. CPU graphs go to at
+/// least 100%; others scale to their peak.
+fn sparkline(values: &[f32], floor: f32, width: f32, height: f32, color: u32) -> gpui::Div {
+    let max = values.iter().copied().fold(floor, f32::max).max(f32::EPSILON);
+    let bar = width / HISTORY as f32;
+    div().flex_none().w(px(width)).h(px(height)).flex().items_end().justify_end().children(values.iter().map(|&v| {
+        let h = (v / max).clamp(0., 1.) * height;
+        div().flex_none().w(px(bar)).h(px(if v > 0. { h.max(1.) } else { 0. })).bg(rgba(color))
+    }))
 }
 
 fn cpu_color(percent: f32) -> u32 {
@@ -121,8 +149,9 @@ impl WindowView {
                 let Some(activity) = this.activity.as_mut() else { return };
                 activity.loading = false;
                 match (processes, workspaces) {
-                    (Ok(Response::Processes { panes }), Ok(Response::Workspaces { workspaces })) => {
+                    (Ok(Response::Processes { panes, server }), Ok(Response::Workspaces { workspaces })) => {
                         activity.panes = panes;
+                        activity.server = server;
                         activity.workspaces = workspaces;
                         activity.loaded = true;
                         activity.error = None;
@@ -236,13 +265,39 @@ impl WindowView {
 
         let all: Vec<&PaneProcesses> = activity.panes.iter().collect();
         let process_count: usize = activity.panes.iter().map(|p| p.processes.len()).sum();
-        let summary = format!(
-            "CPU {:.1}%  ·  Memory {}  ·  {} processes in {} panes",
-            cpu(&all),
-            crate::cli::bytes(memory(&all)),
-            process_count,
-            activity.panes.len()
-        );
+        let history = total_history(&all);
+        let cpu_history: Vec<f32> = history.iter().map(|h| h.0).collect();
+        let memory_history: Vec<f32> = history.iter().map(|h| h.1 as f32).collect();
+        let peak_memory = memory_history.iter().copied().fold(0., f32::max) * 1.25;
+        let server = activity.server.as_ref().map(|server| {
+            format!("Server {:.1}% · {} (pid {})", server.cpu_percent, crate::cli::bytes(server.memory_bytes), server.pid)
+        });
+        let gauge = |label: String, graph: gpui::Div| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_color(rgba(0xffffffd0)).child(label))
+                .child(div().p(px(4.)).rounded(px(5.)).bg(rgba(0x0000002e)).child(graph))
+        };
+        let summary = div()
+            .flex()
+            .items_end()
+            .gap(px(20.))
+            .child(gauge(format!("CPU {:.1}%", cpu(&all)), sparkline(&cpu_history, 100., 180., 30., 0x8fb4ffcc)))
+            .child(gauge(
+                format!("Memory {}", crate::cli::bytes(memory(&all))),
+                sparkline(&memory_history, peak_memory, 180., 30., 0xbb9af7cc),
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .text_color(rgba(0xffffff90))
+                    .child(format!("{process_count} processes in {} panes", activity.panes.len()))
+                    .when_some(server, |d, server| d.child(server)),
+            );
 
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         for (workspace, panes) in &groups {
@@ -310,7 +365,11 @@ impl WindowView {
                     .justify_between()
                     .gap_4()
                     .pb(px(10.))
-                    .child(div().text_color(rgba(0xffffffb0)).child(if activity.loaded { summary } else { "Loading…".to_owned() }))
+                    .child(if activity.loaded {
+                        summary
+                    } else {
+                        div().text_color(rgba(0xffffffb0)).child("Loading…")
+                    })
                     .child(
                         div()
                             .flex_none()
@@ -342,6 +401,7 @@ impl WindowView {
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(heading("NAME", None, Some(Sort::Name)))
+                    .child(heading("LAST MINUTE", Some(GRAPH_WIDTH), None))
                     .child(heading("PID", Some(PID_WIDTH), None))
                     .child(heading("CPU", Some(CPU_WIDTH), Some(Sort::Cpu)))
                     .child(heading("MEMORY", Some(MEMORY_WIDTH), Some(Sort::Memory)))
@@ -437,9 +497,17 @@ impl WindowView {
                             .child(format!("{} pane{}{place}", panes.len(), if panes.len() == 1 { "" } else { "s" })),
                     ),
             )
+            .child(Self::cpu_graph(&total_history(panes)))
             .child(div().w(px(PID_WIDTH)).flex_none())
             .children(Self::figures(Some(cpu), Some(memory), None))
             .child(div().w(px(ACTION_WIDTH)).flex_none())
+    }
+
+    /// The last minute of CPU use, in the row's graph column.
+    fn cpu_graph(history: &[(f32, u64)]) -> gpui::Div {
+        let values: Vec<f32> = history.iter().map(|h| h.0).collect();
+        let peak = values.iter().copied().fold(0., f32::max);
+        sparkline(&values, 100., GRAPH_WIDTH, 14., cpu_color(peak) & 0xffffff00 | 0xb0)
     }
 
     fn pane_activity_row(&self, workspace: u64, pane: &PaneProcesses, folded: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
@@ -485,6 +553,7 @@ impl WindowView {
                             .child(div().flex_none().text_color(rgba(0xffffff80)).child(format!("tab {} · pane {}", pane.tab, pane.id))),
                     ),
             )
+            .child(Self::cpu_graph(&pane.history))
             .child(div().w(px(PID_WIDTH)).flex_none())
             .children(Self::figures(Some(pane.cpu_percent), Some(pane.memory_bytes), None))
             .child(div().w(px(ACTION_WIDTH)).flex_none())
@@ -531,6 +600,7 @@ impl WindowView {
                             .when(row.foreground, |d| d.font_weight(FontWeight::MEDIUM)),
                     ),
             )
+            .child(div().w(px(GRAPH_WIDTH)).flex_none())
             .child(div().w(px(PID_WIDTH)).flex_none().flex().justify_end().text_color(rgba(0xffffff90)).child(pid.to_string()))
             .children(
                 Self::figures(Some(row.cpu_percent), Some(row.memory_bytes), Some(row.elapsed_secs))

@@ -203,7 +203,12 @@ pub enum Response {
     Tab { id: SessionId },
     Command { command: Option<String>, output: String, exit: Option<i32>, truncated: bool },
     Server { info: ServerInfo },
-    Processes { panes: Vec<PaneProcesses> },
+    Processes {
+        panes: Vec<PaneProcesses>,
+        /// The server's own use.
+        #[serde(default)]
+        server: Option<ServerUsage>,
+    },
     Workspaces { workspaces: Vec<WorkspaceInfo> },
     Workspace { id: u64 },
 }
@@ -249,6 +254,14 @@ pub struct ServerInfo {
     pub clients: usize,
 }
 
+/// What the server process itself uses.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ServerUsage {
+    pub pid: u32,
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
+}
+
 /// A pane and the processes running in it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PaneProcesses {
@@ -267,6 +280,9 @@ pub struct PaneProcesses {
     pub cpu_percent: f32,
     pub memory_bytes: u64,
     pub processes: Vec<ProcessRow>,
+    /// CPU percent and memory once a second, oldest first, up to a minute.
+    #[serde(default)]
+    pub history: Vec<(f32, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

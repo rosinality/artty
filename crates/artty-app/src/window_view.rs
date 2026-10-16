@@ -1573,7 +1573,11 @@ impl WindowView {
         };
         let tabs = workspace.tabs.len();
         let color = workspace.color.as_deref().and_then(workspace_color);
-        let root = workspace.root.as_ref().map(|r| r.display().to_string());
+        // Hovering tells what it uses (and where it's rooted).
+        let mut usage = format!("CPU {:.1}% · Memory {}", workspace.cpu_percent, crate::cli::bytes(workspace.memory_bytes));
+        if let Some(root) = &workspace.root {
+            usage.push_str(&format!(" · Root {}", root.display()));
+        }
         div()
             .id(("workspace", id as usize))
             .flex()
@@ -1634,7 +1638,7 @@ impl WindowView {
                     cx.stop_propagation();
                 }),
             )
-            .when_some(root, |d, root| d.tooltip(move |_, cx| cx.new(|_| Tooltip(format!("Root: {root}").into())).into()))
+            .tooltip(move |_, cx| cx.new(|_| Tooltip(usage.clone().into())).into())
             .on_drag(DraggedWorkspace { workspace: id, title }, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
             .drag_over::<DraggedWorkspace>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
             .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))

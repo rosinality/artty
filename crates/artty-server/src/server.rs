@@ -1,7 +1,7 @@
 //! The server's state: windows of workspaces of tabs of panes, the apps
 //! attached to them, and everything that happens to the sessions.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use artty_core::control::{
     AgentState, PaneProcesses, ProcessRow, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV,
-    ServerInfo, SplitDirection, TabInfo, WorkspaceInfo,
+    ServerInfo, ServerUsage, SplitDirection, TabInfo, WorkspaceInfo,
 };
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
@@ -35,6 +35,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 /// A server with no sessions and no app exits after this long.
 const IDLE_EXIT: Duration = Duration::from_secs(20);
+/// How much CPU and memory history each pane keeps, one sample a second.
+const HISTORY: usize = 60;
 /// Background commands running at least this long notify when they finish.
 const LONG_COMMAND: Duration = Duration::from_secs(10);
 /// Shown under a restored pane's old output.
@@ -76,6 +78,8 @@ struct Workspace {
     color: Option<String>,
     /// Its name when it has none: its git repository or directory.
     title: String,
+    /// CPU percent and memory of its panes, as of the last sample.
+    usage: (f32, u64),
 }
 
 impl Workspace {
@@ -89,6 +93,7 @@ impl Workspace {
             defaults: Defaults::default(),
             color: None,
             title: String::new(),
+            usage: (0., 0),
         }
     }
 
@@ -110,6 +115,8 @@ impl Workspace {
                 .collect(),
             active: self.active,
             collapsed: self.collapsed,
+            cpu_percent: self.usage.0,
+            memory_bytes: self.usage.1,
         }
     }
 }
@@ -181,6 +188,10 @@ pub(crate) struct Server {
     last_saved: Option<String>,
     /// Previous CPU samples (pid → time used, when), for CPU percentages.
     cpu_samples: HashMap<i32, (u64, Instant)>,
+    /// Every pane's processes as of the last sample, with history.
+    usage: Vec<PaneProcesses>,
+    history: HashMap<PaneId, VecDeque<(f32, u64)>>,
+    server_usage: Option<ServerUsage>,
 }
 
 fn config_modified() -> Option<SystemTime> {
@@ -284,6 +295,9 @@ impl Server {
             last_save: now,
             last_saved: None,
             cpu_samples: HashMap::new(),
+            usage: Vec::new(),
+            history: HashMap::new(),
+            server_usage: None,
         }
     }
 
@@ -1477,7 +1491,16 @@ impl Server {
                 self.restarting = true;
                 Response::Ok
             }
-            Request::Processes { tab } => Response::Processes { panes: self.processes(tab)? },
+            Request::Processes { tab } => {
+                if self.usage.is_empty() {
+                    self.sample_usage();
+                }
+                let panes: Vec<PaneProcesses> = self.usage.iter().filter(|p| tab.is_none_or(|id| id == p.id)).cloned().collect();
+                if tab.is_some() && panes.is_empty() {
+                    return Err("no such pane".into());
+                }
+                Response::Processes { panes, server: self.server_usage.clone() }
+            }
             Request::Workspaces => Response::Workspaces { workspaces: self.workspace_infos() },
             Request::Signal { pid, signal } => {
                 // Only what runs in a pane: never the server, the app, or
@@ -1583,8 +1606,9 @@ impl Server {
         })
     }
 
-    /// Processes in each pane, with CPU and memory use.
-    fn processes(&mut self, only: Option<PaneId>) -> Result<Vec<PaneProcesses>, String> {
+    /// Sample every pane's processes, with CPU and memory use, and add to
+    /// their history (once a second, whether or not anyone looks).
+    fn sample_usage(&mut self) {
         let samples = processes();
         let now = Instant::now();
         let unix_now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
@@ -1601,9 +1625,8 @@ impl Server {
                 }
             }
         };
-        let infos = self.pane_infos();
-        let mut result = Vec::new();
-        for info in infos.into_iter().filter(|i| only.is_none_or(|id| id == i.id)) {
+        let mut usage = Vec::new();
+        for info in self.pane_infos() {
             let Some(pane) = self.panes.get(&info.id) else { continue };
             let Some(shell) = pane.session.shell_pid() else { continue };
             let foreground = pane.process.foreground_group;
@@ -1619,8 +1642,15 @@ impl Server {
                     elapsed_secs: (unix_now - p.started).max(0.) as u64,
                 })
                 .collect();
+            let cpu_percent = rows.iter().map(|r| r.cpu_percent).fold(0., |a, b| a + b);
+            let memory_bytes = rows.iter().map(|r| r.memory_bytes).sum();
             let attached = self.window_of(info.id).is_some_and(|w| self.windows[&w].client.is_some());
-            result.push(PaneProcesses {
+            let history = self.history.entry(info.id).or_default();
+            if history.len() == HISTORY {
+                history.pop_front();
+            }
+            history.push_back((cpu_percent, memory_bytes));
+            usage.push(PaneProcesses {
                 id: info.id,
                 window: info.window,
                 workspace: info.workspace,
@@ -1630,16 +1660,28 @@ impl Server {
                 status: info.status,
                 attached,
                 cwd: info.cwd,
-                cpu_percent: rows.iter().map(|r| r.cpu_percent).fold(0., |a, b| a + b),
-                memory_bytes: rows.iter().map(|r| r.memory_bytes).sum(),
+                cpu_percent,
+                memory_bytes,
                 processes: rows,
+                history: history.iter().copied().collect(),
             });
         }
-        if only.is_some() && result.is_empty() {
-            return Err("no such pane".into());
+        self.history.retain(|id, _| self.panes.contains_key(id));
+        for workspace in self.workspaces.values_mut() {
+            let panes: HashSet<PaneId> = workspace.tabs.iter().flat_map(|t| t.root.panes()).collect();
+            let mine = usage.iter().filter(|p| panes.contains(&p.id));
+            // Rounded, so layouts don't change for noise.
+            let (cpu, memory) = mine.fold((0f32, 0u64), |(c, m), p| (c + p.cpu_percent, m + p.memory_bytes));
+            workspace.usage = ((cpu * 10.).round() / 10., memory >> 20 << 20);
         }
+        let pid = std::process::id();
+        self.server_usage = samples.iter().find(|s| s.pid == pid as i32).map(|s| ServerUsage {
+            pid,
+            cpu_percent: cpu(&self.cpu_samples, s),
+            memory_bytes: s.memory,
+        });
         self.cpu_samples = samples.iter().map(|s| (s.pid, (s.cpu_ns, now))).collect();
-        Ok(result)
+        self.usage = usage;
     }
 
     // Per-batch work.
@@ -1685,6 +1727,7 @@ impl Server {
         for workspace in workspaces {
             self.refresh_title(workspace);
         }
+        self.sample_usage();
         let now = Instant::now();
         for run in self.runs.extract_if(.., |run| run.deadline.is_some_and(|d| d <= now)) {
             Self::answer(&self.clients, run.waiter, Response::error("timed out"));

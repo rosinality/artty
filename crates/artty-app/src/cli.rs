@@ -401,11 +401,11 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             }
             Ok(0)
         }
-        Response::Processes { panes } if json => {
+        Response::Processes { panes, .. } if json => {
             println!("{}", serde_json::to_string_pretty(&panes).unwrap_or_default());
             Ok(0)
         }
-        Response::Processes { panes } => {
+        Response::Processes { panes, .. } => {
             print!("{}", process_table(&panes, false));
             Ok(0)
         }
@@ -557,7 +557,7 @@ fn top() -> Result<i32, String> {
         }
         let status = send(&Request::ServerStatus, Some(Duration::from_secs(5)));
         let panes = send(&Request::Processes { tab: None }, Some(Duration::from_secs(5)));
-        let (Ok(Response::Server { info }), Ok(Response::Processes { panes })) = (status, panes) else {
+        let (Ok(Response::Server { info }), Ok(Response::Processes { panes, .. })) = (status, panes) else {
             break Err("lost the artty server".to_owned());
         };
         let total_cpu: f32 = panes.iter().map(|p| p.cpu_percent).fold(0., |a, b| a + b);

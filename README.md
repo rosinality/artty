@@ -159,7 +159,10 @@ artty server stop           # end every session
 
 **Activity** (⇧⌘A, the top of the sidebar, or `artty activity`) shows what
 runs in every pane, live: workspaces, their panes and each pane's process
-tree, with CPU and memory totals at every level. Click a column to sort,
+tree, with CPU and memory totals at every level and a graph of the last
+minute (the server samples once a second, so the graphs are full when you
+open it), plus what the server itself uses. Hovering a workspace header in
+the sidebar shows its totals too. Click a column to sort,
 type to filter, click a pane to go to it, and Stop a process (SIGTERM; ⌥
 for SIGKILL; a pane's shell or agent asks first). It's a view, not a tab:
 nothing runs in it, and it's in no workspace.

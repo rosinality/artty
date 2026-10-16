@@ -19,7 +19,7 @@ use crate::vt::ansi::Rgb;
 use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes; app and server must agree.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Identifies a build: the package version and when the executable was
 /// built (rebuilds don't change the version). The server runs from a copy
@@ -174,6 +174,9 @@ pub struct WorkspaceLayout {
     pub active: usize,
     /// Its section is folded in the sidebar.
     pub collapsed: bool,
+    /// What its panes use, as of the last second.
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
 }
 
 /// A window's workspaces; the active workspace's active tab fills it.
@@ -413,6 +416,8 @@ mod tests {
             tabs: vec![tab],
             active: 0,
             collapsed: true,
+            cpu_percent: 1.5,
+            memory_bytes: 1 << 20,
         };
         let layout = WindowLayout { workspaces: vec![workspace], active: 0, hidden: 2 };
         let mut buffer = Vec::new();
