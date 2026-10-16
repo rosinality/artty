@@ -16,7 +16,7 @@ use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 use window_view::{
     ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
     FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, MoveTabDown, MoveTabUp,
-    NewTab, NewWorkspace, NextPane, NextTab, NextWorkspace, Paste, PreviousPane, PreviousTab,
+    NewTab, NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, Paste, PreviousPane, PreviousTab,
     PreviousWorkspace, RenameTab, ResetFontSize, SplitDown, SplitRight, ToggleZoom,
 };
 
@@ -71,6 +71,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Reopen Closed Windows", ReopenClosedWindows),
                 MenuItem::action("New Tab", NewTab),
                 MenuItem::action("New Workspace", NewWorkspace),
+                MenuItem::action("Open Workspace…", OpenWorkspace),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),
                 MenuItem::separator(),

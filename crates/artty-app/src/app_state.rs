@@ -303,12 +303,8 @@ fn handle(message: ServerMessage, cx: &mut App) {
         }
         ServerMessage::Notify { title, body } => crate::notify::post(&title, &body),
         ServerMessage::App(command) => match command {
-            AppCommand::Activate { window } => {
-                if let Some(view) = view_for(window, cx) {
-                    let handle = view.read(cx).window_handle();
-                    let _ = handle.update(cx, |_, window, _| window.activate_window());
-                }
-            }
+            AppCommand::Activate { window } => activate(window, cx),
+            AppCommand::OpenWindow { window } => open_window(Some(window), None, PaneSpec::default(), cx),
             AppCommand::OpenSettings => open_settings(cx),
             AppCommand::Restart => restart(cx),
         },
@@ -378,6 +374,28 @@ pub fn control(request: Request, cx: &mut App) -> oneshot::Receiver<Response> {
     cx.global_mut::<Shared>().controls.insert(id, waiter);
     send(ClientMessage::Control { id, request: encode_request(&request) }, cx);
     answer
+}
+
+/// Bring the view of the server's `window` forward.
+pub fn activate(window: WindowId, cx: &mut App) {
+    if let Some(view) = view_for(window, cx) {
+        let handle = view.read(cx).window_handle();
+        let _ = handle.update(cx, |_, window, _| window.activate_window());
+    }
+}
+
+/// The app's windows other than `except`, with what each shows, for "Move
+/// to" menus.
+pub fn other_windows(except: Option<WindowId>, cx: &App) -> Vec<(WindowId, String)> {
+    let mut windows: Vec<(WindowId, String)> = cx
+        .global::<Shared>()
+        .windows
+        .iter()
+        .filter(|(id, _)| Some(**id) != except)
+        .filter_map(|(&id, view)| Some((id, view.upgrade()?.read(cx).title(cx))))
+        .collect();
+    windows.sort_by_key(|(id, _)| *id);
+    windows
 }
 
 /// Open a window attached to the server's `window` (or a new one).

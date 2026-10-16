@@ -13,7 +13,7 @@ use artty_core::control::{
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "server", "ps", "top", "kill", "hooks",
+    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "server", "ps", "top", "kill", "workspace", "workspaces", "hooks",
     "shell-integration",
 ];
 
@@ -53,6 +53,14 @@ artty, your own pane is found automatically:
   artty top                              the same, live (Ctrl-C to quit)
   artty kill N [--signal SIG] [--pane]   stop pane N's foreground program
                                          (default TERM), or close the pane
+  artty workspace [list] [--json]        workspaces: id, window, tabs, status
+  artty workspace new [NAME] [--cwd DIR] [-- COMMAND...]
+                                         a workspace in the frontmost window
+  artty workspace open|hide|close W      show W here (or bring its window
+                                         forward), take it out of its window
+                                         (it keeps running), or end its tabs;
+                                         W is an id or a name
+  artty workspace rename W NAME          an empty NAME goes back to automatic
   artty server [status|stop|restart]     the server that keeps sessions running:
                                          show it, end every session and stop it,
                                          or restart it on this build (programs
@@ -113,6 +121,8 @@ fn run(args: Vec<String>) -> Result<i32, String> {
     let mut rest = Vec::new();
     let mut flags = std::collections::HashMap::<&str, String>::new();
     let mut switches = std::collections::HashSet::<&str>::new();
+    // Where in `rest` the arguments after `--` start.
+    let mut command_start = None;
 
     // Shared flag parsing; `--` ends flags.
     while let Some(arg) = args.next() {
@@ -141,6 +151,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 });
             }
             "--" => {
+                command_start = Some(rest.len());
                 rest.extend(args.args.by_ref());
                 break;
             }
@@ -161,6 +172,27 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             let id = rest.first().and_then(|id| id.parse().ok()).or(tab).ok_or("kill: which pane?")?;
             let signal = flags.get("signal").map(|s| parse_signal(s)).transpose()?;
             Request::Kill { tab: id, signal, pane: switches.contains("pane") }
+        }
+        "workspace" | "workspaces" => {
+            let action = rest.first().map_or("list", String::as_str);
+            let which = || rest.get(1).cloned().ok_or(format!("workspace {action}: which workspace? (an id or a name)"));
+            match action {
+                "list" => Request::Workspaces,
+                "new" => {
+                    let split = command_start.unwrap_or(rest.len()).max(1);
+                    let name = rest[1..split].join(" ");
+                    Request::NewWorkspace {
+                        name: (!name.is_empty()).then_some(name),
+                        cwd: flags.get("cwd").map(PathBuf::from),
+                        command: rest[split..].to_vec(),
+                    }
+                }
+                "rename" => Request::RenameWorkspace { workspace: which()?, name: rest.get(2..).unwrap_or_default().join(" ") },
+                "close" => Request::CloseWorkspace { workspace: which()? },
+                "open" => Request::OpenWorkspace { workspace: which()? },
+                "hide" => Request::HideWorkspace { workspace: which()? },
+                other => return Err(format!("workspace: unknown action {other} (list, new, rename, close, open, hide)")),
+            }
         }
         "settings" => Request::Settings,
         "restart" => Request::Restart,
@@ -272,6 +304,36 @@ fn run(args: Vec<String>) -> Result<i32, String> {
 fn print_response(response: Response, json: bool) -> Result<i32, String> {
     match response {
         Response::Ok => Ok(0),
+        Response::Workspace { id } => {
+            println!("{id}");
+            Ok(0)
+        }
+        Response::Workspaces { workspaces } if json => {
+            println!("{}", serde_json::to_string_pretty(&workspaces).unwrap_or_default());
+            Ok(0)
+        }
+        Response::Workspaces { workspaces } => {
+            println!("    ID  WIN  TABS  STATUS   NAME");
+            for workspace in workspaces {
+                let marker = if workspace.needs_attention { "!" } else { " " };
+                let window = if workspace.window_number == 0 { "-".to_owned() } else { workspace.window_number.to_string() };
+                let place = match (workspace.window, workspace.attached) {
+                    (None, _) => "  (hidden)",
+                    (Some(_), false) => "  (closed window)",
+                    (Some(_), true) => "",
+                };
+                // Unnamed ones go by what they show, in brackets.
+                let title = match &workspace.name {
+                    Some(name) => name.clone(),
+                    None => format!("[{}]", workspace.title),
+                };
+                println!(
+                    "{marker} {:>4}  {window:>3}  {:>4}  {:<8} {title}{place}",
+                    workspace.id, workspace.tabs, workspace.status
+                );
+            }
+            Ok(0)
+        }
         Response::Error { message } => Err(message),
         Response::Tab { id } => {
             println!("{id}");
@@ -326,9 +388,11 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
                 let marker = if pane.active { "*" } else if pane.needs_attention { "!" } else { " " };
                 let detail = pane.detail.map(|d| format!("  ({d})")).unwrap_or_default();
                 let workspace = workspace_label(pane.workspace, pane.workspace_name.as_deref());
+                // Window 0: the workspace is hidden.
+                let window = if pane.window == 0 { "-".to_owned() } else { pane.window.to_string() };
                 println!(
-                    "{marker} {:>4}  {:>3}  {workspace:<12}  {:>3}  {:<8} {}{detail}",
-                    pane.id, pane.window, pane.tab, pane.status, pane.title
+                    "{marker} {:>4}  {window:>3}  {workspace:<12}  {:>3}  {:<8} {}{detail}",
+                    pane.id, pane.tab, pane.status, pane.title
                 );
             }
             Ok(0)

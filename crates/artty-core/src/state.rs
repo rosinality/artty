@@ -21,6 +21,9 @@ const VERSION: u32 = 4;
 pub struct SavedState {
     pub version: u32,
     pub windows: Vec<SavedWindowState>,
+    /// Workspaces in no window.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<SavedWorkspace>,
     // One-window layout of versions 1 and 2.
     #[serde(skip_serializing_if = "Option::is_none")]
     window: Option<SavedWindow>,
@@ -161,8 +164,8 @@ pub struct SavedAgent {
 }
 
 impl SavedState {
-    pub fn new(windows: Vec<SavedWindowState>) -> Self {
-        Self { version: VERSION, windows, ..Default::default() }
+    pub fn new(windows: Vec<SavedWindowState>, hidden: Vec<SavedWorkspace>) -> Self {
+        Self { version: VERSION, windows, hidden, ..Default::default() }
     }
 
     /// The saved windows, in the current form whatever the file's version.
@@ -401,7 +404,7 @@ mod tests {
         };
         let workspace = SavedWorkspace { name: Some("artty".into()), active: 0, tabs: vec![tab], collapsed: true };
         let window = SavedWindowState::new(None, 1, vec![workspace.clone(), workspace]);
-        let state = SavedState::new(vec![window.clone(), window]);
+        let state = SavedState::new(vec![window.clone(), window], Vec::new());
         let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("\"tabs\":[]"), "no empty legacy fields: {json}");
         let back: SavedState = serde_json::from_str(&json).unwrap();

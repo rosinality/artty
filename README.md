@@ -56,6 +56,7 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘1…⌘9, ⌘⇧[ / ⌘⇧] | Switch tabs |
 | Double-click / drag a tab | Rename it / reorder it (also into another workspace) |
 | ⌘⇧N | New workspace (name it, then Enter) |
+| ⌘⇧O | Open a workspace: a hidden one, or one in another window |
 | ⌃⌘[ / ⌃⌘] | Previous / next workspace |
 | Click / double-click / drag a workspace header | Fold it / rename it / reorder workspaces |
 | Right-click (or ⌃-click) | In a pane: copy, paste, links, split, rename, clear, close. On a tab or workspace in the sidebar: rename, move to a new workspace, fold, close |
@@ -113,7 +114,10 @@ The `artty server` process owns every terminal session; app windows attach
 to it. A window's tabs are grouped into workspaces — named sections of the
 sidebar, say one per project — which the server keeps as units of their own.
 A section header shows what its tabs are doing (a waiting agent, a busy
-command), even folded; a lone unnamed workspace is just a list of tabs. The app starts the server when needed, and the server exits once its
+command), even folded; a lone unnamed workspace is just a list of tabs.
+A workspace's right-click menu moves it to a new window or another one, or
+hides it: it keeps running out of sight, and "N more workspaces…" at the
+bottom of the sidebar (or ⌘⇧O) brings it back. The app starts the server when needed, and the server exits once its
 last session ends.
 
 - Closing a window detaches it: its tabs keep running, and
@@ -128,6 +132,12 @@ artty ps --tab 3 --json
 artty top                   # the same, live, busiest first
 artty kill 3                # SIGTERM the program running in pane 3
 artty kill 3 --signal INT   # or another signal; --pane closes the pane
+artty workspace             # workspaces: id, window, tabs, status
+artty workspace new blog --cwd ~/blog
+artty workspace hide blog   # out of its window, still running
+artty workspace open blog   # back into the frontmost window
+artty workspace rename 3 notes
+artty workspace close blog  # end its tabs
 artty server status         # pid, uptime, windows, panes, attached apps
 artty server restart        # restart on this build; tabs and agents return
 artty server stop           # end every session

@@ -19,7 +19,7 @@ use crate::vt::ansi::Rgb;
 use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes; app and server must agree.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Identifies a build: the package version and when the executable was
 /// built (rebuilds don't change the version). The server runs from a copy
@@ -91,6 +91,14 @@ pub enum ClientMessage {
     MoveWorkspace { workspace: WorkspaceId, window: WindowId, to: usize },
     /// Move a tab into a new workspace right after its own.
     TabToNewWorkspace { workspace: WorkspaceId, tab: usize },
+    /// Show a workspace in `window`, or bring forward the window already
+    /// showing it.
+    OpenWorkspace { workspace: WorkspaceId, window: WindowId },
+    /// Take a workspace out of its window; it keeps running, hidden.
+    HideWorkspace { workspace: WorkspaceId },
+    /// Move a workspace into a window of its own (the server asks the app to
+    /// open it with [`AppCommand::OpenWindow`]).
+    WorkspaceToNewWindow { workspace: WorkspaceId },
     ToggleZoom { window: WindowId },
     SetRatio { window: WindowId, path: Vec<bool>, ratio: f32 },
 
@@ -162,6 +170,8 @@ pub struct WorkspaceLayout {
 pub struct WindowLayout {
     pub workspaces: Vec<WorkspaceLayout>,
     pub active: usize,
+    /// Workspaces not on screen anywhere (hidden, or in closed windows).
+    pub hidden: usize,
 }
 
 impl WindowLayout {
@@ -251,6 +261,8 @@ impl FrameUpdate {
 pub enum AppCommand {
     /// Bring a window forward (`artty focus`).
     Activate { window: WindowId },
+    /// Open a view of a server window that has none.
+    OpenWindow { window: WindowId },
     OpenSettings,
     /// Quit and reopen the app (sessions keep running).
     Restart,
@@ -380,7 +392,7 @@ mod tests {
         let state = PaneState { info, icon: String::new(), progress: None, agent: None };
         let tab = TabLayout { title: None, root: Node::Pane(3), focused: 3, zoomed: false };
         let workspace = WorkspaceLayout { id: 2, name: None, tabs: vec![tab], active: 0, collapsed: true };
-        let layout = WindowLayout { workspaces: vec![workspace], active: 0 };
+        let layout = WindowLayout { workspaces: vec![workspace], active: 0, hidden: 2 };
         let mut buffer = Vec::new();
         write_message(&mut buffer, &ServerMessage::Panes { panes: vec![state.clone()] }).unwrap();
         write_message(&mut buffer, &ServerMessage::Layout { window: 1, layout: layout.clone() }).unwrap();

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use artty_core::layout::{self, Axis, Direction, Divider, PaneId, Rect};
+use artty_core::control::{Request, Response, WorkspaceInfo};
 use artty_core::protocol::{
     ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp, TabLayout, WindowId,
     WindowLayout, WorkspaceId,
@@ -39,6 +40,7 @@ actions!(
         MoveTabUp,
         MoveTabDown,
         NewWorkspace,
+        OpenWorkspace,
         NextWorkspace,
         PreviousWorkspace,
         SplitRight,
@@ -97,6 +99,9 @@ enum MenuCommand {
     RenameWorkspace,
     ToggleCollapsed,
     CloseWorkspace,
+    HideWorkspace,
+    MoveToNewWindow,
+    MoveToWindow(WindowId),
 }
 
 /// What was right-clicked.
@@ -169,6 +174,21 @@ fn drag_preview(title: SharedString) -> gpui::Div {
         .child(title)
 }
 
+/// The Open Workspace picker: workspaces this window doesn't show.
+struct Picker {
+    query: String,
+    items: Vec<WorkspaceInfo>,
+    selected: usize,
+}
+
+impl Picker {
+    /// Items whose name contains the query, ignoring case.
+    fn matches(&self) -> Vec<&WorkspaceInfo> {
+        let query = self.query.to_lowercase();
+        self.items.iter().filter(|w| w.title.to_lowercase().contains(&query)).collect()
+    }
+}
+
 struct Search {
     query: String,
     /// `Some(false)`: no match; `Some(true)`: showing a match.
@@ -239,6 +259,7 @@ pub struct WindowView {
     renaming: Option<Renaming>,
     /// Asked for a new workspace: name it when it shows up.
     naming_new_workspace: bool,
+    picker: Option<Picker>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -324,6 +345,7 @@ impl WindowView {
             context_menu: None,
             renaming: None,
             naming_new_workspace: false,
+            picker: None,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -367,6 +389,14 @@ impl WindowView {
     /// The server is gone or closed this window: don't tell it we detached.
     pub fn forget_server(&mut self) {
         self.detach = false;
+    }
+
+    /// What this window shows: its workspace's name, or its tab's title.
+    pub fn title(&self, cx: &App) -> String {
+        match self.layout.active_workspace() {
+            Some(workspace) if workspace.name.is_some() => workspace.name.clone().unwrap_or_default(),
+            _ => self.layout.active_tab().map(|tab| self.tab_title(tab, cx).to_string()).unwrap_or_default(),
+        }
     }
 
     /// Whether this window shows `pane` right now.
@@ -492,6 +522,150 @@ impl WindowView {
     /// workspace, which looks like a plain list of tabs.
     fn sections(&self) -> bool {
         self.layout.workspaces.len() > 1 || self.layout.workspaces.iter().any(|w| w.name.is_some())
+    }
+
+    /// Open the workspace picker, listing workspaces this window doesn't show.
+    fn open_picker(&mut self, cx: &mut Context<Self>) {
+        if self.renaming.is_some() {
+            self.finish_rename(true, cx);
+        }
+        self.close_search(cx);
+        let answer = app_state::control(Request::Workspaces, cx);
+        let here = self.window;
+        cx.spawn(async move |this, cx| {
+            let Ok(Response::Workspaces { workspaces }) = answer.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                // Hidden ones first: those are what you're likely after.
+                let mut items: Vec<WorkspaceInfo> = workspaces.into_iter().filter(|w| w.window.is_none() || w.window != here).collect();
+                items.sort_by_key(|w| w.attached);
+                this.marked_text = None;
+                this.picker = Some(Picker { query: String::new(), items, selected: 0 });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn choose_workspace(&mut self, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.take() else { return };
+        if let (Some(choice), Some(window)) = (picker.matches().get(picker.selected), self.window) {
+            self.send(ClientMessage::OpenWorkspace { workspace: choice.id, window }, cx);
+        }
+        self.marked_text = None;
+        cx.notify();
+    }
+
+    fn picker_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(picker) = self.picker.as_mut() else { return };
+        let count = picker.matches().len();
+        match event.keystroke.key.as_str() {
+            "escape" => self.picker = None,
+            "enter" => return self.choose_workspace(cx),
+            "up" => picker.selected = picker.selected.saturating_sub(1),
+            "down" => picker.selected = (picker.selected + 1).min(count.saturating_sub(1)),
+            "backspace" => {
+                picker.query.pop();
+                picker.selected = 0;
+            }
+            // Text arrives through the input handler.
+            _ => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// The picker, over a backdrop that dismisses it.
+    fn picker_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let picker = self.picker.as_ref()?;
+        let matches = picker.matches();
+        let marked = self.marked_text.as_deref().unwrap_or_default();
+        let rows: Vec<gpui::AnyElement> = matches
+            .iter()
+            .enumerate()
+            .map(|(i, workspace)| {
+                let place = match (workspace.window, workspace.attached) {
+                    (None, _) => "hidden".to_owned(),
+                    (Some(_), false) => "closed window".to_owned(),
+                    (Some(_), true) => format!("window {}", workspace.window_number),
+                };
+                let tabs = if workspace.tabs == 1 { "1 tab".to_owned() } else { format!("{} tabs", workspace.tabs) };
+                // Statuses (`working`, ...) as the sidebar's icons (`busy`, ...).
+                let icon = match workspace.status.as_str() {
+                    "working" | "running" => "busy",
+                    "waiting" | "failed" | "done" => workspace.status.as_str(),
+                    _ if workspace.needs_attention => "attention",
+                    _ => "",
+                };
+                div()
+                    .id(("picker-item", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .h(px(30.))
+                    .px(px(10.))
+                    .rounded(px(6.))
+                    .when(i == picker.selected, |d| d.bg(rgba(0x3478f6ff)))
+                    .when(i != picker.selected, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
+                    .child(self.icon(icon))
+                    .child(Self::one_line(workspace.title.clone()).flex_1().min_w_0().text_color(rgba(0xffffffee)))
+                    .child(div().flex_none().text_size(px(11.5)).text_color(rgba(0xffffff80)).child(format!("{tabs} · {place}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(picker) = this.picker.as_mut() {
+                            picker.selected = i;
+                        }
+                        this.choose_workspace(cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let empty = rows.is_empty();
+        let panel = div()
+            .id("picker")
+            .absolute()
+            .top(px(70.))
+            .left(px(SIDEBAR_WIDTH + 40.))
+            .w(px(420.))
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .p(px(6.))
+            .rounded(px(10.))
+            .bg(rgba(0x262a33f8))
+            .border_1()
+            .border_color(rgba(0xffffff26))
+            .shadow_lg()
+            .text_size(px(13.))
+            .child(
+                div()
+                    .px(px(10.))
+                    .py(px(7.))
+                    .mb(px(4.))
+                    .rounded(px(6.))
+                    .bg(rgba(0x0000004d))
+                    .text_color(if picker.query.is_empty() && marked.is_empty() { rgba(0xffffff60) } else { rgba(0xffffffee) })
+                    .child(if picker.query.is_empty() && marked.is_empty() {
+                        "Open workspace…".to_owned()
+                    } else {
+                        format!("{}{marked}▏", picker.query)
+                    }),
+            )
+            .children(rows)
+            .when(empty, |d| {
+                d.child(div().px(px(10.)).py(px(6.)).text_color(rgba(0xffffff70)).child("No other workspaces"))
+            });
+        let backdrop = div()
+            .id("picker-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.picker = None;
+                cx.notify();
+            }));
+        Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
     }
 
     fn open_sidebar_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -645,6 +819,12 @@ impl WindowView {
                     MenuCommand::RenameWorkspace => self.start_workspace_rename(workspace, cx),
                     MenuCommand::ToggleCollapsed => self.toggle_collapsed(workspace, cx),
                     MenuCommand::CloseWorkspace => self.send(ClientMessage::CloseWorkspace { workspace }, cx),
+                    MenuCommand::HideWorkspace => self.send(ClientMessage::HideWorkspace { workspace }, cx),
+                    MenuCommand::MoveToNewWindow => self.send(ClientMessage::WorkspaceToNewWindow { workspace }, cx),
+                    MenuCommand::MoveToWindow(window) => {
+                        self.send(ClientMessage::MoveWorkspace { workspace, window, to: usize::MAX }, cx);
+                        app_state::activate(window, cx);
+                    }
                     _ => {}
                 }
                 return cx.notify();
@@ -809,6 +989,10 @@ impl WindowView {
                 cx.stop_propagation();
                 return;
             }
+        }
+        if self.picker.is_some() {
+            self.picker_key(event, cx);
+            return;
         }
         if self.renaming.is_some() {
             self.rename_key(event, cx);
@@ -1097,13 +1281,18 @@ impl WindowView {
     // Sidebar.
 
     fn icon_cell(&self, state: Option<&PaneState>) -> gpui::Div {
+        self.icon(state.map_or("", |s| s.icon.as_str()))
+    }
+
+    /// A status icon: `busy`, `waiting`, `attention`, `done`, `failed`.
+    fn icon(&self, icon: &str) -> gpui::Div {
         let color = |hex: u32| -> Hsla { rgba(hex).into() };
         // Braille spinner frames are tiny at text size.
-        let icon: Option<(SharedString, Hsla, f32)> = match state.map(|s| s.icon.as_str()) {
-            Some("busy") => Some((SPINNER[self.spinner_frame].into(), color(0x8fb4ffff), 16.)),
-            Some("waiting" | "attention") => Some(("●".into(), color(0xe0af68ff), 12.)),
-            Some("done") => Some(("✓".into(), color(0x9ece6aff), 12.)),
-            Some("failed") => Some(("✕".into(), color(0xf7768eff), 12.)),
+        let icon: Option<(SharedString, Hsla, f32)> = match icon {
+            "busy" => Some((SPINNER[self.spinner_frame].into(), color(0x8fb4ffff), 16.)),
+            "waiting" | "attention" => Some(("●".into(), color(0xe0af68ff), 12.)),
+            "done" => Some(("✓".into(), color(0x9ece6aff), 12.)),
+            "failed" => Some(("✕".into(), color(0xf7768eff), 12.)),
             _ => None,
         };
         div()
@@ -1429,6 +1618,23 @@ impl WindowView {
                 index += 1;
             }
         }
+        if self.layout.hidden > 0 {
+            let hidden = self.layout.hidden;
+            rows.push(
+                div()
+                    .id("hidden-workspaces")
+                    .mt(px(8.))
+                    .px_2()
+                    .py(px(4.))
+                    .rounded(px(6.))
+                    .text_size(px(11.5))
+                    .text_color(rgba(0xffffff70))
+                    .hover(|d| d.bg(rgba(0xffffff0a)).text_color(rgba(0xffffffc0)))
+                    .child(if hidden == 1 { "1 more workspace…".to_owned() } else { format!("{hidden} more workspaces…") })
+                    .on_click(cx.listener(|this, _, _, cx| this.open_picker(cx)))
+                    .into_any_element(),
+            );
+        }
         let mismatch = cx.global::<Shared>().server_mismatch.is_some();
         div()
             .flex()
@@ -1496,7 +1702,7 @@ impl WindowView {
         const SEPARATOR: f32 = 9.;
         let menu = self.context_menu.as_ref()?;
         let item = |label: &'static str, keys: &'static str, enabled: bool, command: MenuCommand| {
-            Some((label, keys, enabled, command))
+            Some((SharedString::from(label), keys, enabled, command))
         };
         let items = match menu.target {
             MenuTarget::Pane(_) => {
@@ -1531,13 +1737,24 @@ impl WindowView {
             }
             MenuTarget::Workspace(workspace) => {
                 let collapsed = self.layout.workspaces.iter().find(|w| w.id == workspace).is_some_and(|w| w.collapsed);
-                vec![
+                let alone = self.layout.workspaces.len() < 2;
+                let mut items = vec![
                     item("New Tab Here", "", true, MenuCommand::NewTabInWorkspace),
                     item("Rename Workspace…", "", true, MenuCommand::RenameWorkspace),
                     item(if collapsed { "Expand" } else { "Collapse" }, "", true, MenuCommand::ToggleCollapsed),
                     None,
+                    item("Move to New Window", "", !alone, MenuCommand::MoveToNewWindow),
+                ];
+                for (window, title) in app_state::other_windows(self.window, cx) {
+                    let label = format!("Move to “{}”", if title.is_empty() { "window" } else { &title });
+                    items.push(Some((label.into(), "", true, MenuCommand::MoveToWindow(window))));
+                }
+                items.extend([
+                    item("Hide Workspace", "", true, MenuCommand::HideWorkspace),
+                    None,
                     item("Close Workspace", "", true, MenuCommand::CloseWorkspace),
-                ]
+                ]);
+                items
             }
         };
 
@@ -1793,7 +2010,7 @@ impl Render for WindowView {
         self.cursor = views.iter().find(|view| view.focused).and_then(|view| view.frame.cursor);
 
         let window_focused = self.focus.is_focused(window) && self.window_active;
-        let typing = window_focused && self.search.is_none() && self.renaming.is_none();
+        let typing = window_focused && self.search.is_none() && self.renaming.is_none() && self.picker.is_none();
         self.blink_enabled = typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
         let title = self.tabs.get(self.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default();
@@ -1802,7 +2019,7 @@ impl Render for WindowView {
         let tint = Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
         let divider_color: Hsla = rgba(0xffffff1c).into();
         let metrics = self.metrics.clone();
-        let marked_text = self.marked_text.clone().filter(|_| self.search.is_none() && self.renaming.is_none());
+        let marked_text = self.marked_text.clone().filter(|_| self.search.is_none() && self.renaming.is_none() && self.picker.is_none());
         let cursor_visible = self.cursor_visible;
         let focused_rect = focused_id.and_then(|id| self.rect_of(id));
         let divider_lines: Vec<Bounds<Pixels>> = self
@@ -1827,6 +2044,7 @@ impl Render for WindowView {
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| this.open_tab(cx)))
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
+            .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.cycle_workspace(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.cycle_workspace(-1, cx)))
             .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
@@ -1971,6 +2189,7 @@ impl Render for WindowView {
                     ),
             )
             .children(self.context_menu_overlay(window.viewport_size(), cx))
+            .children(self.picker_overlay(cx))
     }
 }
 
@@ -2018,6 +2237,12 @@ impl EntityInputHandler for WindowView {
         cx: &mut Context<Self>,
     ) {
         self.marked_text = None;
+        if let Some(picker) = self.picker.as_mut() {
+            picker.query.push_str(text);
+            picker.selected = 0;
+            cx.notify();
+            return;
+        }
         if let Some(renaming) = self.renaming.as_mut() {
             renaming.text.push_str(text);
             cx.notify();
@@ -2070,6 +2295,7 @@ pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("cmd-t", NewTab, None),
         KeyBinding::new("cmd-shift-n", NewWorkspace, None),
+        KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
         KeyBinding::new("ctrl-cmd-]", NextWorkspace, None),
         KeyBinding::new("ctrl-cmd-[", PreviousWorkspace, None),
         KeyBinding::new("cmd-w", ClosePane, None),

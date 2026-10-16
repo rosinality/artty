@@ -85,6 +85,20 @@ pub enum Request {
     /// Terminate a pane's foreground program (`signal`, default TERM), or the
     /// whole pane with `pane: true`.
     Kill { tab: SessionId, signal: Option<i32>, pane: bool },
+    /// Every workspace, shown or not.
+    Workspaces,
+    /// A workspace with one tab, in the frontmost window.
+    NewWorkspace { name: Option<String>, cwd: Option<PathBuf>, command: Vec<String> },
+    /// Workspaces are named by id or by name. An empty name goes back to
+    /// automatic.
+    RenameWorkspace { workspace: String, name: String },
+    /// End every tab in it.
+    CloseWorkspace { workspace: String },
+    /// Show it: in the frontmost window, or bring forward the window
+    /// already showing it.
+    OpenWorkspace { workspace: String },
+    /// Take it out of its window; it keeps running, hidden.
+    HideWorkspace { workspace: String },
     /// Text from a tab.
     Read { tab: Option<SessionId>, source: ReadSource },
     /// Type text into a tab.
@@ -170,6 +184,28 @@ pub enum Response {
     Command { command: Option<String>, output: String, exit: Option<i32>, truncated: bool },
     Server { info: ServerInfo },
     Processes { panes: Vec<PaneProcesses> },
+    Workspaces { workspaces: Vec<WorkspaceInfo> },
+    Workspace { id: u64 },
+}
+
+/// A workspace, for `artty workspace list` and the app's picker.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    pub id: u64,
+    pub name: Option<String>,
+    /// Its name, or else what its active tab shows.
+    pub title: String,
+    /// The server's window holding it and that window's number, unless hidden.
+    pub window: Option<u64>,
+    #[serde(default)]
+    pub window_number: usize,
+    /// Its window is on screen in the app.
+    pub attached: bool,
+    pub tabs: usize,
+    pub panes: usize,
+    /// The most pressing pane status: `waiting`, `working`, `running`, ...
+    pub status: String,
+    pub needs_attention: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
