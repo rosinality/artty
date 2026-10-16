@@ -1,26 +1,19 @@
-//! The main window: a sidebar of tabs, each a layout of split panes running
-//! terminal sessions.
+//! A window: a sidebar of tabs, each a layout of split panes. The sessions
+//! live in the artty server; this view draws what it sends and forwards
+//! input, so closing the window leaves them running.
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use artty_core::control::{
-    AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV, SplitDirection,
+use artty_core::layout::{self, Axis, Direction, Divider, PaneId, Rect};
+use artty_core::protocol::{
+    ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp, TabLayout, WindowId,
+    WindowLayout,
 };
-use artty_core::vt::ansi::Progress;
-use artty_core::vt::event::Event;
-use artty_core::vt::index::Side;
-use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
-use artty_core::{
-    Config, FrameCursor, Notice, SavedLayout, SavedTab, SavedWindow, SavedWorkspace, Session,
-    SessionId, SessionOptions, ShellPhase, TerminalSize, Theme,
-};
-use futures::StreamExt;
-use futures::channel::{mpsc, oneshot};
+use artty_core::{Config, FrameCursor, SavedWindow, TerminalSize, Theme};
 use gpui::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
     FontWeight, Hsla, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -31,9 +24,7 @@ use gpui::{
 
 use crate::app_state::{self, Shared};
 use crate::keys;
-use artty_core::layout::{self, Axis, Direction, Divider, Node, PaneId, Rect};
 use crate::mouse::{self, Action, Button};
-use artty_core::pane::{Pane, Status};
 use crate::terminal::{self, Metrics, hsla};
 
 actions!(
@@ -80,41 +71,10 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// Shown under a restored pane's old output.
-const RESTORED_BANNER: &str = "\r\n\x1b[2m── restored ──\x1b[0m\r\n";
 /// How long the visual bell flash lasts.
 const FLASH: Duration = Duration::from_millis(220);
-/// Background commands running at least this long notify when they finish.
-const LONG_COMMAND: Duration = Duration::from_secs(10);
 const MIN_FONT_SIZE: f32 = 6.;
 const MAX_FONT_SIZE: f32 = 72.;
-
-/// `artty run` waiting for its command to finish.
-struct PendingRun {
-    pane: PaneId,
-    reply: oneshot::Sender<Response>,
-    deadline: Option<Instant>,
-}
-
-/// What to open in a new pane; everything defaults to a shell in the focused
-/// pane's directory.
-#[derive(Default)]
-pub struct TabSpec {
-    pub command: Option<Vec<String>>,
-    pub cwd: Option<PathBuf>,
-    pub title: Option<String>,
-    /// Output to show before the program starts.
-    pub initial_output: Option<Vec<u8>>,
-}
-
-struct Tab {
-    /// Name given by the user; otherwise the focused pane's title.
-    title: Option<String>,
-    root: Node,
-    focused: PaneId,
-    /// Show only the focused pane.
-    zoomed: bool,
-}
 
 /// Right-click menu commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -166,16 +126,6 @@ impl Render for DraggedTab {
     }
 }
 
-impl Tab {
-    fn layout(&self, area: Rect) -> (Vec<(PaneId, Rect)>, Vec<Divider>) {
-        if self.zoomed {
-            (vec![(self.focused, area)], Vec::new())
-        } else {
-            self.root.layout(area, SPLIT_GAP)
-        }
-    }
-}
-
 struct Search {
     query: String,
     /// `Some(false)`: no match; `Some(true)`: showing a match.
@@ -190,12 +140,14 @@ pub struct Workspace {
     config_modified: Option<SystemTime>,
     reload_config: bool,
     theme: Arc<Theme>,
-    agents: Arc<[String]>,
     font_size: f32,
     metrics: Metrics,
-    panes: HashMap<PaneId, Pane>,
-    tabs: Vec<Tab>,
-    active: usize,
+    window_handle: gpui::AnyWindowHandle,
+    /// The server's window this view shows, once attached.
+    window: Option<WindowId>,
+    /// Detach from the server's window when this view goes away.
+    detach: bool,
+    layout: WindowLayout,
     /// Area the active tab's panes fill, from the last render.
     area: Rect,
     /// Pane rectangles and dividers of the active tab, from the last render.
@@ -203,11 +155,10 @@ pub struct Workspace {
     dividers: Vec<Divider>,
     /// A divider being dragged.
     drag: Option<Divider>,
-    sink: Arc<dyn Fn(SessionId, Event) + Send + Sync>,
-    runs: Vec<PendingRun>,
+    /// Sizes sent to the server, to send only changes.
+    sizes: HashMap<PaneId, TerminalSize>,
+    bounds_sent: Option<SavedWindow>,
     search: Option<Search>,
-    window_bounds: Option<SavedWindow>,
-    window_handle: gpui::AnyWindowHandle,
     /// IME composition in progress, shown at the cursor until committed.
     marked_text: Option<String>,
     /// Focused pane's cursor from the last render, for placing the IME window.
@@ -232,6 +183,8 @@ pub struct Workspace {
     mouse_position: Option<Point<Pixels>>,
     /// The link under the pointer while ⌘ is held: pane, line, columns.
     hover_link: Option<(PaneId, usize, Range<usize>)>,
+    /// The cell last asked about for a link, to avoid repeat queries.
+    hover_cell: Option<(PaneId, usize, usize)>,
     context_menu: Option<ContextMenu>,
     renaming: Option<Renaming>,
     _tasks: Vec<Task<()>>,
@@ -242,53 +195,16 @@ fn config_modified() -> Option<SystemTime> {
     std::fs::metadata(Config::path()?).ok()?.modified().ok()
 }
 
-fn agents_of(config: &Config) -> Arc<[String]> {
-    config.agents.clone().into()
-}
-
 fn bounds(rect: Rect) -> Bounds<Pixels> {
     Bounds::new(point(px(rect.x), px(rect.y)), size(px(rect.width), px(rect.height)))
 }
 
-/// Play the system alert sound.
-fn beep() {
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", "beep"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+fn layout_of(tab: &TabLayout, area: Rect) -> (Vec<(PaneId, Rect)>, Vec<Divider>) {
+    if tab.zoomed { (vec![(tab.focused, area)], Vec::new()) } else { tab.root.layout(area, SPLIT_GAP) }
 }
 
-
 impl Workspace {
-    pub fn new(
-        config: Config,
-        config_error: Option<String>,
-        spec: TabSpec,
-        restore: Option<SavedWorkspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let (tx, mut rx) = mpsc::unbounded::<(SessionId, Event)>();
-        let sink: Arc<dyn Fn(SessionId, Event) + Send + Sync> =
-            Arc::new(move |id, event| {
-                let _ = tx.unbounded_send((id, event));
-            });
-
-        // Terminal events arrive from PTY threads; drain them in batches so a
-        // burst of output costs one redraw.
-        let events = cx.spawn(async move |this, cx| {
-            while let Some(first) = rx.next().await {
-                let mut batch = vec![first];
-                while let Ok(event) = rx.try_recv() {
-                    batch.push(event);
-                }
-                if this.update(cx, |this, cx| this.handle_events(batch, cx)).is_err() {
-                    break;
-                }
-            }
-        });
-
+    pub fn new(config: Config, config_error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let every = |interval: Duration, f: fn(&mut Self, &mut Context<Self>)| {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -305,43 +221,36 @@ impl Workspace {
 
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
-            if this.window_active {
-                app_state::set_frontmost(cx.weak_entity(), cx);
+            if let Some(id) = this.window {
+                app_state::send(ClientMessage::WindowFocused { window: id, focused: this.window_active }, cx);
             }
-            this.report_focus(this.focused_id(), this.window_active);
             cx.notify();
         });
-
-        if let Some(error) = &config_error {
-            log::error!("config: {error}");
-        }
 
         let focus = cx.focus_handle();
         focus.focus(window);
         let font_size = config.font_size;
         let metrics = Metrics::measure(window, &config, font_size);
-        let mut this = Self {
+        Self {
             focus,
             theme: Arc::new(config.theme()),
-            agents: agents_of(&config),
             metrics,
             font_size,
             config: Arc::new(config),
             config_error,
             config_modified: config_modified(),
             reload_config: false,
-            panes: HashMap::new(),
-            tabs: Vec::new(),
-            active: 0,
-            area: Rect::default(),
+            window_handle: window.window_handle(),
+            window: None,
+            detach: true,
+            layout: WindowLayout { tabs: Vec::new(), active: 0 },
+            area: Self::area_rect(window),
             pane_rects: Vec::new(),
             dividers: Vec::new(),
             drag: None,
-            sink,
-            runs: Vec::new(),
+            sizes: HashMap::new(),
+            bounds_sent: None,
             search: None,
-            window_bounds: None,
-            window_handle: window.window_handle(),
             marked_text: None,
             cursor: None,
             cursor_visible: true,
@@ -356,121 +265,50 @@ impl Workspace {
             scroll_remainder: 0.,
             mouse_position: None,
             hover_link: None,
+            hover_cell: None,
             context_menu: None,
             renaming: None,
-            _tasks: vec![events, blink, poll, spinner],
+            _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
-        };
-        this.area = Self::area_rect(window);
-        match restore.filter(|state| !state.tabs.is_empty()) {
-            Some(state) => this.restore(state, cx),
-            None => {
-                if let Err(err) = this.open_tab(spec, true, cx) {
-                    log::error!("{err}");
-                }
-            }
         }
-        this
     }
+
+    // The server's side.
 
     pub fn window_handle(&self) -> gpui::AnyWindowHandle {
         self.window_handle
     }
 
-    pub fn has_pane(&self, id: PaneId) -> bool {
-        self.panes.contains_key(&id)
+    /// The server attached this view to its window `window`.
+    pub fn attached(&mut self, window: WindowId, _bounds: Option<SavedWindow>, cx: &mut Context<Self>) {
+        self.window = Some(window);
+        self.sizes.clear();
+        app_state::send(ClientMessage::WindowFocused { window, focused: self.window_active }, cx);
+        cx.notify();
     }
 
-    /// The focused pane's directory, for opening windows next to it.
-    pub fn focused_cwd(&self) -> Option<PathBuf> {
-        self.focused_session().and_then(Session::cwd)
-    }
-
-    /// Every pane, for `artty list`; `window` is this window's number.
-    pub fn pane_infos(&self, window: usize, frontmost: bool) -> Vec<artty_core::control::TabInfo> {
-        let mut infos = Vec::new();
-        for (index, tab) in self.tabs.iter().enumerate() {
-            for id in tab.root.panes() {
-                let focused = tab.focused == id;
-                let active = frontmost && focused && index == self.active;
-                infos.push(self.panes[&id].info(window, index + 1, active, focused));
+    pub fn set_layout(&mut self, layout: WindowLayout, cx: &mut Context<Self>) {
+        if layout != self.layout {
+            if layout.active != self.layout.active || self.focused_id() != layout.tabs.get(layout.active).map(|t| t.focused) {
+                self.reset_input_state();
             }
-        }
-        infos
-    }
-
-    // Saving and restoring.
-
-    /// Reopen saved tabs: their layouts, directories and output, and agents.
-    fn restore(&mut self, state: SavedWorkspace, cx: &mut Context<Self>) {
-        for saved in state.tabs {
-            let Some(root) = self.restore_layout(saved.layout, cx) else { continue };
-            let panes = root.panes();
-            let focused = panes[saved.focused.min(panes.len() - 1)];
-            let zoomed = saved.zoomed && panes.len() > 1;
-            self.tabs.push(Tab { title: saved.title, root, focused, zoomed });
-        }
-        if self.tabs.is_empty() {
-            let _ = self.open_tab(TabSpec::default(), true, cx);
-        }
-        self.select(state.active.min(self.tabs.len().saturating_sub(1)), cx);
-    }
-
-    fn restore_layout(&mut self, layout: SavedLayout, cx: &mut App) -> Option<Node> {
-        match layout {
-            SavedLayout::Pane(saved) => {
-                let initial_output = (!saved.scrollback.is_empty())
-                    .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
-                let spec = TabSpec { command: saved.command, cwd: saved.cwd, title: saved.title, initial_output };
-                let id = self.spawn_pane(spec, cx).inspect_err(|err| log::error!("restoring a pane: {err}")).ok()?;
-                let resume = saved.agent.filter(|_| self.config.resume_agents).and_then(|agent| {
-                    self.config.resume.get(&agent.name)?.command(agent.session.as_deref())
-                });
-                if let (Some(resume), Some(pane)) = (resume, self.panes.get_mut(&id)) {
-                    pane.type_when_ready(resume);
-                }
-                Some(Node::Pane(id))
-            }
-            SavedLayout::Split { vertical, ratio, first, second } => {
-                match (self.restore_layout(*first, cx), self.restore_layout(*second, cx)) {
-                    (Some(first), Some(second)) => Some(Node::Split {
-                        axis: if vertical { Axis::Vertical } else { Axis::Horizontal },
-                        ratio,
-                        first: Box::new(first),
-                        second: Box::new(second),
-                    }),
-                    (Some(only), None) | (None, Some(only)) => Some(only),
-                    (None, None) => None,
-                }
-            }
+            self.layout = layout;
+            cx.notify();
         }
     }
 
-    fn saved_layout(&self, node: &Node) -> SavedLayout {
-        match node {
-            Node::Pane(id) => SavedLayout::Pane(self.panes[id].saved(self.config.restore_scrollback)),
-            Node::Split { axis, ratio, first, second } => SavedLayout::Split {
-                vertical: *axis == Axis::Vertical,
-                ratio: *ratio,
-                first: Box::new(self.saved_layout(first)),
-                second: Box::new(self.saved_layout(second)),
-            },
-        }
+    /// The server is gone or closed this window: don't tell it we detached.
+    pub fn forget_server(&mut self) {
+        self.detach = false;
     }
 
-    /// This window's tabs, for saving.
-    pub fn saved(&self) -> SavedWorkspace {
-        let tabs = self
-            .tabs
-            .iter()
-            .map(|tab| SavedTab {
-                title: tab.title.clone(),
-                layout: self.saved_layout(&tab.root),
-                focused: tab.root.panes().iter().position(|&id| id == tab.focused).unwrap_or(0),
-                zoomed: tab.zoomed,
-            })
-            .collect();
-        SavedWorkspace { window: self.window_bounds, active: self.active, tabs }
+    /// Whether this window shows `pane` right now.
+    pub fn shows(&self, pane: PaneId) -> bool {
+        self.layout.tabs.get(self.layout.active).is_some_and(|tab| layout_of(tab, self.area).0.iter().any(|(id, _)| *id == pane))
+    }
+
+    fn send(&self, message: ClientMessage, cx: &App) {
+        app_state::send(message, cx);
     }
 
     // Geometry.
@@ -504,150 +342,67 @@ impl Workspace {
         self.pane_rects.iter().find(|(pane, _)| *pane == id).map(|(_, rect)| *rect)
     }
 
-    /// The cell of pane `id` under a window position, and which half of it.
-    fn cell_at(&self, id: PaneId, position: Point<Pixels>) -> (usize, usize, Side) {
+    /// The cell of pane `id` under a window position, and whether it's the
+    /// right half.
+    fn cell_at(&self, id: PaneId, position: Point<Pixels>) -> (usize, usize, bool) {
         let rect = self.rect_of(id).unwrap_or(self.area);
-        let size = self.panes.get(&id).map(|pane| pane.session.size());
-        let (columns, lines) = size.map_or((1, 1), |s| (s.columns as usize, s.lines as usize));
+        let size = self.size_for(rect);
+        let (columns, lines) = (size.columns as usize, size.lines as usize);
         let x = ((position.x - px(rect.x)) / self.metrics.cell_width).max(0.);
         let y = ((position.y - px(rect.y)) / self.metrics.line_height).max(0.);
         let column = (x as usize).min(columns - 1);
-        let side = if x.fract() < 0.5 || x as usize >= columns { Side::Left } else { Side::Right };
-        ((y as usize).min(lines - 1), column, side)
+        let right = x.fract() >= 0.5 && (x as usize) < columns;
+        ((y as usize).min(lines - 1), column, right)
     }
 
-    // Tabs and panes.
+    // Panes and tabs.
 
     fn focused_id(&self) -> Option<PaneId> {
-        self.tabs.get(self.active).map(|tab| tab.focused)
+        self.layout.tabs.get(self.layout.active).map(|tab| tab.focused)
     }
 
-    fn focused_pane(&self) -> Option<&Pane> {
-        self.panes.get(&self.focused_id()?)
+    fn mode(&self, pane: PaneId, cx: &App) -> TermMode {
+        cx.global::<Shared>().screens.get(&pane).map_or(TermMode::empty(), |s| s.mode)
     }
 
-    fn focused_session(&self) -> Option<&Session> {
-        self.focused_pane().map(|pane| &pane.session)
+    fn pane_state<'a>(&self, pane: PaneId, cx: &'a App) -> Option<&'a PaneState> {
+        cx.global::<Shared>().panes.get(&pane)
     }
 
-    fn tab_of(&self, id: PaneId) -> Option<usize> {
-        self.tabs.iter().position(|tab| tab.root.contains(id))
+    /// A tab's name: what the user called it, or its focused pane's title.
+    fn tab_title(&self, tab: &TabLayout, cx: &App) -> SharedString {
+        match &tab.title {
+            Some(title) => title.clone().into(),
+            None => self.pane_state(tab.focused, cx).map(|p| p.info.title.clone()).unwrap_or_else(|| "shell".into()).into(),
+        }
     }
 
-    /// Whether the user can see pane `id` right now.
-    fn visible(&self, id: PaneId) -> bool {
-        let Some(tab) = self.tabs.get(self.active) else { return false };
-        self.window_active && tab.root.contains(id) && (!tab.zoomed || tab.focused == id)
+    fn open_tab(&self, cx: &App) {
+        if let Some(window) = self.window {
+            self.send(ClientMessage::NewTab { window, spec: PaneSpec::default() }, cx);
+        }
     }
 
-    /// Start a session for a new pane (not yet placed in a tab).
-    fn spawn_pane(&mut self, spec: TabSpec, cx: &mut App) -> Result<PaneId, String> {
-        let id = app_state::next_pane_id(cx);
-        let shared = cx.global::<Shared>();
-        let explicit = spec.command.clone().filter(|c| !c.is_empty());
-        let mut command = explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
-        let cwd = spec.cwd.or_else(|| self.focused_session().and_then(Session::cwd));
+    fn split(&self, pane: Option<PaneId>, axis: Axis, cx: &App) {
+        if let Some(pane) = pane.or(self.focused_id()) {
+            self.send(ClientMessage::Split { pane, axis, spec: PaneSpec::default() }, cx);
+        }
+    }
 
-        let mut env = HashMap::new();
-        if self.config.shell_integration
-            && let Some(dir) = &shared.integration_dir
-            && let Some(injection) = artty_core::integration::inject(dir, command.as_deref())
+    fn select(&mut self, tab: usize, cx: &mut Context<Self>) {
+        if let Some(window) = self.window
+            && tab < self.layout.tabs.len()
         {
-            env.extend(injection.env);
-            command = injection.command.or(command);
-        }
-        env.insert(SESSION_ENV.to_owned(), id.to_string());
-        // Apps launched from Finder get no locale; shells need one for UTF-8.
-        if std::env::var_os("LANG").is_none()
-            && let Some(lang) = crate::notify::default_lang()
-        {
-            env.insert("LANG".to_owned(), lang);
-        }
-        if let Some(path) = &shared.control_path {
-            env.insert(SOCKET_ENV.to_owned(), path.display().to_string());
-        }
-        if let Some(dir) = &shared.cli_dir {
-            let path = std::env::var("PATH").unwrap_or_default();
-            env.insert("PATH".to_owned(), format!("{}:{path}", dir.display()));
-        }
-        let options = SessionOptions {
-            command: command.map(|mut c| (c.remove(0), c)),
-            working_directory: cwd.filter(|dir| dir.is_dir()),
-            env,
-            scrollback: Some(self.config.scrollback),
-            initial_output: spec.initial_output,
-            cursor_shape: self.config.cursor_style.shape(),
-        };
-        let session = Session::spawn(id, options, self.size_for(self.area), self.theme.clone(), self.sink.clone())
-            .map_err(|err| format!("failed to start: {err}"))?;
-        self.panes.insert(id, Pane::new(session, spec.title, explicit, self.agents.clone()));
-        Ok(id)
-    }
-
-    /// Open a tab with one pane as described by `spec`.
-    fn open_tab(&mut self, spec: TabSpec, focus: bool, cx: &mut Context<Self>) -> Result<PaneId, String> {
-        let id = self.spawn_pane(spec, cx)?;
-        self.tabs.push(Tab { title: None, root: Node::Pane(id), focused: id, zoomed: false });
-        if focus {
-            self.select(self.tabs.len() - 1, cx);
-        }
-        cx.notify();
-        Ok(id)
-    }
-
-    /// Split `target` (default: the focused pane), opening a pane right of or
-    /// below it in the same directory.
-    fn split(
-        &mut self,
-        mut spec: TabSpec,
-        target: Option<PaneId>,
-        axis: Axis,
-        focus: bool,
-        cx: &mut Context<Self>,
-    ) -> Result<PaneId, String> {
-        let target = target.or(self.focused_id()).ok_or("no pane to split")?;
-        let index = self.tab_of(target).ok_or_else(|| format!("no pane {target}"))?;
-        if spec.cwd.is_none() {
-            spec.cwd = self.panes.get(&target).and_then(|pane| pane.session.cwd());
-        }
-        let id = self.spawn_pane(spec, cx)?;
-        let tab = &mut self.tabs[index];
-        tab.root.split(target, id, axis);
-        tab.zoomed = false;
-        if focus {
-            self.focus_pane(id, cx);
-        }
-        cx.notify();
-        Ok(id)
-    }
-
-    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.tabs.len() {
-            let before = self.focused_id();
-            self.close_search();
-            self.active = index;
-            self.reset_input_state();
-            self.move_focus_report(before);
-            cx.notify();
+            self.close_search(cx);
+            self.send(ClientMessage::SelectTab { window, tab }, cx);
         }
     }
 
-    /// Focus pane `id`, switching to its tab.
-    fn focus_pane(&mut self, id: PaneId, cx: &mut Context<Self>) {
-        let Some(index) = self.tab_of(id) else { return };
-        let before = self.focused_id();
-        if before != Some(id) {
-            self.close_search();
+    fn focus_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+        if Some(pane) != self.focused_id() {
+            self.close_search(cx);
         }
-        self.active = index;
-        let tab = &mut self.tabs[index];
-        if tab.zoomed && tab.focused != id {
-            tab.zoomed = false;
-        }
-        tab.focused = id;
-        self.reset_input_state();
-        self.move_focus_report(before);
-        cx.notify();
+        self.send(ClientMessage::FocusPane { pane }, cx);
     }
 
     fn reset_input_state(&mut self) {
@@ -658,23 +413,6 @@ impl Workspace {
         self.cursor_visible = true;
     }
 
-    /// Tell programs that track focus (vim, etc.) that it moved.
-    fn move_focus_report(&self, before: Option<PaneId>) {
-        let after = self.focused_id();
-        if before != after && self.window_active {
-            self.report_focus(before, false);
-            self.report_focus(after, true);
-        }
-    }
-
-    fn report_focus(&self, id: Option<PaneId>, focused: bool) {
-        if let Some(pane) = id.and_then(|id| self.panes.get(&id))
-            && pane.session.mode().contains(TermMode::FOCUS_IN_OUT)
-        {
-            pane.session.write(if focused { &b"\x1b[I"[..] } else { &b"\x1b[O"[..] });
-        }
-    }
-
     fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
         let Some(from) = self.focused_id() else { return };
         if let Some(to) = layout::neighbor(&self.pane_rects, from, direction) {
@@ -683,115 +421,24 @@ impl Workspace {
     }
 
     fn cycle_pane(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(self.active) else { return };
+        let Some(tab) = self.layout.tabs.get(self.layout.active) else { return };
         let panes = tab.root.panes();
         let Some(index) = panes.iter().position(|&id| id == tab.focused) else { return };
         let next = if forward { (index + 1) % panes.len() } else { (index + panes.len() - 1) % panes.len() };
         self.focus_pane(panes[next], cx);
     }
 
-    fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
-        if let Some(tab) = self.tabs.get_mut(self.active)
-            && matches!(tab.root, Node::Split { .. })
-        {
-            tab.zoomed = !tab.zoomed;
-            cx.notify();
-        }
-    }
-
-    /// Close pane `id`; its tab closes with its last pane, and the app with
-    /// its last tab.
-    fn close_pane(&mut self, id: PaneId, cx: &mut Context<Self>) {
-        let Some(index) = self.tab_of(id) else { return };
-        let was_focused = self.focused_id() == Some(id);
-        if was_focused {
-            self.close_search();
-        }
-        self.panes.remove(&id);
-        self.fail_runs(id, "the pane closed");
-
-        let tab = &mut self.tabs[index];
-        let order = tab.root.panes();
-        let root = std::mem::replace(&mut tab.root, Node::Pane(id));
-        match root.without(id) {
-            Some(root) => {
-                let remaining = root.panes();
-                if tab.focused == id {
-                    let position = order.iter().position(|&pane| pane == id).unwrap_or(0);
-                    tab.focused = remaining[position.min(remaining.len() - 1)];
-                }
-                if remaining.len() == 1 {
-                    tab.zoomed = false;
-                }
-                tab.root = root;
-                if was_focused {
-                    self.reset_input_state();
-                }
-            }
-            None => self.remove_tab(index, cx),
-        }
-        cx.notify();
-    }
-
-    fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(ids) = self.tabs.get(index).map(|tab| tab.root.panes()) else { return };
-        if index == self.active {
-            self.close_search();
-        }
-        for id in ids {
-            self.panes.remove(&id);
-            self.fail_runs(id, "the pane closed");
-        }
-        self.remove_tab(index, cx);
-    }
-
-    fn remove_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        self.tabs.remove(index);
-        if self.tabs.is_empty() {
-            // `render` closes the window.
-            cx.notify();
-            return;
-        }
-        if index < self.active || self.active >= self.tabs.len() {
-            self.active = self.active.saturating_sub(1);
-        }
-        self.reset_input_state();
-        cx.notify();
-    }
-
-    fn fail_runs(&mut self, id: PaneId, message: &str) {
-        for run in self.runs.extract_if(.., |run| run.pane == id) {
-            let _ = run.reply.send(Response::error(message));
-        }
-    }
-
-    /// A tab's name: what the user called it, or its focused pane's title.
-    fn tab_title(&self, tab: &Tab) -> SharedString {
-        match &tab.title {
-            Some(title) => title.clone().into(),
-            None => self.panes.get(&tab.focused).map(|pane| pane.title().into()).unwrap_or_default(),
-        }
-    }
-
     fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
-            return;
+        if let Some(window) = self.window {
+            self.renaming = None;
+            self.send(ClientMessage::MoveTab { window, from, to }, cx);
         }
-        let active = self.focused_id();
-        let tab = self.tabs.remove(from);
-        self.tabs.insert(to, tab);
-        // The active tab stays active wherever it moved.
-        if let Some(index) = active.and_then(|id| self.tab_of(id)) {
-            self.active = index;
-        }
-        self.renaming = None;
-        cx.notify();
     }
 
     fn start_rename(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(tab) = self.tabs.get(index) else { return };
-        let text = self.tab_title(tab).to_string();
-        self.close_search();
+        let Some(tab) = self.layout.tabs.get(index) else { return };
+        let text = self.tab_title(tab, cx).to_string();
+        self.close_search(cx);
         self.marked_text = None;
         self.renaming = Some(Renaming { tab: index, text });
         cx.notify();
@@ -800,10 +447,10 @@ impl Workspace {
     fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
         if let Some(Renaming { tab, text }) = self.renaming.take()
             && commit
-            && let Some(tab) = self.tabs.get_mut(tab)
+            && let Some(window) = self.window
         {
-            let text = text.trim();
-            tab.title = (!text.is_empty()).then(|| text.to_owned());
+            let title = Some(text.trim().to_owned()).filter(|t| !t.is_empty());
+            self.send(ClientMessage::RenameTab { window, tab, title }, cx);
         }
         self.marked_text = None;
         cx.notify();
@@ -825,21 +472,27 @@ impl Workspace {
         cx.stop_propagation();
     }
 
-    fn open_context_menu(&mut self, id: PaneId, position: Point<Pixels>, cx: &mut Context<Self>) {
-        let Some(pane) = self.panes.get(&id) else { return };
-        let (line, column, _) = self.cell_at(id, position);
-        self.context_menu = Some(ContextMenu {
-            position,
-            pane: id,
-            link: pane.session.link_at(line, column),
-            has_selection: pane.session.selection_text().is_some(),
-        });
-        cx.notify();
+    fn open_context_menu(&mut self, pane: PaneId, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let (line, column, _) = self.cell_at(pane, position);
+        let link = app_state::query(Query::LinkSpan { pane, line, column }, cx);
+        let selection = app_state::query(Query::SelectionText { pane }, cx);
+        cx.spawn(async move |this, cx| {
+            let link = match link.await {
+                Ok(Reply::Link(link)) => link.map(|(url, _, _)| url),
+                _ => None,
+            };
+            let has_selection = matches!(selection.await, Ok(Reply::Text(Some(_))));
+            let _ = this.update(cx, |this, cx| {
+                this.context_menu = Some(ContextMenu { position, pane, link, has_selection });
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn run_menu_command(&mut self, command: MenuCommand, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.context_menu.take() else { return };
-        let id = menu.pane;
+        let pane = menu.pane;
         match command {
             MenuCommand::Copy => self.copy(&Copy, window, cx),
             MenuCommand::Paste => self.paste(&Paste, window, cx),
@@ -853,256 +506,41 @@ impl Workspace {
                     cx.write_to_clipboard(ClipboardItem::new_string(link));
                 }
             }
-            MenuCommand::SplitRight | MenuCommand::SplitDown => {
-                let axis = if command == MenuCommand::SplitRight { Axis::Horizontal } else { Axis::Vertical };
-                if let Err(err) = self.split(TabSpec::default(), Some(id), axis, true, cx) {
-                    log::error!("{err}");
-                }
-            }
+            MenuCommand::SplitRight => self.split(Some(pane), Axis::Horizontal, cx),
+            MenuCommand::SplitDown => self.split(Some(pane), Axis::Vertical, cx),
             MenuCommand::RenameTab => {
-                if let Some(index) = self.tab_of(id) {
+                if let Some(index) = self.layout.tabs.iter().position(|t| t.root.contains(pane)) {
                     self.start_rename(index, cx);
                 }
             }
-            MenuCommand::ClearBuffer => {
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.session.clear_buffer();
-                }
-            }
-            MenuCommand::ClosePane => self.close_pane(id, cx),
+            MenuCommand::ClearBuffer => self.send(ClientMessage::ClearBuffer { pane }, cx),
+            MenuCommand::ClosePane => self.send(ClientMessage::ClosePane { pane }, cx),
         }
         cx.notify();
     }
 
-    // Events from sessions.
-
-    /// Tell the user about a pane that needs them, unless they're looking at it.
-    fn notify_user(&self, id: PaneId, title: Option<&str>, body: &str) {
-        if !self.config.notifications || self.visible(id) {
-            return;
+    fn jump_to_attention(&mut self, cx: &mut Context<Self>) {
+        // Every pane in tab order, starting after the focused one.
+        let all: Vec<PaneId> = self.layout.tabs.iter().flat_map(|tab| tab.root.panes()).collect();
+        let start = self.focused_id().and_then(|id| all.iter().position(|&p| p == id)).map_or(0, |i| i + 1);
+        let order: Vec<PaneId> = all.iter().cycle().skip(start).take(all.len()).copied().collect();
+        let state = |id: &PaneId| self.pane_state(*id, cx);
+        let target = order
+            .iter()
+            .find(|id| state(id).is_some_and(|s| s.icon == "waiting"))
+            .or_else(|| order.iter().find(|id| state(id).is_some_and(|s| s.info.needs_attention)))
+            .copied();
+        if let Some(id) = target {
+            self.focus_pane(id, cx);
         }
-        let Some(pane) = self.panes.get(&id) else { return };
-        let pane_title = pane.title();
-        let title = title.map_or_else(|| pane_title.to_string(), |t| format!("{t} — {pane_title}"));
-        crate::notify::post(&title, if body.is_empty() { "Needs your attention" } else { body });
-    }
-
-    fn handle_events(&mut self, events: Vec<(SessionId, Event)>, cx: &mut Context<Self>) {
-        for (id, event) in events {
-            let visible = self.visible(id);
-            let Some(pane) = self.panes.get_mut(&id) else { continue };
-            let Some(notice) = pane.session.handle(event) else { continue };
-            match notice {
-                Notice::Redraw => {}
-                Notice::Title(title) => pane.set_title(Some(title)),
-                Notice::ResetTitle => pane.set_title(None),
-                Notice::Bell => {
-                    if visible {
-                        if self.config.visual_bell {
-                            pane.flash = Some(Instant::now());
-                        }
-                    } else {
-                        pane.alert(None);
-                        self.notify_user(id, None, "Bell");
-                    }
-                    if self.config.bell_sound {
-                        beep();
-                    }
-                }
-                Notice::Notification { title, body } => {
-                    pane.alert(Some(body.clone()).filter(|b| !b.is_empty()).or(title.clone()));
-                    self.notify_user(id, title.as_deref(), &body);
-                }
-                Notice::Progress(progress) => {
-                    pane.progress = (progress != Progress::Remove).then_some(progress);
-                }
-                Notice::CommandStarted(command) => pane.command_started(command),
-                Notice::CommandFinished(record) => {
-                    pane.command_finished(record.exit);
-                    let long = record.finished.is_some_and(|end| end - record.started >= LONG_COMMAND);
-                    let agent = pane.agent_name().is_some();
-                    let response = Response::Command {
-                        command: record.command.clone(),
-                        output: record.output.clone(),
-                        exit: record.exit,
-                        truncated: record.truncated,
-                    };
-                    for run in self.runs.extract_if(.., |run| run.pane == id) {
-                        let _ = run.reply.send(response.clone());
-                    }
-                    if long && !visible && !agent {
-                        let what = record.command.clone().unwrap_or_else(|| "Command".to_owned());
-                        let result = match record.exit {
-                            Some(0) | None => "finished".to_owned(),
-                            Some(code) => format!("failed (exit {code})"),
-                        };
-                        let message = format!("{what} {result}");
-                        if let Some(pane) = self.panes.get_mut(&id) {
-                            pane.alert(Some(message.clone()));
-                        }
-                        self.notify_user(id, None, &message);
-                    }
-                }
-                Notice::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-                Notice::ClipboardLoad(_, format) => {
-                    let text = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
-                    pane.session.reply_clipboard(&format, &text);
-                }
-                Notice::Exited => {
-                    self.close_pane(id, cx);
-                    continue;
-                }
-            }
-            if let Some(pane) = self.panes.get_mut(&id) {
-                pane.refresh();
-            }
-            cx.notify();
-        }
-    }
-
-    // Control requests.
-
-    fn resolve(&self, pane: Option<PaneId>) -> Result<PaneId, String> {
-        match pane {
-            Some(id) if self.panes.contains_key(&id) => Ok(id),
-            Some(id) => Err(format!("no pane {id}")),
-            None => self.focused_id().ok_or_else(|| "no tabs".to_owned()),
-        }
-    }
-
-    pub fn handle_request(&mut self, request: Request, reply: oneshot::Sender<Response>, cx: &mut Context<Self>) {
-        let response = match request {
-            // Answered when the command finishes.
-            Request::Run { tab, command, timeout_secs } => match self.start_run(tab, &command) {
-                Ok(pane) => {
-                    let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
-                    self.runs.push(PendingRun { pane, reply, deadline });
-                    return;
-                }
-                Err(message) => Response::error(message),
-            },
-            request => self.respond(request, cx).unwrap_or_else(Response::error),
-        };
-        let _ = reply.send(response);
-        cx.notify();
-    }
-
-    /// Type `command` into a pane's shell; returns the pane to wait on.
-    fn start_run(&mut self, pane: Option<PaneId>, command: &str) -> Result<PaneId, String> {
-        let id = self.resolve(pane)?;
-        let session = &self.panes[&id].session;
-        if !session.shell_integration() {
-            return Err("this pane's shell doesn't report commands (no shell integration)".into());
-        }
-        if session.shell_phase() != ShellPhase::Prompt || self.runs.iter().any(|run| run.pane == id) {
-            return Err("the pane is busy".into());
-        }
-        session.write(format!("{command}\r").into_bytes());
-        Ok(id)
-    }
-
-    fn respond(&mut self, request: Request, cx: &mut Context<Self>) -> Result<Response, String> {
-        Ok(match request {
-            // Normally answered for all windows by `app_state::route`.
-            Request::List => Response::Tabs { tabs: self.pane_infos(1, true) },
-            Request::Read { tab, source } => {
-                let session = &self.panes[&self.resolve(tab)?].session;
-                let text = match source {
-                    ReadSource::Screen => session.screen_text(),
-                    ReadSource::Scrollback { lines } => session.scrollback_text(lines),
-                    ReadSource::LastCommand => {
-                        if !session.shell_integration() {
-                            return Err("this pane's shell doesn't report commands (no shell integration)".into());
-                        }
-                        let last = session.last_command().ok_or("no command has finished yet")?;
-                        return Ok(Response::Command {
-                            command: last.command.clone(),
-                            output: last.output.clone(),
-                            exit: last.exit,
-                            truncated: last.truncated,
-                        });
-                    }
-                };
-                Response::Text { text }
-            }
-            Request::Send { tab, text, enter } => {
-                let session = &self.panes[&self.resolve(tab)?].session;
-                let mut bytes = text.into_bytes();
-                if enter {
-                    bytes.push(b'\r');
-                }
-                session.write(bytes);
-                Response::Ok
-            }
-            Request::New { cwd, command, title, focus, split, target } => {
-                let command = (!command.is_empty()).then_some(command);
-                let spec = TabSpec { command, cwd, title, initial_output: None };
-                let id = match split {
-                    None => self.open_tab(spec, focus, cx)?,
-                    Some(direction) => {
-                        let target = target.map(|t| self.resolve(Some(t))).transpose()?;
-                        let axis = match direction {
-                            SplitDirection::Right => Axis::Horizontal,
-                            SplitDirection::Down => Axis::Vertical,
-                        };
-                        self.split(spec, target, axis, focus, cx)?
-                    }
-                };
-                Response::Tab { id }
-            }
-            Request::Focus { tab } => {
-                let id = self.resolve(Some(tab))?;
-                self.focus_pane(id, cx);
-                Response::Ok
-            }
-            Request::Rename { tab, title } => {
-                let id = self.resolve(tab)?;
-                let index = self.tab_of(id).ok_or("the pane closed")?;
-                let title = title.trim();
-                self.tabs[index].title = (!title.is_empty()).then(|| title.to_owned());
-                Response::Ok
-            }
-            Request::Close { tab } => {
-                let id = self.resolve(Some(tab))?;
-                self.close_pane(id, cx);
-                Response::Ok
-            }
-            Request::Run { .. } => unreachable!("handled in handle_request"),
-            Request::Settings | Request::Restart => return Err("handled by the app".into()),
-            Request::ServerStatus | Request::StopServer | Request::Processes { .. } | Request::Kill { .. } => {
-                return Err("handled by the artty server".into());
-            }
-            Request::Notify { tab, title, body } => {
-                let id = self.resolve(tab)?;
-                if let Some(pane) = self.panes.get_mut(&id) {
-                    pane.alert(Some(body.clone()));
-                }
-                self.notify_user(id, title.as_deref(), &body);
-                Response::Ok
-            }
-            Request::Status { tab, state, message, agent_session, agent } => {
-                let id = self.resolve(tab)?;
-                let pane = self.panes.get_mut(&id).ok_or("the pane closed")?;
-                let was_waiting = matches!(pane.status, Status::Agent { state: AgentState::Waiting, .. });
-                pane.report(state, message.clone(), agent_session, agent);
-                match state {
-                    AgentState::Waiting if !was_waiting => {
-                        self.notify_user(id, Some("Needs input"), message.as_deref().unwrap_or(""));
-                    }
-                    AgentState::Done => self.notify_user(id, Some("Done"), message.as_deref().unwrap_or("")),
-                    _ => {}
-                }
-                Response::Ok
-            }
-        })
     }
 
     // Timers.
 
     /// Send user input to the focused pane, keeping the cursor solid.
-    fn input(&mut self, bytes: Vec<u8>) {
-        if let Some(session) = self.focused_session() {
-            session.write(bytes);
+    fn input(&mut self, bytes: Vec<u8>, cx: &App) {
+        if let Some(pane) = self.focused_id() {
+            self.send(ClientMessage::Input { pane, bytes }, cx);
         }
         self.cursor_visible = true;
         self.blink_hold = true;
@@ -1121,65 +559,24 @@ impl Workspace {
     }
 
     fn spin(&mut self, cx: &mut Context<Self>) {
-        if self.panes.values().any(|pane| pane.status.busy()) {
+        let panes: Vec<PaneId> = self.layout.tabs.iter().flat_map(|t| t.root.panes()).collect();
+        let shared = cx.global::<Shared>();
+        let busy = panes.iter().any(|id| shared.panes.get(id).is_some_and(|s| s.icon == "busy"));
+        let flashing = panes.iter().any(|id| shared.flashes.get(id).is_some_and(|at| at.elapsed() <= FLASH));
+        if busy {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER.len();
-            cx.notify();
         }
-        // Animate visual bells, and clear finished ones.
-        let mut flashing = false;
-        for pane in self.panes.values_mut() {
-            if pane.flash.is_some_and(|at| at.elapsed() > FLASH) {
-                pane.flash = None;
-                flashing = true;
-            }
-            flashing |= pane.flash.is_some();
-        }
-        if flashing {
+        if busy || flashing {
             cx.notify();
         }
     }
 
-    /// Underline the link under the pointer while ⌘ is held.
-    fn update_hover_link(&mut self, platform: bool, cx: &mut Context<Self>) {
-        let hover = platform
-            .then_some(self.mouse_position)
-            .flatten()
-            .and_then(|position| {
-                let (id, _) = self.pane_at(position)?;
-                let (line, column, _) = self.cell_at(id, position);
-                let (_, span) = self.panes.get(&id)?.session.link_span(line, column)?;
-                Some((id, line, span))
-            });
-        if hover != self.hover_link {
-            self.hover_link = hover;
-            cx.notify();
-        }
-    }
-
-    /// Once a second: what's running in each pane, config changes, timeouts.
+    /// Once a second: notice config changes (fonts, opacity are drawn here).
     fn poll(&mut self, cx: &mut Context<Self>) {
-        let mut changed = false;
-        for pane in self.panes.values_mut() {
-            let process = pane.session.process();
-            let before = (pane.status.clone(), pane.process.clone());
-            pane.process = process;
-            pane.refresh();
-            pane.flush_pending_input();
-            changed |= before != (pane.status.clone(), pane.process.clone()) || pane.status.busy();
-        }
-
-        let now = Instant::now();
-        for run in self.runs.extract_if(.., |run| run.deadline.is_some_and(|d| d <= now) || run.reply.is_canceled()) {
-            let _ = run.reply.send(Response::error("timed out"));
-        }
-
         let modified = config_modified();
         if modified != self.config_modified {
             self.config_modified = modified;
             self.reload_config = true;
-            changed = true;
-        }
-        if changed {
             cx.notify();
         }
     }
@@ -1192,12 +589,6 @@ impl Workspace {
             return;
         }
         self.theme = Arc::new(config.theme());
-        self.agents = agents_of(&config);
-        for pane in self.panes.values_mut() {
-            pane.session.set_theme(self.theme.clone());
-            pane.session.set_cursor_shape(config.cursor_style.shape());
-            pane.set_agents(self.agents.clone());
-        }
         if config.font_size != self.config.font_size {
             self.font_size = config.font_size;
         }
@@ -1206,16 +597,37 @@ impl Workspace {
         self.config = Arc::new(config);
     }
 
-    fn jump_to_attention(&mut self, cx: &mut Context<Self>) {
-        // Every pane in tab order, starting after the focused one.
-        let all: Vec<PaneId> = self.tabs.iter().flat_map(|tab| tab.root.panes()).collect();
-        let start = self.focused_id().and_then(|id| all.iter().position(|&p| p == id)).map_or(0, |i| i + 1);
-        let order: Vec<PaneId> = all.iter().cycle().skip(start).take(all.len()).copied().collect();
-        let waiting = |id: &PaneId| matches!(self.panes[id].status, Status::Agent { state: AgentState::Waiting, .. });
-        let target = order.iter().find(|id| waiting(id)).or_else(|| order.iter().find(|id| self.panes[*id].attention));
-        if let Some(&id) = target {
-            self.focus_pane(id, cx);
+    /// Underline the link under the pointer while ⌘ is held.
+    fn update_hover_link(&mut self, platform: bool, cx: &mut Context<Self>) {
+        let cell = platform.then_some(self.mouse_position).flatten().and_then(|position| {
+            let (pane, _) = self.pane_at(position)?;
+            let (line, column, _) = self.cell_at(pane, position);
+            Some((pane, line, column))
+        });
+        if cell == self.hover_cell {
+            return;
         }
+        self.hover_cell = cell;
+        let Some((pane, line, column)) = cell else {
+            if self.hover_link.take().is_some() {
+                cx.notify();
+            }
+            return;
+        };
+        let answer = app_state::query(Query::LinkSpan { pane, line, column }, cx);
+        cx.spawn(async move |this, cx| {
+            let link = match answer.await {
+                Ok(Reply::Link(link)) => link,
+                _ => None,
+            };
+            let _ = this.update(cx, |this, cx| {
+                if this.hover_cell == Some((pane, line, column)) {
+                    this.hover_link = link.map(|(_, start, end)| (pane, line, start..end));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     // Keyboard.
@@ -1246,9 +658,9 @@ impl Workspace {
             self.search_key(event, cx);
             return;
         }
-        let Some(session) = self.focused_session() else { return };
-        if let Some(bytes) = keys::to_esc(keystroke, session.mode(), self.config.option_as_meta) {
-            self.input(bytes);
+        let Some(pane) = self.focused_id() else { return };
+        if let Some(bytes) = keys::to_esc(keystroke, self.mode(pane, cx), self.config.option_as_meta) {
+            self.input(bytes, cx);
             cx.stop_propagation();
         }
     }
@@ -1262,42 +674,40 @@ impl Workspace {
         cx.notify();
     }
 
-    fn close_search(&mut self) {
+    fn close_search(&mut self, cx: &App) {
         if self.search.take().is_some()
-            && let Some(id) = self.focused_id()
-            && let Some(pane) = self.panes.get_mut(&id)
+            && let Some(pane) = self.focused_id()
         {
-            pane.session.end_search();
+            self.send(ClientMessage::EndSearch { pane }, cx);
         }
     }
 
     fn run_search(&mut self, older: bool, restart: bool, cx: &mut Context<Self>) {
-        let Some(id) = self.focused_id() else { return };
-        let Some(search) = self.search.as_mut() else { return };
-        let Some(pane) = self.panes.get_mut(&id) else { return };
-        if restart {
-            pane.session.clear_selection();
-        }
-        if search.query.is_empty() {
-            search.found = None;
-            search.error = None;
-        } else {
-            match pane.session.search(&search.query, older) {
-                Ok(found) => {
-                    search.found = Some(found);
-                    search.error = None;
+        let (Some(pane), Some(search)) = (self.focused_id(), self.search.as_ref()) else { return };
+        let answer = app_state::search(pane, search.query.clone(), older, restart, cx);
+        cx.spawn(async move |this, cx| {
+            let Ok(Reply::Search(result)) = answer.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                if let Some(search) = this.search.as_mut() {
+                    match result {
+                        Ok(found) => {
+                            search.found = (!search.query.is_empty()).then_some(found);
+                            search.error = None;
+                        }
+                        Err(error) => search.error = Some(error),
+                    }
+                    cx.notify();
                 }
-                Err(error) => search.error = Some(error),
-            }
-        }
-        cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn search_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         match keystroke.key.as_str() {
             "escape" => {
-                self.close_search();
+                self.close_search(cx);
                 cx.notify();
             }
             "enter" => self.run_search(!keystroke.modifiers.shift, false, cx),
@@ -1318,29 +728,20 @@ impl Workspace {
 
     /// Whether mouse events in pane `id` go to its program instead of
     /// selecting text. Holding Shift always selects, as in other terminals.
-    fn mouse_reporting(&self, id: PaneId, modifiers: &Modifiers) -> Option<TermMode> {
-        let mode = self.panes.get(&id)?.session.mode();
+    fn mouse_reporting(&self, id: PaneId, modifiers: &Modifiers, cx: &App) -> Option<TermMode> {
+        let mode = self.mode(id, cx);
         (mode.intersects(TermMode::MOUSE_MODE) && !modifiers.shift).then_some(mode)
     }
 
-    fn report_mouse(
-        &mut self,
-        id: PaneId,
-        button: Button,
-        action: Action,
-        position: Point<Pixels>,
-        modifiers: &Modifiers,
-    ) {
-        let Some(mode) = self.mouse_reporting(id, modifiers) else { return };
+    fn report_mouse(&mut self, id: PaneId, button: Button, action: Action, position: Point<Pixels>, modifiers: &Modifiers, cx: &App) {
+        let Some(mode) = self.mouse_reporting(id, modifiers, cx) else { return };
         let (line, column, _) = self.cell_at(id, position);
         if action == Action::Motion && self.last_mouse_cell == Some((line, column)) {
             return;
         }
         self.last_mouse_cell = Some((line, column));
-        if let Some(bytes) = mouse::report(button, action, line, column, modifiers, mode)
-            && let Some(pane) = self.panes.get(&id)
-        {
-            pane.session.write(bytes);
+        if let Some(bytes) = mouse::report(button, action, line, column, modifiers, mode) {
+            self.send(ClientMessage::Input { pane: id, bytes }, cx);
         }
     }
 
@@ -1354,46 +755,47 @@ impl Workspace {
             self.focus_pane(id, cx);
         }
         self.mouse_pane = Some(id);
-        let Some(session) = self.panes.get(&id).map(|pane| &pane.session) else { return };
 
         if event.button == MouseButton::Left && event.modifiers.platform {
             let (line, column, _) = self.cell_at(id, event.position);
-            if let Some(link) = session.link_at(line, column) {
-                let _ = std::process::Command::new("open").arg(&link).spawn();
-            }
+            let answer = app_state::query(Query::LinkSpan { pane: id, line, column }, cx);
+            cx.spawn(async move |_, _| {
+                if let Ok(Reply::Link(Some((link, _, _)))) = answer.await {
+                    let _ = std::process::Command::new("open").arg(&link).spawn();
+                }
+            })
+            .detach();
             return;
         }
-        let menu_click = event.button == MouseButton::Right
-            || (event.button == MouseButton::Left && event.modifiers.control);
-        if menu_click && (self.mouse_reporting(id, &event.modifiers).is_none() || event.modifiers.control) {
+        let menu_click = event.button == MouseButton::Right || (event.button == MouseButton::Left && event.modifiers.control);
+        if menu_click && (self.mouse_reporting(id, &event.modifiers, cx).is_none() || event.modifiers.control) {
             self.open_context_menu(id, event.position, cx);
             return;
         }
-        if self.mouse_reporting(id, &event.modifiers).is_some() {
+        if self.mouse_reporting(id, &event.modifiers, cx).is_some() {
             if let Some(button) = Button::from_gpui(event.button) {
                 self.reporting_button = Some(button);
                 self.last_mouse_cell = None;
-                self.report_mouse(id, button, Action::Press, event.position, &event.modifiers);
+                self.report_mouse(id, button, Action::Press, event.position, &event.modifiers, cx);
             }
             return;
         }
         if event.button != MouseButton::Left {
             return;
         }
-        let (line, column, side) = self.cell_at(id, event.position);
-        let session = &self.panes[&id].session;
-        if event.modifiers.shift && session.selection_text().is_some() {
-            session.update_selection(line, column, side);
+        let (line, column, right) = self.cell_at(id, event.position);
+        let op = if event.modifiers.shift {
+            SelectionOp::Update { line, column, right }
         } else {
             let kind = match event.click_count {
-                0 | 1 => SelectionType::Simple,
-                2 => SelectionType::Semantic,
-                _ => SelectionType::Lines,
+                0 | 1 => 0,
+                2 => 1,
+                _ => 2,
             };
-            session.start_selection(kind, line, column, side);
-        }
+            SelectionOp::Start { kind, line, column, right }
+        };
+        self.send(ClientMessage::Selection { pane: id, op }, cx);
         self.selecting = true;
-        cx.notify();
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1402,29 +804,30 @@ impl Workspace {
         if let Some(divider) = &self.drag {
             let ratio = layout::drag_ratio(divider, event.position.x.into(), event.position.y.into(), SPLIT_GAP);
             let path = divider.path.clone();
-            if let Some(tab) = self.tabs.get_mut(self.active) {
+            // Move the divider right away; the server confirms with a layout.
+            if let Some(tab) = self.layout.tabs.get_mut(self.layout.active) {
                 tab.root.set_ratio(&path, ratio);
+            }
+            if let Some(window) = self.window {
+                self.send(ClientMessage::SetRatio { window, path, ratio }, cx);
             }
             cx.notify();
             return;
         }
         if let (Some(button), Some(id)) = (self.reporting_button, self.mouse_pane) {
-            self.report_mouse(id, button, Action::Motion, event.position, &event.modifiers);
+            self.report_mouse(id, button, Action::Motion, event.position, &event.modifiers, cx);
             return;
         }
         if self.selecting && event.pressed_button == Some(MouseButton::Left) {
             if let Some(id) = self.mouse_pane {
-                let (line, column, side) = self.cell_at(id, event.position);
-                if let Some(pane) = self.panes.get(&id) {
-                    pane.session.update_selection(line, column, side);
-                }
+                let (line, column, right) = self.cell_at(id, event.position);
+                self.send(ClientMessage::Selection { pane: id, op: SelectionOp::Update { line, column, right } }, cx);
             }
-            cx.notify();
         } else if event.pressed_button.is_none()
             && let Some((id, _)) = self.pane_at(event.position)
             && Some(id) == self.focused_id()
         {
-            self.report_mouse(id, Button::None, Action::Motion, event.position, &event.modifiers);
+            self.report_mouse(id, Button::None, Action::Motion, event.position, &event.modifiers, cx);
         }
     }
 
@@ -1435,22 +838,27 @@ impl Workspace {
         }
         let id = self.mouse_pane.take();
         if let (Some(button), Some(id)) = (self.reporting_button.take(), id) {
-            self.report_mouse(id, button, Action::Release, event.position, &event.modifiers);
+            self.report_mouse(id, button, Action::Release, event.position, &event.modifiers, cx);
             return;
         }
         if self.selecting {
             self.selecting = false;
-            if let Some(pane) = id.and_then(|id| self.panes.get(&id)) {
-                match pane.session.selection_text() {
-                    Some(text) if self.config.copy_on_select => {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    }
+            let Some(pane) = id else { return };
+            let answer = app_state::query(Query::SelectionText { pane }, cx);
+            let copy = self.config.copy_on_select;
+            cx.spawn(async move |this, cx| {
+                let text = match answer.await {
+                    Ok(Reply::Text(text)) => text,
+                    _ => None,
+                };
+                let _ = this.update(cx, |this, cx| match text {
+                    Some(text) if copy => cx.write_to_clipboard(ClipboardItem::new_string(text)),
                     Some(_) => {}
                     // A plain click selects nothing; drop the empty selection.
-                    None => pane.session.clear_selection(),
-                }
-            }
-            cx.notify();
+                    None => this.send(ClientMessage::Selection { pane, op: SelectionOp::Clear }, cx),
+                });
+            })
+            .detach();
         }
     }
 
@@ -1469,12 +877,11 @@ impl Workspace {
         if lines == 0 {
             return;
         }
-        let Some(pane) = self.panes.get(&id) else { return };
-        let mode = pane.session.mode();
-        if self.mouse_reporting(id, &event.modifiers).is_some() {
+        let mode = self.mode(id, cx);
+        if self.mouse_reporting(id, &event.modifiers, cx).is_some() {
             let button = if lines > 0 { Button::WheelUp } else { Button::WheelDown };
             for _ in 0..lines.unsigned_abs() {
-                self.report_mouse(id, button, Action::Press, event.position, &event.modifiers);
+                self.report_mouse(id, button, Action::Press, event.position, &event.modifiers, cx);
             }
         } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
             // Full-screen programs (less, vim) get arrow keys instead.
@@ -1484,17 +891,21 @@ impl Workspace {
                 (false, true) => b"\x1bOB",
                 (false, false) => b"\x1b[B",
             };
-            pane.session.write(key.repeat(lines.unsigned_abs() as usize));
+            self.send(ClientMessage::Input { pane: id, bytes: key.repeat(lines.unsigned_abs() as usize) }, cx);
         } else {
-            pane.session.scroll(lines);
+            self.send(ClientMessage::Scroll { pane: id, lines }, cx);
         }
-        cx.notify();
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.focused_session().and_then(Session::selection_text) {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
+        let Some(pane) = self.focused_id() else { return };
+        let answer = app_state::query(Query::SelectionText { pane }, cx);
+        cx.spawn(async move |_, cx| {
+            if let Ok(Reply::Text(Some(text))) = answer.await {
+                let _ = cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
+            }
+        })
+        .detach();
     }
 
     fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1504,14 +915,14 @@ impl Workspace {
             self.run_search(true, true, cx);
             return;
         }
-        let Some(session) = self.focused_session() else { return };
-        let bytes = if session.mode().contains(TermMode::BRACKETED_PASTE) {
+        let Some(pane) = self.focused_id() else { return };
+        let bytes = if self.mode(pane, cx).contains(TermMode::BRACKETED_PASTE) {
             // Strip any embedded end marker so pasted text can't escape the bracket.
             format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", ""))
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")
         };
-        self.input(bytes.into_bytes());
+        self.input(bytes.into_bytes(), cx);
     }
 
     fn set_font_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
@@ -1522,21 +933,16 @@ impl Workspace {
 
     // Sidebar.
 
-    fn status_icon(&self, pane: &Pane) -> Option<(SharedString, Hsla, f32)> {
+    fn icon_cell(&self, state: Option<&PaneState>) -> gpui::Div {
         let color = |hex: u32| -> Hsla { rgba(hex).into() };
         // Braille spinner frames are tiny at text size.
-        Some(match &pane.status {
-            status if status.busy() => (SPINNER[self.spinner_frame].into(), color(0x8fb4ffff), 16.),
-            Status::Agent { state: AgentState::Waiting, .. } => ("●".into(), color(0xe0af68ff), 12.),
-            Status::Agent { state: AgentState::Done, .. } => ("✓".into(), color(0x9ece6aff), 12.),
-            Status::Failed { .. } => ("✕".into(), color(0xf7768eff), 12.),
-            _ if pane.attention => ("●".into(), color(0xe0af68ff), 12.),
-            _ => return None,
-        })
-    }
-
-    fn icon_cell(&self, pane: &Pane) -> gpui::Div {
-        let icon = self.status_icon(pane);
+        let icon: Option<(SharedString, Hsla, f32)> = match state.map(|s| s.icon.as_str()) {
+            Some("busy") => Some((SPINNER[self.spinner_frame].into(), color(0x8fb4ffff), 16.)),
+            Some("waiting" | "attention") => Some(("●".into(), color(0xe0af68ff), 12.)),
+            Some("done") => Some(("✓".into(), color(0x9ece6aff), 12.)),
+            Some("failed") => Some(("✕".into(), color(0xf7768eff), 12.)),
+            _ => None,
+        };
         div()
             .w(px(12.))
             .flex_none()
@@ -1545,16 +951,22 @@ impl Workspace {
             .when_some(icon, |d, (icon, color, size)| d.text_color(color).text_size(px(size)).child(icon))
     }
 
-    fn pane_detail(pane: &Pane) -> Option<String> {
-        let detail = pane.detail();
-        match pane.progress {
-            Some(Progress::Normal(percent) | Progress::Paused(Some(percent)) | Progress::Error(Some(percent))) => {
-                Some(match detail {
-                    Some(detail) => format!("{detail} · {percent}%"),
-                    None => format!("{percent}%"),
-                })
-            }
-            _ => detail,
+    fn pane_detail(state: &PaneState) -> Option<String> {
+        match (state.info.detail.clone(), state.progress) {
+            (Some(detail), Some(percent)) => Some(format!("{detail} · {percent}%")),
+            (None, Some(percent)) => Some(format!("{percent}%")),
+            (detail, None) => detail,
+        }
+    }
+
+    fn urgency(state: Option<&PaneState>) -> u8 {
+        match state.map(|s| s.icon.as_str()) {
+            Some("waiting") => 5,
+            Some("busy") => 4,
+            Some("failed") => 3,
+            Some("done") => 2,
+            Some("attention") => 1,
+            _ => 0,
         }
     }
 
@@ -1565,22 +977,23 @@ impl Workspace {
         div().overflow_hidden().line_clamp(1).text_ellipsis().child(text.into())
     }
 
-    fn tab_row(&self, index: usize, tab: &Tab, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let selected = index == self.active;
+    fn tab_row(&self, index: usize, tab: &TabLayout, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let selected = index == self.layout.active;
         let ids = tab.root.panes();
         let split = ids.len() > 1;
-        let panes: Vec<&Pane> = ids.iter().map(|id| &self.panes[id]).collect();
-        let focused = &self.panes[&tab.focused];
+        let states: Vec<Option<&PaneState>> = ids.iter().map(|id| self.pane_state(*id, cx)).collect();
+        let focused = self.pane_state(tab.focused, cx);
         // The row shows the most urgent pane, preferring the focused one.
-        let summary = panes
+        let summary = ids
             .iter()
-            .copied()
-            .max_by_key(|pane| (pane.status.urgency(), std::ptr::eq(*pane, focused)))
-            .unwrap_or(focused);
-        let attention = panes.iter().any(|pane| pane.attention);
+            .zip(&states)
+            .max_by_key(|(id, state)| (Self::urgency(**state), **id == tab.focused))
+            .and_then(|(_, state)| *state)
+            .or(focused);
+        let attention = states.iter().flatten().any(|s| s.info.needs_attention);
         let label: SharedString = if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
         let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
-        let detail = if split { None } else { Self::pane_detail(focused) };
+        let detail = if split { None } else { focused.and_then(Self::pane_detail) };
 
         let header = div()
             .flex()
@@ -1605,7 +1018,7 @@ impl Workspace {
                                 .text_color(rgba(0xffffffee))
                                 .child(format!("{}{marked}▏", renaming.text))
                         }
-                        None => Self::one_line(self.tab_title(tab))
+                        None => Self::one_line(self.tab_title(tab, cx))
                             .text_color(text_color)
                             .when(attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
                     })
@@ -1626,13 +1039,14 @@ impl Workspace {
 
         // Split tabs list their panes, so every agent's state is visible.
         let pane_rows = split.then(|| {
-            ids.iter().map(|&id| {
-                let pane = &self.panes[&id];
+            ids.iter().zip(&states).map(|(&id, state)| {
                 let is_focused = id == tab.focused;
-                let line = match Self::pane_detail(pane) {
-                    Some(detail) => format!("{} · {detail}", pane.title()),
-                    None => pane.title().to_string(),
+                let title = state.map(|s| s.info.title.clone()).unwrap_or_else(|| "shell".into());
+                let line = match state.and_then(Self::pane_detail) {
+                    Some(detail) => format!("{title} · {detail}"),
+                    None => title,
                 };
+                let pane_attention = state.is_some_and(|s| s.info.needs_attention);
                 div()
                     .id(("pane", id as usize))
                     .flex()
@@ -1643,13 +1057,13 @@ impl Workspace {
                     .rounded(px(5.))
                     .hover(|d| d.bg(rgba(0xffffff0c)))
                     .on_click(cx.listener(move |this, _, _, cx| this.focus_pane(id, cx)))
-                    .child(self.icon_cell(pane))
+                    .child(self.icon_cell(*state))
                     .child(
                         Self::one_line(line)
                             .flex_1()
                             .min_w_0()
                             .text_color(if is_focused && selected { rgba(0xffffffd0) } else { rgba(0xffffff80) })
-                            .when(pane.attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
+                            .when(pane_attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
                     )
             })
         });
@@ -1673,7 +1087,7 @@ impl Workspace {
                     this.select(index, cx);
                 }
             }))
-            .on_drag(DraggedTab { index, title: self.tab_title(tab) }, |dragged, _, _, cx| {
+            .on_drag(DraggedTab { index, title: self.tab_title(tab, cx) }, |dragged, _, _, cx| {
                 cx.new(|_| dragged.clone())
             })
             .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
@@ -1682,8 +1096,44 @@ impl Workspace {
             .children(pane_rows.into_iter().flatten())
     }
 
+    fn banner(id: &'static str, title: &'static str, hint: &'static str, button: &'static str, action: fn(&mut App)) -> gpui::Div {
+        div()
+            .mt_2()
+            .mx_1()
+            .p_2()
+            .rounded(px(8.))
+            .bg(rgba(0x3478f626))
+            .border_1()
+            .border_color(rgba(0x3478f666))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().text_color(rgba(0xffffffee)).child(title))
+                    .child(div().text_size(px(11.)).text_color(rgba(0xffffff80)).child(hint)),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .flex_none()
+                    .px_2()
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    .bg(rgba(0x3478f6ff))
+                    .hover(|d| d.bg(rgba(0x4a88ffff)))
+                    .text_color(rgba(0xffffffff))
+                    .child(button)
+                    .on_click(move |_, _, cx| action(cx)),
+            )
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<_> = self.tabs.iter().enumerate().map(|(i, tab)| self.tab_row(i, tab, cx)).collect();
+        let rows: Vec<_> = self.layout.tabs.iter().enumerate().map(|(i, tab)| self.tab_row(i, tab, cx)).collect();
+        let mismatch = cx.global::<Shared>().server_mismatch.is_some();
         div()
             .flex()
             .flex_col()
@@ -1716,9 +1166,7 @@ impl Workspace {
                             .hover(|d| d.bg(rgba(0xffffff14)))
                             .text_size(px(14.))
                             .child("+")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let _ = this.open_tab(TabSpec::default(), true, cx);
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.open_tab(cx))),
                     ),
             )
             .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(3.)).overflow_y_scroll().children(rows))
@@ -1732,39 +1180,16 @@ impl Workspace {
                 )
             })
             .when(app_state::update_ready(cx), |d| {
-                d.child(
-                    div()
-                        .mt_2()
-                        .mx_1()
-                        .p_2()
-                        .rounded(px(8.))
-                        .bg(rgba(0x3478f626))
-                        .border_1()
-                        .border_color(rgba(0x3478f666))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_2()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .child(div().text_color(rgba(0xffffffee)).child("New build ready"))
-                                .child(div().text_size(px(11.)).text_color(rgba(0xffffff80)).child("Tabs reopen after restart")),
-                        )
-                        .child(
-                            div()
-                                .id("restart")
-                                .px_2()
-                                .py(px(3.))
-                                .rounded(px(6.))
-                                .bg(rgba(0x3478f6ff))
-                                .hover(|d| d.bg(rgba(0x4a88ffff)))
-                                .text_color(rgba(0xffffffff))
-                                .child("Restart")
-                                .on_click(|_, _, cx| app_state::restart(cx)),
-                        ),
-                )
+                d.child(Self::banner("restart", "New build ready", "Sessions keep running", "Restart", app_state::restart))
+            })
+            .when(mismatch, |d| {
+                d.child(Self::banner(
+                    "restart-server",
+                    "Server is a different build",
+                    "Restarting it reopens your tabs",
+                    "Restart",
+                    app_state::restart_server,
+                ))
             })
     }
 
@@ -1932,6 +1357,30 @@ impl Workspace {
     }
 }
 
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        // The window closed: its tabs keep running in the server, detached.
+        // (There's no `App` here; the server also notices a lost connection.)
+        if self.detach
+            && let Some(window) = self.window
+        {
+            DETACHED.with(|detached| detached.borrow_mut().push(window));
+        }
+    }
+}
+
+thread_local! {
+    /// Windows closed since the last render, to detach from the server.
+    static DETACHED: std::cell::RefCell<Vec<WindowId>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Tell the server about windows that closed.
+pub fn flush_detached(cx: &App) {
+    for window in DETACHED.with(|detached| std::mem::take(&mut *detached.borrow_mut())) {
+        app_state::send(ClientMessage::DetachWindow { window }, cx);
+    }
+}
+
 fn saved_window(bounds: WindowBounds) -> SavedWindow {
     let (rect, maximized, fullscreen) = match bounds {
         WindowBounds::Windowed(rect) => (rect, false, false),
@@ -1981,57 +1430,52 @@ struct PaneView {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // The last tab closed: so does the window.
-        if self.tabs.is_empty() {
-            window.remove_window();
-            return div();
-        }
-        let build_started = std::time::Instant::now();
+        flush_detached(cx);
         if self.reload_config {
             self.apply_config(window);
         }
         self.area = Self::area_rect(window);
-        self.window_bounds = Some(saved_window(window.window_bounds()));
         self.window_active = window.is_window_active();
+        if let Some(id) = self.window {
+            let bounds = saved_window(window.window_bounds());
+            if self.bounds_sent != Some(bounds) {
+                self.bounds_sent = Some(bounds);
+                self.send(ClientMessage::WindowBounds { window: id, bounds }, cx);
+            }
+        }
 
-        // Size every pane of every tab to its place in the layout.
-        for (index, tab) in self.tabs.iter().enumerate() {
-            let (rects, dividers) = tab.layout(self.area);
-            for (id, rect) in &rects {
-                let size = self.size_for(*rect);
-                if let Some(pane) = self.panes.get_mut(id) {
-                    pane.session.resize(size);
-                }
-            }
-            if index == self.active {
-                self.pane_rects = rects;
-                self.dividers = dividers;
+        // Lay out the active tab and keep the server's pane sizes in step.
+        let (rects, dividers) = self.layout.tabs.get(self.layout.active).map(|tab| layout_of(tab, self.area)).unwrap_or_default();
+        for (id, rect) in &rects {
+            let size = self.size_for(*rect);
+            if self.sizes.get(id) != Some(&size) {
+                self.sizes.insert(*id, size);
+                self.send(ClientMessage::Resize { pane: *id, size }, cx);
             }
         }
-        if self.window_active {
-            for (id, _) in &self.pane_rects {
-                if let Some(pane) = self.panes.get_mut(id) {
-                    pane.attention = false;
-                }
-            }
-        }
+        self.pane_rects = rects;
+        self.dividers = dividers;
 
         let focused_id = self.focused_id();
         let split = self.pane_rects.len() > 1;
-        let mut views = Vec::new();
-        for (id, rect) in self.pane_rects.clone() {
-            let Some(pane) = self.panes.get_mut(&id) else { continue };
-            let link = self.hover_link.as_ref().filter(|(pane, ..)| *pane == id).map(|(_, line, span)| (*line, span.clone()));
-            let flash = pane.flash.map_or(0., |at| 1. - (at.elapsed().as_secs_f32() / FLASH.as_secs_f32()).min(1.));
-            views.push(PaneView { rect, frame: pane.session.frame(), focused: Some(id) == focused_id, link, flash });
-        }
+        let shared = cx.global::<Shared>();
+        let views: Vec<PaneView> = self
+            .pane_rects
+            .iter()
+            .filter_map(|&(id, rect)| {
+                let screen = shared.screens.get(&id)?;
+                let link = self.hover_link.as_ref().filter(|(pane, ..)| *pane == id).map(|(_, line, span)| (*line, span.clone()));
+                let flash = shared.flashes.get(&id).map_or(0., |at| 1. - (at.elapsed().as_secs_f32() / FLASH.as_secs_f32()).min(1.));
+                Some(PaneView { rect, frame: screen.frame.clone(), focused: Some(id) == focused_id, link, flash })
+            })
+            .collect();
         self.cursor = views.iter().find(|view| view.focused).and_then(|view| view.frame.cursor);
 
         let window_focused = self.focus.is_focused(window) && self.window_active;
         let typing = window_focused && self.search.is_none() && self.renaming.is_none();
         self.blink_enabled = typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
-        let title = self.tabs.get(self.active).map(|tab| self.tab_title(tab)).unwrap_or_default();
+        let title = self.layout.tabs.get(self.layout.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default();
         window.set_window_title(&title);
 
         let tint = Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
@@ -2053,7 +1497,6 @@ impl Render for Workspace {
             .collect();
         let focus = self.focus.clone();
         let entity = cx.entity();
-        let build_time = build_started.elapsed();
         // The terminal container starts right of the sidebar, below the title bar.
         let container = point(px(SIDEBAR_WIDTH), px(TITLEBAR_HEIGHT));
 
@@ -2061,53 +1504,51 @@ impl Render for Workspace {
             .track_focus(&self.focus)
             .key_context("Workspace")
             .on_key_down(cx.listener(Self::key_down))
-            .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-                if let Err(err) = this.open_tab(TabSpec::default(), true, cx) {
-                    log::error!("{err}");
-                }
-            }))
+            .on_action(cx.listener(|this, _: &NewTab, _, cx| this.open_tab(cx)))
             .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
-                if let Some(id) = this.focused_id() {
-                    this.close_pane(id, cx);
+                if let Some(pane) = this.focused_id() {
+                    this.send(ClientMessage::ClosePane { pane }, cx);
                 }
             }))
-            .on_action(cx.listener(|this, _: &CloseTab, _, cx| this.close_tab(this.active, cx)))
+            .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+                if let Some(window) = this.window {
+                    this.send(ClientMessage::CloseTab { window, tab: this.layout.active }, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| {
-                let next = (this.active + 1) % this.tabs.len().max(1);
+                let next = (this.layout.active + 1) % this.layout.tabs.len().max(1);
                 this.select(next, cx);
             }))
             .on_action(cx.listener(|this, _: &PreviousTab, _, cx| {
-                let count = this.tabs.len().max(1);
-                this.select((this.active + count - 1) % count, cx);
+                let count = this.layout.tabs.len().max(1);
+                this.select((this.layout.active + count - 1) % count, cx);
             }))
-            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
-                if let Err(err) = this.split(TabSpec::default(), None, Axis::Horizontal, true, cx) {
-                    log::error!("{err}");
-                }
-            }))
-            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
-                if let Err(err) = this.split(TabSpec::default(), None, Axis::Vertical, true, cx) {
-                    log::error!("{err}");
-                }
-            }))
+            .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(None, Axis::Horizontal, cx)))
+            .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(None, Axis::Vertical, cx)))
             .on_action(cx.listener(|this, _: &FocusLeft, _, cx| this.focus_direction(Direction::Left, cx)))
             .on_action(cx.listener(|this, _: &FocusRight, _, cx| this.focus_direction(Direction::Right, cx)))
             .on_action(cx.listener(|this, _: &FocusUp, _, cx| this.focus_direction(Direction::Up, cx)))
             .on_action(cx.listener(|this, _: &FocusDown, _, cx| this.focus_direction(Direction::Down, cx)))
             .on_action(cx.listener(|this, _: &NextPane, _, cx| this.cycle_pane(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousPane, _, cx| this.cycle_pane(false, cx)))
-            .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| this.toggle_zoom(cx)))
+            .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| {
+                if let Some(window) = this.window {
+                    this.send(ClientMessage::ToggleZoom { window }, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &JumpToAttention, _, cx| this.jump_to_attention(cx)))
-            .on_action(cx.listener(|this, _: &RenameTab, _, cx| this.start_rename(this.active, cx)))
+            .on_action(cx.listener(|this, _: &RenameTab, _, cx| this.start_rename(this.layout.active, cx)))
             .on_action(cx.listener(|this, _: &MoveTabUp, _, cx| {
-                let active = this.active;
+                let active = this.layout.active;
                 if active > 0 {
                     this.move_tab(active, active - 1, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &MoveTabDown, _, cx| {
-                let active = this.active;
-                this.move_tab(active, active + 1, cx);
+                let active = this.layout.active;
+                if active + 1 < this.layout.tabs.len() {
+                    this.move_tab(active, active + 1, cx);
+                }
             }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
@@ -2175,7 +1616,8 @@ impl Render for Workspace {
                                 canvas(
                                     |_, _, _| {},
                                     move |_, _, window, cx| {
-                                        let paint_started = std::time::Instant::now();
+                                        let paint_started = Instant::now();
+                                        let build_time = Duration::ZERO;
                                         if let Some(rect) = focused_rect {
                                             window.handle_input(&focus, ElementInputHandler::new(bounds(rect), entity), cx);
                                         }
@@ -2209,8 +1651,8 @@ impl Render for Workspace {
 }
 
 /// IME support: composition text is held here and only sent to the program
-/// (or the search query) once committed, so typing Hangul or kana works as in
-/// any Mac app.
+/// (or the search query, or a tab name) once committed, so typing Hangul or
+/// kana works as in any Mac app.
 impl EntityInputHandler for Workspace {
     fn text_for_range(
         &mut self,
@@ -2262,7 +1704,7 @@ impl EntityInputHandler for Workspace {
             self.run_search(true, true, cx);
             return;
         }
-        self.input(text.as_bytes().to_vec());
+        self.input(text.as_bytes().to_vec(), cx);
         cx.notify();
     }
 

@@ -1,7 +1,6 @@
 mod app_state;
 mod boxdraw;
 mod cli;
-mod control;
 mod hooks;
 mod keys;
 mod mouse;
@@ -11,18 +10,17 @@ mod settings;
 mod terminal;
 mod workspace;
 
-use artty_core::control::live_sockets;
-use artty_core::{Config, SavedState};
+use artty_core::protocol::PaneSpec;
 use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 
 use workspace::{
     ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
     FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, MoveTabDown, MoveTabUp,
     NewTab, NextPane, NextTab, Paste, PreviousPane, PreviousTab, RenameTab, ResetFontSize,
-    SplitDown, SplitRight, TabSpec, ToggleZoom,
+    SplitDown, SplitRight, ToggleZoom,
 };
 
-actions!(artty, [Quit, NewWindow, OpenSettings, RestartToUpdate]);
+actions!(artty, [Quit, QuitAndEndSessions, NewWindow, ReopenClosedWindows, OpenSettings, RestartToUpdate, RestartServer]);
 
 const USAGE: &str = "usage: artty [-e command [args...]]\n       artty help    (commands for controlling a running artty)";
 
@@ -60,14 +58,17 @@ fn menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::action("Restart to Update", RestartToUpdate),
+                MenuItem::action("Restart Server", RestartServer),
                 MenuItem::separator(),
-                MenuItem::action("Quit artty", Quit),
+                MenuItem::action("Quit artty (Sessions Keep Running)", Quit),
+                MenuItem::action("Quit and End Sessions", QuitAndEndSessions),
             ],
         },
         Menu {
             name: "Shell".into(),
             items: vec![
                 MenuItem::action("New Window", NewWindow),
+                MenuItem::action("Reopen Closed Windows", ReopenClosedWindows),
                 MenuItem::action("New Tab", NewTab),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),
@@ -120,18 +121,14 @@ fn menus() -> Vec<Menu> {
 
 fn main() {
     let command = parse_args();
-    let (config, _) = Config::load();
-
-    // Only one instance restores and saves tabs; later ones start fresh.
-    let first_instance = live_sockets().is_empty();
-    let save_enabled = config.restore_sessions && first_instance;
-    let restore = (save_enabled && command.is_none()).then(SavedState::load).flatten();
-
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &QuitAndEndSessions, cx| app_state::quit_and_end_sessions(cx));
         cx.on_action(|_: &NewWindow, cx| app_state::new_window(cx));
+        cx.on_action(|_: &ReopenClosedWindows, cx| app_state::reopen_closed_windows(cx));
         cx.on_action(|_: &OpenSettings, cx| app_state::open_settings(cx));
         cx.on_action(|_: &RestartToUpdate, cx| app_state::restart(cx));
+        cx.on_action(|_: &RestartServer, cx| app_state::restart_server(cx));
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-n", NewWindow, None),
@@ -139,16 +136,8 @@ fn main() {
         ]);
         workspace::bind_keys(cx);
         cx.set_menus(menus());
-        app_state::init(save_enabled, cx);
         notify::init();
-
-        let windows = restore.map(SavedState::into_windows).unwrap_or_default();
-        if windows.is_empty() {
-            app_state::open_window(None, TabSpec { command, ..Default::default() }, cx);
-        }
-        for saved in windows {
-            app_state::open_window(Some(saved), TabSpec::default(), cx);
-        }
+        app_state::init(PaneSpec { command, ..Default::default() }, cx);
         cx.activate(true);
     });
 }

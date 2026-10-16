@@ -77,6 +77,9 @@ pub enum Request {
     ServerStatus,
     /// End every session and stop the server.
     StopServer,
+    /// Save the sessions and stop the server so a new one (e.g. a newer
+    /// build) starts in its place and reopens them.
+    RestartServer,
     /// Processes and resource use of panes (all, or `tab`).
     Processes { tab: Option<SessionId> },
     /// Terminate a pane's foreground program (`signal`, default TERM), or the

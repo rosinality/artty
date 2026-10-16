@@ -125,6 +125,8 @@ pub(crate) struct Server {
     had_panes: bool,
     idle_since: Instant,
     stopping: bool,
+    /// Stopping, but save the sessions for the next server to reopen.
+    restarting: bool,
     last_poll: Instant,
     last_save: Instant,
     last_saved: Option<String>,
@@ -204,6 +206,7 @@ impl Server {
             had_panes: false,
             idle_since: now,
             stopping: false,
+            restarting: false,
             last_poll: now,
             last_save: now,
             last_saved: None,
@@ -981,6 +984,11 @@ impl Server {
                 self.stopping = true;
                 Response::Ok
             }
+            Request::RestartServer => {
+                self.stopping = true;
+                self.restarting = true;
+                Response::Ok
+            }
             Request::Processes { tab } => Response::Processes { panes: self.processes(tab)? },
             Request::Kill { tab, signal, pane } => {
                 let id = self.resolve(Some(tab))?;
@@ -1269,7 +1277,7 @@ impl Server {
     }
 
     pub(crate) fn shutdown(&mut self) {
-        if self.stopping {
+        if self.stopping && !self.restarting {
             // Ended on purpose: nothing to reopen.
             self.panes.clear();
             self.windows.clear();
