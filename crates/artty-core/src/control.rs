@@ -100,6 +100,10 @@ pub enum Request {
         split: Option<SplitDirection>,
         #[serde(default)]
         target: Option<SessionId>,
+        /// Open the tab in the workspace with this name, creating it (in the
+        /// frontmost window) if there's none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
     },
     Focus { tab: SessionId },
     /// Name the tab holding pane `tab`; an empty title goes back to automatic.
@@ -176,6 +180,8 @@ pub struct ServerInfo {
     pub windows: usize,
     /// Windows shown by the app; the rest are detached.
     pub attached_windows: usize,
+    #[serde(default)]
+    pub workspaces: usize,
     pub panes: usize,
     /// Connected apps.
     pub clients: usize,
@@ -186,6 +192,11 @@ pub struct ServerInfo {
 pub struct PaneProcesses {
     pub id: SessionId,
     pub window: usize,
+    #[serde(default)]
+    pub workspace: usize,
+    // No `skip_serializing_if`: this also travels as postcard, which can't skip fields.
+    #[serde(default)]
+    pub workspace_name: Option<String>,
     pub tab: usize,
     pub title: String,
     pub status: String,
@@ -221,7 +232,13 @@ pub struct TabInfo {
     /// 1-based window number.
     #[serde(default)]
     pub window: usize,
-    /// 1-based tab number within the window.
+    /// 1-based workspace number (across windows) and the workspace's name.
+    #[serde(default)]
+    pub workspace: usize,
+    // No `skip_serializing_if`: this also travels as postcard, which can't skip fields.
+    #[serde(default)]
+    pub workspace_name: Option<String>,
+    /// 1-based tab number within the workspace.
     #[serde(default)]
     pub tab: usize,
     pub title: String,

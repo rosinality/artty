@@ -318,6 +318,8 @@ impl Pane {
         TabInfo {
             id: self.session.id(),
             window,
+            workspace: 0,
+            workspace_name: None,
             tab,
             title: self.title(),
             active,

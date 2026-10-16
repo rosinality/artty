@@ -19,7 +19,7 @@ use crate::vt::ansi::Rgb;
 use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes; app and server must agree.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Identifies a build: the package version and when the executable was
 /// built (rebuilds don't change the version). The server runs from a copy
@@ -34,6 +34,7 @@ pub fn build_id(executable: &std::path::Path) -> String {
 }
 
 pub type WindowId = u64;
+pub type WorkspaceId = u64;
 
 /// Largest message accepted, against corrupt length prefixes.
 const MAX_MESSAGE: usize = 64 << 20;
@@ -67,14 +68,22 @@ pub enum ClientMessage {
     /// The window gained or lost focus (for notifications and focus reports).
     WindowFocused { window: WindowId, focused: bool },
 
-    NewTab { window: WindowId, spec: PaneSpec },
+    /// A tab at the end of `workspace`, or of the window's active one.
+    NewTab { window: WindowId, workspace: Option<WorkspaceId>, spec: PaneSpec },
     Split { pane: PaneId, axis: Axis, spec: PaneSpec },
     ClosePane { pane: PaneId },
-    CloseTab { window: WindowId, tab: usize },
-    SelectTab { window: WindowId, tab: usize },
+    /// Tabs are numbered from 0 within their workspace.
+    CloseTab { workspace: WorkspaceId, tab: usize },
+    SelectTab { workspace: WorkspaceId, tab: usize },
     FocusPane { pane: PaneId },
-    MoveTab { window: WindowId, from: usize, to: usize },
-    RenameTab { window: WindowId, tab: usize, title: Option<String> },
+    /// Move a tab, possibly into another workspace, to index `to` there.
+    MoveTab { workspace: WorkspaceId, from: usize, to_workspace: WorkspaceId, to: usize },
+    RenameTab { workspace: WorkspaceId, tab: usize, title: Option<String> },
+    /// A workspace with one tab from `spec`, after the window's others.
+    NewWorkspace { window: WindowId, name: Option<String>, spec: PaneSpec },
+    RenameWorkspace { workspace: WorkspaceId, name: Option<String> },
+    /// Close every tab in it.
+    CloseWorkspace { workspace: WorkspaceId },
     ToggleZoom { window: WindowId },
     SetRatio { window: WindowId, path: Vec<bool>, ratio: f32 },
 
@@ -120,7 +129,7 @@ pub struct WindowSummary {
     pub bounds: Option<SavedWindow>,
 }
 
-/// One tab of a window, as the app draws it.
+/// One tab of a workspace, as the app draws it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TabLayout {
     pub title: Option<String>,
@@ -129,10 +138,42 @@ pub struct TabLayout {
     pub zoomed: bool,
 }
 
+/// A named group of tabs: a section of the sidebar.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct WindowLayout {
+pub struct WorkspaceLayout {
+    pub id: WorkspaceId,
+    pub name: Option<String>,
     pub tabs: Vec<TabLayout>,
+    /// The tab shown when this workspace is the window's active one.
     pub active: usize,
+}
+
+/// A window's workspaces; the active workspace's active tab fills it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct WindowLayout {
+    pub workspaces: Vec<WorkspaceLayout>,
+    pub active: usize,
+}
+
+impl WindowLayout {
+    pub fn active_workspace(&self) -> Option<&WorkspaceLayout> {
+        self.workspaces.get(self.active)
+    }
+
+    pub fn active_tab(&self) -> Option<&TabLayout> {
+        let workspace = self.active_workspace()?;
+        workspace.tabs.get(workspace.active)
+    }
+
+    pub fn active_tab_mut(&mut self) -> Option<&mut TabLayout> {
+        let workspace = self.workspaces.get_mut(self.active)?;
+        workspace.tabs.get_mut(workspace.active)
+    }
+
+    /// Every tab, workspace by workspace, with where it is.
+    pub fn tabs(&self) -> impl Iterator<Item = (WorkspaceId, usize, &TabLayout)> {
+        self.workspaces.iter().flat_map(|w| w.tabs.iter().enumerate().map(move |(i, tab)| (w.id, i, tab)))
+    }
 }
 
 /// What the sidebar and input handling need to know about a pane.
@@ -304,6 +345,40 @@ mod tests {
 
         // A first update carries everything.
         assert_eq!(FrameUpdate::diff(None, &after, 0).lines.len(), 3);
+    }
+
+    #[test]
+    fn layouts_and_pane_states_round_trip() {
+        // Postcard isn't self-describing: a field serde skips when empty would
+        // break decoding, so check the messages with optional fields.
+        let info = TabInfo {
+            id: 3,
+            window: 1,
+            workspace: 2,
+            workspace_name: None,
+            tab: 1,
+            title: "t".into(),
+            active: true,
+            focused: true,
+            cwd: None,
+            process: None,
+            status: "idle".into(),
+            detail: None,
+            needs_attention: false,
+            shell_integration: true,
+            kitty_keyboard: false,
+        };
+        let state = PaneState { info, icon: String::new(), progress: None, agent: None };
+        let tab = TabLayout { title: None, root: Node::Pane(3), focused: 3, zoomed: false };
+        let layout = WindowLayout { workspaces: vec![WorkspaceLayout { id: 2, name: None, tabs: vec![tab], active: 0 }], active: 0 };
+        let mut buffer = Vec::new();
+        write_message(&mut buffer, &ServerMessage::Panes { panes: vec![state.clone()] }).unwrap();
+        write_message(&mut buffer, &ServerMessage::Layout { window: 1, layout: layout.clone() }).unwrap();
+        let mut reader = &buffer[..];
+        let ServerMessage::Panes { panes } = read_message(&mut reader).unwrap() else { panic!() };
+        assert_eq!(panes, vec![state]);
+        let ServerMessage::Layout { layout: back, .. } = read_message(&mut reader).unwrap() else { panic!() };
+        assert_eq!(back, layout);
     }
 
     #[test]

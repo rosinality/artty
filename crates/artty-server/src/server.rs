@@ -1,5 +1,5 @@
-//! The server's state: windows of tabs of panes, the apps attached to them,
-//! and everything that happens to the sessions.
+//! The server's state: windows of workspaces of tabs of panes, the apps
+//! attached to them, and everything that happens to the sessions.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
     AppCommand, ClientMessage, PROTOCOL_VERSION, PaneSpec, PaneState, Query, Reply, SelectionOp,
-    ServerMessage, TabLayout, WindowId, WindowLayout, WindowSummary,
+    ServerMessage, TabLayout, WindowId, WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
 };
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
@@ -23,7 +23,7 @@ use artty_core::vt::index::Side;
 use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
 use artty_core::{
-    Config, Frame, Notice, SavedLayout, SavedState, SavedTab, SavedWindow, SavedWorkspace, Session,
+    Config, Frame, Notice, SavedLayout, SavedState, SavedTab, SavedWindow, SavedWindowState, SavedWorkspace, Session,
     SessionOptions, ShellPhase, TerminalSize, Theme, process_tree, processes,
 };
 
@@ -49,13 +49,50 @@ struct Tab {
 }
 
 impl Tab {
+    fn new(pane: PaneId) -> Self {
+        Self { title: None, root: Node::Pane(pane), focused: pane, zoomed: false }
+    }
+
     fn visible(&self) -> Vec<PaneId> {
         if self.zoomed { vec![self.focused] } else { self.root.panes() }
     }
 }
 
-struct Window {
+/// A named group of tabs; never empty (it closes with its last tab).
+struct Workspace {
+    name: Option<String>,
     tabs: Vec<Tab>,
+    active: usize,
+}
+
+impl Workspace {
+    fn new(name: Option<String>, tabs: Vec<Tab>, active: usize) -> Self {
+        let active = active.min(tabs.len().saturating_sub(1));
+        Self { name: name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()), tabs, active }
+    }
+
+    fn active_tab(&self) -> Option<&Tab> {
+        self.tabs.get(self.active)
+    }
+
+    fn layout(&self, id: WorkspaceId) -> WorkspaceLayout {
+        WorkspaceLayout {
+            id,
+            name: self.name.clone(),
+            tabs: self
+                .tabs
+                .iter()
+                .map(|tab| TabLayout { title: tab.title.clone(), root: tab.root.clone(), focused: tab.focused, zoomed: tab.zoomed })
+                .collect(),
+            active: self.active,
+        }
+    }
+}
+
+struct Window {
+    /// Its workspaces, in sidebar order; never empty.
+    workspaces: Vec<WorkspaceId>,
+    /// The workspace whose active tab the window shows.
     active: usize,
     bounds: Option<SavedWindow>,
     /// The app showing this window, if any.
@@ -66,23 +103,8 @@ struct Window {
 }
 
 impl Window {
-    fn visible(&self) -> Vec<PaneId> {
-        self.tabs.get(self.active).map(Tab::visible).unwrap_or_default()
-    }
-
-    fn focused_pane(&self) -> Option<PaneId> {
-        self.tabs.get(self.active).map(|tab| tab.focused)
-    }
-
-    fn layout(&self) -> WindowLayout {
-        WindowLayout {
-            tabs: self
-                .tabs
-                .iter()
-                .map(|tab| TabLayout { title: tab.title.clone(), root: tab.root.clone(), focused: tab.focused, zoomed: tab.zoomed })
-                .collect(),
-            active: self.active,
-        }
+    fn active_workspace(&self) -> Option<WorkspaceId> {
+        self.workspaces.get(self.active).copied()
     }
 }
 
@@ -118,10 +140,12 @@ pub(crate) struct Server {
     integration_dir: Option<PathBuf>,
     panes: HashMap<PaneId, Pane>,
     windows: BTreeMap<WindowId, Window>,
+    workspaces: BTreeMap<WorkspaceId, Workspace>,
     clients: HashMap<ClientId, Client>,
     runs: Vec<PendingRun>,
     next_pane: PaneId,
     next_window: WindowId,
+    next_workspace: WorkspaceId,
     had_panes: bool,
     idle_since: Instant,
     stopping: bool,
@@ -199,10 +223,12 @@ impl Server {
             integration_dir: artty_core::integration::install().ok(),
             panes: HashMap::new(),
             windows: BTreeMap::new(),
+            workspaces: BTreeMap::new(),
             clients: HashMap::new(),
             runs: Vec::new(),
             next_pane: 1,
             next_window: 1,
+            next_workspace: 1,
             had_panes: false,
             idle_since: now,
             stopping: false,
@@ -221,26 +247,45 @@ impl Server {
         }
         let Some(state) = SavedState::load() else { return };
         for saved in state.into_windows() {
-            let mut tabs = Vec::new();
-            for tab in saved.tabs {
-                let Some(root) = self.restore_layout(tab.layout) else { continue };
-                let panes = root.panes();
-                let focused = panes[tab.focused.min(panes.len() - 1)];
-                tabs.push(Tab { title: tab.title, root, focused, zoomed: tab.zoomed && panes.len() > 1 });
+            let mut workspaces = Vec::new();
+            for workspace in saved.workspaces {
+                let mut tabs = Vec::new();
+                for tab in workspace.tabs {
+                    let Some(root) = self.restore_layout(tab.layout) else { continue };
+                    let panes = root.panes();
+                    let focused = panes[tab.focused.min(panes.len() - 1)];
+                    tabs.push(Tab { title: tab.title, root, focused, zoomed: tab.zoomed && panes.len() > 1 });
+                }
+                if !tabs.is_empty() {
+                    workspaces.push(Workspace::new(workspace.name, tabs, workspace.active));
+                }
             }
-            if tabs.is_empty() {
-                continue;
+            if !workspaces.is_empty() {
+                self.add_window(workspaces, saved.active, saved.window);
             }
-            let active = saved.active.min(tabs.len() - 1);
-            self.add_window(tabs, active, saved.window);
         }
     }
 
-    fn add_window(&mut self, tabs: Vec<Tab>, active: usize, bounds: Option<SavedWindow>) -> WindowId {
+    fn add_workspace(&mut self, workspace: Workspace) -> WorkspaceId {
+        let id = self.next_workspace;
+        self.next_workspace += 1;
+        self.workspaces.insert(id, workspace);
+        id
+    }
+
+    fn add_window(&mut self, workspaces: Vec<Workspace>, active: usize, bounds: Option<SavedWindow>) -> WindowId {
+        let workspaces: Vec<WorkspaceId> = workspaces.into_iter().map(|w| self.add_workspace(w)).collect();
+        let active = active.min(workspaces.len().saturating_sub(1));
         let id = self.next_window;
         self.next_window += 1;
-        self.windows.insert(id, Window { tabs, active, bounds, client: None, focused: false, last_focus: Instant::now() });
+        self.windows.insert(id, Window { workspaces, active, bounds, client: None, focused: false, last_focus: Instant::now() });
         id
+    }
+
+    /// A window with one workspace of one tab.
+    fn add_window_with(&mut self, pane: PaneId, bounds: Option<SavedWindow>) -> WindowId {
+        let workspace = Workspace::new(None, vec![Tab::new(pane)], 0);
+        self.add_window(vec![workspace], 0, bounds)
     }
 
     fn restore_layout(&mut self, layout: SavedLayout) -> Option<Node> {
@@ -314,10 +359,44 @@ impl Server {
         Ok(id)
     }
 
-    fn window_of(&self, pane: PaneId) -> Option<(WindowId, usize)> {
-        self.windows.iter().find_map(|(&id, window)| {
-            window.tabs.iter().position(|tab| tab.root.contains(pane)).map(|tab| (id, tab))
+    /// The workspace and tab holding a pane.
+    fn place_of(&self, pane: PaneId) -> Option<(WorkspaceId, usize)> {
+        self.workspaces.iter().find_map(|(&id, workspace)| {
+            workspace.tabs.iter().position(|tab| tab.root.contains(pane)).map(|tab| (id, tab))
         })
+    }
+
+    /// The window showing a workspace, and the workspace's place in it.
+    fn window_of_workspace(&self, workspace: WorkspaceId) -> Option<(WindowId, usize)> {
+        self.windows.iter().find_map(|(&id, window)| window.workspaces.iter().position(|&w| w == workspace).map(|i| (id, i)))
+    }
+
+    fn window_of(&self, pane: PaneId) -> Option<WindowId> {
+        self.window_of_workspace(self.place_of(pane)?.0).map(|(window, _)| window)
+    }
+
+    fn active_tab(&self, window: WindowId) -> Option<&Tab> {
+        self.workspaces.get(&self.windows.get(&window)?.active_workspace()?)?.active_tab()
+    }
+
+    fn active_tab_mut(&mut self, window: WindowId) -> Option<&mut Tab> {
+        let workspace = self.workspaces.get_mut(&self.windows.get(&window)?.active_workspace()?)?;
+        workspace.tabs.get_mut(workspace.active)
+    }
+
+    fn window_visible(&self, window: WindowId) -> Vec<PaneId> {
+        self.active_tab(window).map(Tab::visible).unwrap_or_default()
+    }
+
+    fn window_focused_pane(&self, window: WindowId) -> Option<PaneId> {
+        self.active_tab(window).map(|tab| tab.focused)
+    }
+
+    fn window_layout(&self, window: &Window) -> WindowLayout {
+        WindowLayout {
+            workspaces: window.workspaces.iter().filter_map(|&id| Some(self.workspaces.get(&id)?.layout(id))).collect(),
+            active: window.active,
+        }
     }
 
     /// The window the user last used.
@@ -327,45 +406,83 @@ impl Server {
     }
 
     fn focused_pane(&self) -> Option<PaneId> {
-        self.windows.get(&self.frontmost()?)?.focused_pane()
+        self.window_focused_pane(self.frontmost()?)
+    }
+
+    /// Windows the user is looking at.
+    fn seen_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.windows.iter().filter(|(_, w)| w.client.is_some() && w.focused).map(|(&id, _)| id)
     }
 
     /// Whether the user can see a pane right now.
     fn visible(&self, pane: PaneId) -> bool {
-        self.windows.values().any(|w| w.client.is_some() && w.focused && w.visible().contains(&pane))
+        self.seen_windows().any(|w| self.window_visible(w).contains(&pane))
     }
 
-    fn open_tab(&mut self, window: WindowId, spec: PaneSpec, focus: bool) -> Result<PaneId, String> {
-        let near = self.windows.get(&window).and_then(Window::focused_pane);
+    /// Show a workspace's tab in its window.
+    fn select_tab(&mut self, workspace: WorkspaceId, tab: usize) {
+        let Some(state) = self.workspaces.get_mut(&workspace).filter(|w| tab < w.tabs.len()) else { return };
+        state.active = tab;
+        if let Some((window, index)) = self.window_of_workspace(workspace) {
+            self.windows.get_mut(&window).unwrap().active = index;
+        }
+    }
+
+    /// Open a tab at the end of `workspace`, or of the window's active one.
+    fn open_tab(&mut self, window: WindowId, workspace: Option<WorkspaceId>, spec: PaneSpec, focus: bool) -> Result<PaneId, String> {
+        let workspace = match workspace {
+            Some(workspace) => workspace,
+            None => self.windows.get(&window).and_then(Window::active_workspace).ok_or("no such window")?,
+        };
+        if !self.workspaces.contains_key(&workspace) {
+            return Err("no such workspace".into());
+        }
+        let near = self.workspaces[&workspace].active_tab().map(|t| t.focused).or_else(|| self.window_focused_pane(window));
         let id = self.spawn_pane(spec, near, None)?;
-        let window = self.windows.get_mut(&window).ok_or("no such window")?;
-        window.tabs.push(Tab { title: None, root: Node::Pane(id), focused: id, zoomed: false });
+        let state = self.workspaces.get_mut(&workspace).unwrap();
+        state.tabs.push(Tab::new(id));
+        let tab = state.tabs.len() - 1;
         if focus {
-            window.active = window.tabs.len() - 1;
+            self.select_tab(workspace, tab);
         }
         Ok(id)
     }
 
+    /// A workspace with one tab, after the window's others.
+    fn open_workspace(&mut self, window: WindowId, name: Option<String>, spec: PaneSpec, focus: bool) -> Result<(WorkspaceId, PaneId), String> {
+        if !self.windows.contains_key(&window) {
+            return Err("no such window".into());
+        }
+        // New workspaces start in your home directory unless told otherwise.
+        let spec = PaneSpec { cwd: spec.cwd.or_else(|| std::env::var_os("HOME").map(PathBuf::from)), ..spec };
+        let pane = self.spawn_pane(spec, None, None)?;
+        let workspace = self.add_workspace(Workspace::new(name, vec![Tab::new(pane)], 0));
+        let state = self.windows.get_mut(&window).unwrap();
+        state.workspaces.push(workspace);
+        if focus {
+            state.active = state.workspaces.len() - 1;
+        }
+        Ok((workspace, pane))
+    }
+
     fn split(&mut self, target: PaneId, axis: Axis, spec: PaneSpec, focus: bool) -> Result<PaneId, String> {
-        let (window, tab) = self.window_of(target).ok_or_else(|| format!("no pane {target}"))?;
+        let (workspace, tab) = self.place_of(target).ok_or_else(|| format!("no pane {target}"))?;
         let id = self.spawn_pane(spec, Some(target), None)?;
-        let window = self.windows.get_mut(&window).unwrap();
-        let tab_state = &mut window.tabs[tab];
+        let tab_state = &mut self.workspaces.get_mut(&workspace).unwrap().tabs[tab];
         tab_state.root.split(target, id, axis);
         tab_state.zoomed = false;
         if focus {
             tab_state.focused = id;
-            window.active = tab;
+            self.select_tab(workspace, tab);
         }
         Ok(id)
     }
 
     fn focus_pane(&mut self, pane: PaneId) {
-        let Some((window_id, tab)) = self.window_of(pane) else { return };
+        let Some((workspace, tab)) = self.place_of(pane) else { return };
         let before = self.focused_pane();
-        let window = self.windows.get_mut(&window_id).unwrap();
-        window.active = tab;
-        let tab = &mut window.tabs[tab];
+        self.select_tab(workspace, tab);
+        let tab = &mut self.workspaces.get_mut(&workspace).unwrap().tabs[tab];
         if tab.zoomed && tab.focused != pane {
             tab.zoomed = false;
         }
@@ -391,14 +508,13 @@ impl Server {
         }
     }
 
-    /// Close a pane; its tab closes with its last pane, and its window with
-    /// its last tab.
+    /// Close a pane; its tab closes with its last pane, its workspace with
+    /// its last tab, and its window with its last workspace.
     fn close_pane(&mut self, pane: PaneId) {
         self.panes.remove(&pane);
         self.fail_runs(pane, "the pane closed");
-        let Some((window_id, tab)) = self.window_of(pane) else { return };
-        let window = self.windows.get_mut(&window_id).unwrap();
-        let tab_state = &mut window.tabs[tab];
+        let Some((workspace, tab)) = self.place_of(pane) else { return };
+        let tab_state = &mut self.workspaces.get_mut(&workspace).unwrap().tabs[tab];
         let order = tab_state.root.panes();
         let root = std::mem::replace(&mut tab_state.root, Node::Pane(pane));
         match root.without(pane) {
@@ -413,23 +529,52 @@ impl Server {
                 }
                 tab_state.root = root;
             }
-            None => self.remove_tab(window_id, tab),
+            None => {
+                self.take_tab(workspace, tab);
+            }
         }
     }
 
-    fn close_tab(&mut self, window: WindowId, tab: usize) {
-        let Some(panes) = self.windows.get(&window).and_then(|w| w.tabs.get(tab)).map(|t| t.root.panes()) else { return };
+    fn end_panes(&mut self, panes: Vec<PaneId>) {
         for pane in panes {
             self.panes.remove(&pane);
             self.fail_runs(pane, "the pane closed");
         }
-        self.remove_tab(window, tab);
     }
 
-    fn remove_tab(&mut self, window_id: WindowId, tab: usize) {
-        let Some(window) = self.windows.get_mut(&window_id) else { return };
-        window.tabs.remove(tab);
-        if window.tabs.is_empty() {
+    fn close_tab(&mut self, workspace: WorkspaceId, tab: usize) {
+        if let Some(tab) = self.take_tab(workspace, tab) {
+            self.end_panes(tab.root.panes());
+        }
+    }
+
+    fn close_workspace(&mut self, workspace: WorkspaceId) {
+        let Some(state) = self.workspaces.get(&workspace) else { return };
+        let panes = state.tabs.iter().flat_map(|t| t.root.panes()).collect();
+        self.end_panes(panes);
+        self.remove_workspace(workspace);
+    }
+
+    /// Remove a tab from its workspace (its panes keep running), closing the
+    /// workspace if it was the last.
+    fn take_tab(&mut self, workspace: WorkspaceId, tab: usize) -> Option<Tab> {
+        let state = self.workspaces.get_mut(&workspace).filter(|w| tab < w.tabs.len())?;
+        let removed = state.tabs.remove(tab);
+        if state.tabs.is_empty() {
+            self.remove_workspace(workspace);
+        } else if tab < state.active || state.active >= state.tabs.len() {
+            state.active = state.active.saturating_sub(1);
+        }
+        Some(removed)
+    }
+
+    /// Forget a workspace, closing its window if it was the last there.
+    fn remove_workspace(&mut self, workspace: WorkspaceId) {
+        self.workspaces.remove(&workspace);
+        let Some((window_id, index)) = self.window_of_workspace(workspace) else { return };
+        let window = self.windows.get_mut(&window_id).unwrap();
+        window.workspaces.remove(index);
+        if window.workspaces.is_empty() {
             let client = window.client;
             self.windows.remove(&window_id);
             if let Some(client) = client {
@@ -437,9 +582,39 @@ impl Server {
             }
             return;
         }
-        if tab < window.active || window.active >= window.tabs.len() {
+        if index < window.active || window.active >= window.workspaces.len() {
             window.active = window.active.saturating_sub(1);
         }
+    }
+
+    /// Move a tab within its workspace or into another one, and show it.
+    fn move_tab(&mut self, workspace: WorkspaceId, from: usize, to_workspace: WorkspaceId, to: usize) {
+        if !self.workspaces.contains_key(&to_workspace) {
+            return;
+        }
+        if workspace == to_workspace {
+            let Some(state) = self.workspaces.get_mut(&workspace).filter(|w| from < w.tabs.len() && to < w.tabs.len()) else { return };
+            let active = state.tabs[state.active].focused;
+            let tab = state.tabs.remove(from);
+            state.tabs.insert(to, tab);
+            state.active = state.tabs.iter().position(|t| t.focused == active).unwrap_or(0);
+            return;
+        }
+        let before = self.focused_pane();
+        let Some(tab) = self.take_tab(workspace, from) else { return };
+        // The source may have closed (and with it, a window), but not the target.
+        let target = self.workspaces.get_mut(&to_workspace).unwrap();
+        let to = to.min(target.tabs.len());
+        target.tabs.insert(to, tab);
+        self.select_tab(to_workspace, to);
+        self.report_focus_change(before);
+    }
+
+    /// The workspace named `name`, preferring the frontmost window's.
+    fn workspace_named(&self, name: &str) -> Option<WorkspaceId> {
+        let named = |id: &WorkspaceId| self.workspaces.get(id).is_some_and(|w| w.name.as_deref() == Some(name));
+        let front = self.frontmost().and_then(|w| self.windows.get(&w));
+        front.and_then(|w| w.workspaces.iter().copied().find(named)).or_else(|| self.workspaces.keys().copied().find(named))
     }
 
     fn fail_runs(&mut self, pane: PaneId, message: &str) {
@@ -540,7 +715,7 @@ impl Server {
             Notice::ResetTitle => pane.set_title(None),
             Notice::Bell => {
                 if visible {
-                    let client = self.windows.values().find(|w| w.focused && w.visible().contains(&id)).and_then(|w| w.client);
+                    let client = self.seen_windows().find(|&w| self.window_visible(w).contains(&id)).and_then(|w| self.windows[&w].client);
                     if let Some(client) = client {
                         self.send(client, ServerMessage::Bell { pane: id });
                     }
@@ -602,10 +777,7 @@ impl Server {
                     None => {
                         let near = self.focused_pane();
                         match self.spawn_pane(spec, near, None) {
-                            Ok(pane) => {
-                                let tab = Tab { title: None, root: Node::Pane(pane), focused: pane, zoomed: false };
-                                self.add_window(vec![tab], 0, bounds)
-                            }
+                            Ok(pane) => self.add_window_with(pane, bounds),
                             Err(err) => {
                                 log::error!("{err}");
                                 return;
@@ -645,55 +817,57 @@ impl Server {
                     self.report_focus_change(before);
                     self.report_focus(self.focused_pane(), true);
                 } else {
-                    self.report_focus(self.windows.get(&window).and_then(Window::focused_pane), false);
+                    self.report_focus(self.window_focused_pane(window), false);
                 }
             }
-            ClientMessage::NewTab { window, spec } => {
-                if let Err(err) = self.open_tab(window, spec, true) {
+            ClientMessage::NewTab { window, workspace, spec } => {
+                let before = self.focused_pane();
+                if let Err(err) = self.open_tab(window, workspace, spec, true) {
                     log::error!("{err}");
                 }
+                self.report_focus_change(before);
             }
+            ClientMessage::NewWorkspace { window, name, spec } => {
+                let before = self.focused_pane();
+                if let Err(err) = self.open_workspace(window, name, spec, true) {
+                    log::error!("{err}");
+                }
+                self.report_focus_change(before);
+            }
+            ClientMessage::RenameWorkspace { workspace, name } => {
+                if let Some(state) = self.workspaces.get_mut(&workspace) {
+                    state.name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
+                }
+            }
+            ClientMessage::CloseWorkspace { workspace } => self.close_workspace(workspace),
             ClientMessage::Split { pane, axis, spec } => {
                 if let Err(err) = self.split(pane, axis, spec, true) {
                     log::error!("{err}");
                 }
             }
             ClientMessage::ClosePane { pane } => self.close_pane(pane),
-            ClientMessage::CloseTab { window, tab } => self.close_tab(window, tab),
-            ClientMessage::SelectTab { window, tab } => {
+            ClientMessage::CloseTab { workspace, tab } => self.close_tab(workspace, tab),
+            ClientMessage::SelectTab { workspace, tab } => {
                 let before = self.focused_pane();
-                if let Some(state) = self.windows.get_mut(&window).filter(|w| tab < w.tabs.len()) {
-                    state.active = tab;
-                }
+                self.select_tab(workspace, tab);
                 self.report_focus_change(before);
             }
             ClientMessage::FocusPane { pane } => self.focus_pane(pane),
-            ClientMessage::MoveTab { window, from, to } => {
-                if let Some(state) = self.windows.get_mut(&window)
-                    && from < state.tabs.len()
-                    && to < state.tabs.len()
-                    && from != to
-                {
-                    let active = state.tabs[state.active].focused;
-                    let tab = state.tabs.remove(from);
-                    state.tabs.insert(to, tab);
-                    state.active = state.tabs.iter().position(|t| t.focused == active).unwrap_or(0);
-                }
-            }
-            ClientMessage::RenameTab { window, tab, title } => {
-                if let Some(tab) = self.windows.get_mut(&window).and_then(|w| w.tabs.get_mut(tab)) {
+            ClientMessage::MoveTab { workspace, from, to_workspace, to } => self.move_tab(workspace, from, to_workspace, to),
+            ClientMessage::RenameTab { workspace, tab, title } => {
+                if let Some(tab) = self.workspaces.get_mut(&workspace).and_then(|w| w.tabs.get_mut(tab)) {
                     tab.title = title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
                 }
             }
             ClientMessage::ToggleZoom { window } => {
-                if let Some(tab) = self.windows.get_mut(&window).and_then(|w| w.tabs.get_mut(w.active))
+                if let Some(tab) = self.active_tab_mut(window)
                     && matches!(tab.root, Node::Split { .. })
                 {
                     tab.zoomed = !tab.zoomed;
                 }
             }
             ClientMessage::SetRatio { window, path, ratio } => {
-                if let Some(tab) = self.windows.get_mut(&window).and_then(|w| w.tabs.get_mut(w.active)) {
+                if let Some(tab) = self.active_tab_mut(window) {
                     tab.root.set_ratio(&path, ratio);
                 }
             }
@@ -763,7 +937,11 @@ impl Server {
                         self.windows
                             .iter()
                             .filter(|(_, w)| w.client.is_none())
-                            .map(|(&window, w)| WindowSummary { window, tabs: w.tabs.len(), bounds: w.bounds })
+                            .map(|(&window, w)| WindowSummary {
+                                window,
+                                tabs: w.workspaces.iter().filter_map(|id| self.workspaces.get(id)).map(|ws| ws.tabs.len()).sum(),
+                                bounds: w.bounds,
+                            })
                             .collect(),
                     ),
                     Query::LinkSpan { pane, line, column } => Reply::Link(
@@ -826,21 +1004,26 @@ impl Server {
         Ok(id)
     }
 
-    /// Window numbers as shown to users: 1, 2, ... in opening order.
-    fn window_number(&self, window: WindowId) -> usize {
-        self.windows.keys().position(|&w| w == window).map_or(0, |i| i + 1)
-    }
-
+    /// Every pane, window by window, workspace by workspace. Workspaces are
+    /// numbered in that order.
     fn pane_infos(&self) -> Vec<TabInfo> {
         let front = self.frontmost();
         let mut infos = Vec::new();
-        for (&window_id, window) in &self.windows {
-            for (index, tab) in window.tabs.iter().enumerate() {
-                for id in tab.root.panes() {
-                    let focused = tab.focused == id;
-                    let active = Some(window_id) == front && focused && index == window.active;
-                    if let Some(pane) = self.panes.get(&id) {
-                        infos.push(pane.info(self.window_number(window_id), index + 1, active, focused));
+        let mut number = 0;
+        for (window_number, (&window_id, window)) in self.windows.iter().enumerate() {
+            for (position, workspace_id) in window.workspaces.iter().enumerate() {
+                let Some(workspace) = self.workspaces.get(workspace_id) else { continue };
+                number += 1;
+                for (index, tab) in workspace.tabs.iter().enumerate() {
+                    for id in tab.root.panes() {
+                        let focused = tab.focused == id;
+                        let active = Some(window_id) == front && position == window.active && index == workspace.active && focused;
+                        if let Some(pane) = self.panes.get(&id) {
+                            let mut info = pane.info(window_number + 1, index + 1, active, focused);
+                            info.workspace = number;
+                            info.workspace_name = workspace.name.clone();
+                            infos.push(info);
+                        }
                     }
                 }
             }
@@ -884,9 +1067,10 @@ impl Server {
                 session.write(bytes);
                 Response::Ok
             }
-            Request::New { cwd, command, title, focus, split, target } => {
+            Request::New { cwd, command, title, focus, split, target, workspace } => {
                 let command = (!command.is_empty()).then_some(command);
                 let spec = PaneSpec { command, cwd, title };
+                let named = workspace.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty());
                 let id = match split {
                     Some(direction) => {
                         let target = self.resolve(target)?;
@@ -896,13 +1080,20 @@ impl Server {
                         };
                         self.split(target, axis, spec, focus)?
                     }
-                    None => match self.frontmost() {
-                        Some(window) => self.open_tab(window, spec, focus)?,
+                    None => match (self.frontmost(), named) {
+                        (Some(window), Some(name)) => match self.workspace_named(&name) {
+                            Some(workspace) => {
+                                let window = self.window_of_workspace(workspace).map_or(window, |(w, _)| w);
+                                self.open_tab(window, Some(workspace), spec, focus)?
+                            }
+                            None => self.open_workspace(window, Some(name), spec, focus)?.1,
+                        },
+                        (Some(window), None) => self.open_tab(window, None, spec, focus)?,
                         // No windows: a detached one, shown when the app attaches.
-                        None => {
+                        (None, name) => {
                             let pane = self.spawn_pane(spec, None, None)?;
-                            let tab = Tab { title: None, root: Node::Pane(pane), focused: pane, zoomed: false };
-                            self.add_window(vec![tab], 0, None);
+                            let workspace = Workspace::new(name, vec![Tab::new(pane)], 0);
+                            self.add_window(vec![workspace], 0, None);
                             pane
                         }
                     },
@@ -915,7 +1106,7 @@ impl Server {
             Request::Focus { tab } => {
                 let id = self.resolve(Some(tab))?;
                 self.focus_pane(id);
-                if let Some((window, _)) = self.window_of(id)
+                if let Some(window) = self.window_of(id)
                     && let Some(client) = self.windows[&window].client
                 {
                     self.send(client, ServerMessage::App(AppCommand::Activate { window }));
@@ -929,9 +1120,9 @@ impl Server {
             }
             Request::Rename { tab, title } => {
                 let id = self.resolve(tab)?;
-                let (window, tab) = self.window_of(id).ok_or("the pane closed")?;
+                let (workspace, tab) = self.place_of(id).ok_or("the pane closed")?;
                 let title = title.trim();
-                self.windows.get_mut(&window).unwrap().tabs[tab].title = (!title.is_empty()).then(|| title.to_owned());
+                self.workspaces.get_mut(&workspace).unwrap().tabs[tab].title = (!title.is_empty()).then(|| title.to_owned());
                 Response::Ok
             }
             Request::Run { .. } => unreachable!("handled before"),
@@ -974,6 +1165,7 @@ impl Server {
                     uptime_secs: self.started.elapsed().as_secs(),
                     windows: self.windows.len(),
                     attached_windows: self.windows.values().filter(|w| w.client.is_some()).count(),
+                    workspaces: self.workspaces.len(),
                     panes: self.panes.len(),
                     clients: self.clients.len(),
                 },
@@ -1044,10 +1236,12 @@ impl Server {
                     elapsed_secs: (unix_now - p.started).max(0.) as u64,
                 })
                 .collect();
-            let attached = self.window_of(info.id).is_some_and(|(w, _)| self.windows[&w].client.is_some());
+            let attached = self.window_of(info.id).is_some_and(|w| self.windows[&w].client.is_some());
             result.push(PaneProcesses {
                 id: info.id,
                 window: info.window,
+                workspace: info.workspace,
+                workspace_name: info.workspace_name,
                 tab: info.tab,
                 title: info.title,
                 status: info.status,
@@ -1133,7 +1327,7 @@ impl Server {
 
     /// Panes the user is looking at have been seen.
     fn clear_seen(&mut self) {
-        let seen: Vec<PaneId> = self.windows.values().filter(|w| w.client.is_some() && w.focused).flat_map(Window::visible).collect();
+        let seen: Vec<PaneId> = self.seen_windows().flat_map(|w| self.window_visible(w)).collect();
         for pane in seen {
             if let Some(pane) = self.panes.get_mut(&pane) {
                 pane.attention = false;
@@ -1166,13 +1360,11 @@ impl Server {
                 .windows
                 .iter()
                 .filter(|(_, w)| w.client == Some(client_id))
-                .map(|(&id, w)| (id, w.layout(), w.visible()))
+                .map(|(&id, w)| (id, self.window_layout(w), self.window_visible(id)))
                 .collect();
-            let window_panes: HashSet<PaneId> = self
-                .windows
-                .values()
-                .filter(|w| w.client == Some(client_id))
-                .flat_map(|w| w.tabs.iter().flat_map(|t| t.root.panes()))
+            let window_panes: HashSet<PaneId> = windows
+                .iter()
+                .flat_map(|(_, layout, _)| layout.tabs().flat_map(|(_, _, tab)| tab.root.panes()))
                 .collect();
             let states: Vec<PaneState> = infos
                 .iter()
@@ -1240,22 +1432,26 @@ impl Server {
         if !self.config.restore_sessions {
             return;
         }
+        let saved_workspace = |workspace: &Workspace| SavedWorkspace {
+            name: workspace.name.clone(),
+            active: workspace.active,
+            tabs: workspace
+                .tabs
+                .iter()
+                .map(|tab| SavedTab {
+                    title: tab.title.clone(),
+                    layout: self.saved_layout(&tab.root),
+                    focused: tab.root.panes().iter().position(|&id| id == tab.focused).unwrap_or(0),
+                    zoomed: tab.zoomed,
+                })
+                .collect(),
+        };
         let windows = self
             .windows
             .values()
-            .map(|window| SavedWorkspace {
-                window: window.bounds,
-                active: window.active,
-                tabs: window
-                    .tabs
-                    .iter()
-                    .map(|tab| SavedTab {
-                        title: tab.title.clone(),
-                        layout: self.saved_layout(&tab.root),
-                        focused: tab.root.panes().iter().position(|&id| id == tab.focused).unwrap_or(0),
-                        zoomed: tab.zoomed,
-                    })
-                    .collect(),
+            .map(|window| {
+                let workspaces = window.workspaces.iter().filter_map(|id| self.workspaces.get(id)).map(saved_workspace).collect();
+                SavedWindowState::new(window.bounds, window.active, workspaces)
             })
             .collect();
         let state = SavedState::new(windows);
@@ -1280,6 +1476,7 @@ impl Server {
             // Ended on purpose: nothing to reopen.
             self.panes.clear();
             self.windows.clear();
+            self.workspaces.clear();
         }
         self.save();
         // Dropping sessions hangs up their shells.

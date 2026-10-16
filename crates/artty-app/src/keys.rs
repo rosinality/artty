@@ -1,7 +1,7 @@
 //! Translate keystrokes into the bytes a terminal program expects.
 //!
 //! Plain text is not handled here: printable characters go through the macOS
-//! input system (see `InputHandler` in `workspace.rs`) so IME composition works.
+//! input system (see `InputHandler` in `window_view.rs`) so IME composition works.
 
 use artty_core::vt::term::TermMode;
 use gpui::Keystroke;

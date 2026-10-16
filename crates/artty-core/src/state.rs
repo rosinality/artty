@@ -11,15 +11,16 @@ use artty_vt::term::Term;
 use artty_vt::term::cell::{Cell, Flags};
 use serde::{Deserialize, Serialize};
 
-/// Version 3 saves several windows; version 2 added split layouts; version 1
-/// had one pane per tab. All of them load.
-const VERSION: u32 = 3;
+/// Version 4 groups each window's tabs into workspaces; version 3 saved
+/// several windows; version 2 added split layouts; version 1 had one pane per
+/// tab. All of them load.
+const VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedState {
     pub version: u32,
-    pub windows: Vec<SavedWorkspace>,
+    pub windows: Vec<SavedWindowState>,
     // One-window layout of versions 1 and 2.
     #[serde(skip_serializing_if = "Option::is_none")]
     window: Option<SavedWindow>,
@@ -33,11 +34,44 @@ fn is_zero(n: &usize) -> bool {
     *n == 0
 }
 
-/// One window: where it was, its tabs, and the active one.
+/// One window: where it was, its workspaces, and the active one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedWindowState {
+    pub window: Option<SavedWindow>,
+    pub active: usize,
+    pub workspaces: Vec<SavedWorkspace>,
+    // Version 3: the window's tabs (and `active` among them), one workspace.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tabs: Vec<SavedTab>,
+}
+
+impl SavedWindowState {
+    pub fn new(window: Option<SavedWindow>, active: usize, workspaces: Vec<SavedWorkspace>) -> Self {
+        Self { window, active, workspaces, tabs: Vec::new() }
+    }
+
+    /// In the current form: a version 3 window becomes one workspace.
+    fn upgraded(mut self) -> Self {
+        if !self.tabs.is_empty() {
+            let tabs = std::mem::take(&mut self.tabs);
+            self.workspaces.insert(0, SavedWorkspace { name: None, active: self.active, tabs });
+            self.active = 0;
+        }
+        self.workspaces.retain(|workspace| !workspace.tabs.is_empty());
+        for workspace in &mut self.workspaces {
+            workspace.active = workspace.active.min(workspace.tabs.len() - 1);
+        }
+        self.active = self.active.min(self.workspaces.len().saturating_sub(1));
+        self
+    }
+}
+
+/// A named group of tabs, shown as a section of a window's sidebar.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedWorkspace {
-    pub window: Option<SavedWindow>,
+    pub name: Option<String>,
     pub active: usize,
     pub tabs: Vec<SavedTab>,
 }
@@ -126,17 +160,19 @@ pub struct SavedAgent {
 }
 
 impl SavedState {
-    pub fn new(windows: Vec<SavedWorkspace>) -> Self {
+    pub fn new(windows: Vec<SavedWindowState>) -> Self {
         Self { version: VERSION, windows, ..Default::default() }
     }
 
-    /// The saved windows, including a one-window file from an older version.
-    pub fn into_windows(self) -> Vec<SavedWorkspace> {
+    /// The saved windows, in the current form whatever the file's version.
+    pub fn into_windows(self) -> Vec<SavedWindowState> {
         let mut windows = self.windows;
         if !self.tabs.is_empty() {
-            windows.insert(0, SavedWorkspace { window: self.window, active: self.active, tabs: self.tabs });
+            let workspace = SavedWorkspace { name: None, active: self.active, tabs: self.tabs };
+            windows.insert(0, SavedWindowState::new(self.window, 0, vec![workspace]));
         }
-        windows.retain(|window| !window.tabs.is_empty());
+        let mut windows: Vec<_> = windows.into_iter().map(SavedWindowState::upgraded).collect();
+        windows.retain(|window| !window.workspaces.is_empty());
         windows
     }
 
@@ -362,7 +398,8 @@ mod tests {
             focused: 1,
             zoomed: false,
         };
-        let window = SavedWorkspace { window: None, active: 0, tabs: vec![tab] };
+        let workspace = SavedWorkspace { name: Some("artty".into()), active: 0, tabs: vec![tab] };
+        let window = SavedWindowState::new(None, 1, vec![workspace.clone(), workspace]);
         let state = SavedState::new(vec![window.clone(), window]);
         let json = serde_json::to_string(&state).unwrap();
         assert!(!json.contains("\"tabs\":[]"), "no empty legacy fields: {json}");
@@ -379,9 +416,26 @@ mod tests {
         .unwrap();
         let windows = old.into_windows();
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].active, 1);
-        assert_eq!(windows[0].tabs.len(), 2);
+        assert_eq!(windows[0].workspaces.len(), 1);
+        assert_eq!(windows[0].workspaces[0].active, 1);
+        assert_eq!(windows[0].workspaces[0].tabs.len(), 2);
         assert_eq!(windows[0].window.map(|w| w.width), Some(3.));
+    }
+
+    #[test]
+    fn version_3_windows_become_one_workspace_each() {
+        let old: SavedState = serde_json::from_str(
+            r#"{"version":3,"windows":[
+                {"active":1,"tabs":[{"layout":{"pane":{"cwd":"/a"}}},{"layout":{"pane":{"cwd":"/b"}}}]},
+                {"active":0,"tabs":[]}]}"#,
+        )
+        .unwrap();
+        let windows = old.into_windows();
+        assert_eq!(windows.len(), 1, "empty windows are dropped");
+        assert_eq!(windows[0].active, 0);
+        assert_eq!(windows[0].workspaces[0].name, None);
+        assert_eq!(windows[0].workspaces[0].active, 1);
+        assert_eq!(windows[0].workspaces[0].tabs.len(), 2);
     }
 
     #[test]
@@ -390,9 +444,10 @@ mod tests {
         let old: SavedState =
             serde_json::from_str(r#"{"version":1,"active":0,"tabs":[{"cwd":"/x","title":"t","future":1}]}"#).unwrap();
         let windows = old.into_windows();
-        let SavedLayout::Pane(pane) = &windows[0].tabs[0].layout else { panic!("expected a single pane") };
+        let tab = &windows[0].workspaces[0].tabs[0];
+        let SavedLayout::Pane(pane) = &tab.layout else { panic!("expected a single pane") };
         assert_eq!(pane.cwd.as_deref(), Some(std::path::Path::new("/x")));
         assert_eq!(pane.title.as_deref(), Some("t"));
-        assert_eq!(windows[0].tabs[0].focused, 0);
+        assert_eq!(tab.focused, 0);
     }
 }

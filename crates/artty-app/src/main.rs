@@ -8,12 +8,12 @@ mod notify;
 mod profile;
 mod settings;
 mod terminal;
-mod workspace;
+mod window_view;
 
 use artty_core::protocol::PaneSpec;
 use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 
-use workspace::{
+use window_view::{
     ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
     FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, MoveTabDown, MoveTabUp,
     NewTab, NextPane, NextTab, Paste, PreviousPane, PreviousTab, RenameTab, ResetFontSize,
@@ -134,7 +134,7 @@ fn main() {
             KeyBinding::new("cmd-n", NewWindow, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
         ]);
-        workspace::bind_keys(cx);
+        window_view::bind_keys(cx);
         cx.set_menus(menus());
         notify::init();
         app_state::init(PaneSpec { command, ..Default::default() }, cx);

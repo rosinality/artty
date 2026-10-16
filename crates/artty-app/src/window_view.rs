@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 use artty_core::layout::{self, Axis, Direction, Divider, PaneId, Rect};
 use artty_core::protocol::{
     ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp, TabLayout, WindowId,
-    WindowLayout,
+    WindowLayout, WorkspaceId,
 };
 use artty_core::vt::term::TermMode;
 use artty_core::{Config, FrameCursor, SavedWindow, TerminalSize, Theme};
@@ -133,7 +133,7 @@ struct Search {
     error: Option<String>,
 }
 
-pub struct Workspace {
+pub struct WindowView {
     focus: FocusHandle,
     config: Arc<Config>,
     config_error: Option<String>,
@@ -148,6 +148,13 @@ pub struct Workspace {
     /// Detach from the server's window when this view goes away.
     detach: bool,
     layout: WindowLayout,
+    /// Every tab of the layout, workspace by workspace; most of the view
+    /// numbers tabs this way.
+    tabs: Vec<TabLayout>,
+    /// Where each of `tabs` is: its workspace and index there.
+    places: Vec<(WorkspaceId, usize)>,
+    /// The shown tab, in `tabs`.
+    active: usize,
     /// Area the active tab's panes fill, from the last render.
     area: Rect,
     /// Pane rectangles and dividers of the active tab, from the last render.
@@ -203,7 +210,7 @@ fn layout_of(tab: &TabLayout, area: Rect) -> (Vec<(PaneId, Rect)>, Vec<Divider>)
     if tab.zoomed { (vec![(tab.focused, area)], Vec::new()) } else { tab.root.layout(area, SPLIT_GAP) }
 }
 
-impl Workspace {
+impl WindowView {
     pub fn new(config: Config, config_error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let every = |interval: Duration, f: fn(&mut Self, &mut Context<Self>)| {
             cx.spawn(async move |this, cx| {
@@ -243,7 +250,10 @@ impl Workspace {
             window_handle: window.window_handle(),
             window: None,
             detach: true,
-            layout: WindowLayout { tabs: Vec::new(), active: 0 },
+            layout: WindowLayout::default(),
+            tabs: Vec::new(),
+            places: Vec::new(),
+            active: 0,
             area: Self::area_rect(window),
             pane_rects: Vec::new(),
             dividers: Vec::new(),
@@ -289,9 +299,14 @@ impl Workspace {
 
     pub fn set_layout(&mut self, layout: WindowLayout, cx: &mut Context<Self>) {
         if layout != self.layout {
-            if layout.active != self.layout.active || self.focused_id() != layout.tabs.get(layout.active).map(|t| t.focused) {
+            let shown = |layout: &WindowLayout| (layout.active_workspace().map(|w| (w.id, w.active)), layout.active_tab().map(|t| t.focused));
+            if shown(&layout) != shown(&self.layout) {
                 self.reset_input_state();
             }
+            self.tabs = layout.tabs().map(|(_, _, tab)| tab.clone()).collect();
+            self.places = layout.tabs().map(|(workspace, index, _)| (workspace, index)).collect();
+            let before: usize = layout.workspaces.iter().take(layout.active).map(|w| w.tabs.len()).sum();
+            self.active = before + layout.active_workspace().map_or(0, |w| w.active);
             self.layout = layout;
             cx.notify();
         }
@@ -304,7 +319,7 @@ impl Workspace {
 
     /// Whether this window shows `pane` right now.
     pub fn shows(&self, pane: PaneId) -> bool {
-        self.layout.tabs.get(self.layout.active).is_some_and(|tab| layout_of(tab, self.area).0.iter().any(|(id, _)| *id == pane))
+        self.tabs.get(self.active).is_some_and(|tab| layout_of(tab, self.area).0.iter().any(|(id, _)| *id == pane))
     }
 
     fn send(&self, message: ClientMessage, cx: &App) {
@@ -358,7 +373,7 @@ impl Workspace {
     // Panes and tabs.
 
     fn focused_id(&self) -> Option<PaneId> {
-        self.layout.tabs.get(self.layout.active).map(|tab| tab.focused)
+        self.tabs.get(self.active).map(|tab| tab.focused)
     }
 
     fn mode(&self, pane: PaneId, cx: &App) -> TermMode {
@@ -379,7 +394,7 @@ impl Workspace {
 
     fn open_tab(&self, cx: &App) {
         if let Some(window) = self.window {
-            self.send(ClientMessage::NewTab { window, spec: PaneSpec::default() }, cx);
+            self.send(ClientMessage::NewTab { window, workspace: None, spec: PaneSpec::default() }, cx);
         }
     }
 
@@ -390,11 +405,9 @@ impl Workspace {
     }
 
     fn select(&mut self, tab: usize, cx: &mut Context<Self>) {
-        if let Some(window) = self.window
-            && tab < self.layout.tabs.len()
-        {
+        if let Some(&(workspace, tab)) = self.places.get(tab) {
             self.close_search(cx);
-            self.send(ClientMessage::SelectTab { window, tab }, cx);
+            self.send(ClientMessage::SelectTab { workspace, tab }, cx);
         }
     }
 
@@ -421,22 +434,24 @@ impl Workspace {
     }
 
     fn cycle_pane(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(tab) = self.layout.tabs.get(self.layout.active) else { return };
+        let Some(tab) = self.tabs.get(self.active) else { return };
         let panes = tab.root.panes();
         let Some(index) = panes.iter().position(|&id| id == tab.focused) else { return };
         let next = if forward { (index + 1) % panes.len() } else { (index + panes.len() - 1) % panes.len() };
         self.focus_pane(panes[next], cx);
     }
 
+    /// Move a tab to where tab `to` is; across a section boundary, it joins
+    /// the neighboring workspace at the near end.
     fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        if let Some(window) = self.window {
-            self.renaming = None;
-            self.send(ClientMessage::MoveTab { window, from, to }, cx);
-        }
+        let (Some(&(workspace, from_index)), Some(&(to_workspace, to_index))) = (self.places.get(from), self.places.get(to)) else { return };
+        let to = if to_workspace != workspace && to < from { to_index + 1 } else { to_index };
+        self.renaming = None;
+        self.send(ClientMessage::MoveTab { workspace, from: from_index, to_workspace, to }, cx);
     }
 
     fn start_rename(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(tab) = self.layout.tabs.get(index) else { return };
+        let Some(tab) = self.tabs.get(index) else { return };
         let text = self.tab_title(tab, cx).to_string();
         self.close_search(cx);
         self.marked_text = None;
@@ -447,10 +462,10 @@ impl Workspace {
     fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
         if let Some(Renaming { tab, text }) = self.renaming.take()
             && commit
-            && let Some(window) = self.window
+            && let Some(&(workspace, tab)) = self.places.get(tab)
         {
             let title = Some(text.trim().to_owned()).filter(|t| !t.is_empty());
-            self.send(ClientMessage::RenameTab { window, tab, title }, cx);
+            self.send(ClientMessage::RenameTab { workspace, tab, title }, cx);
         }
         self.marked_text = None;
         cx.notify();
@@ -509,7 +524,7 @@ impl Workspace {
             MenuCommand::SplitRight => self.split(Some(pane), Axis::Horizontal, cx),
             MenuCommand::SplitDown => self.split(Some(pane), Axis::Vertical, cx),
             MenuCommand::RenameTab => {
-                if let Some(index) = self.layout.tabs.iter().position(|t| t.root.contains(pane)) {
+                if let Some(index) = self.tabs.iter().position(|t| t.root.contains(pane)) {
                     self.start_rename(index, cx);
                 }
             }
@@ -521,7 +536,7 @@ impl Workspace {
 
     fn jump_to_attention(&mut self, cx: &mut Context<Self>) {
         // Every pane in tab order, starting after the focused one.
-        let all: Vec<PaneId> = self.layout.tabs.iter().flat_map(|tab| tab.root.panes()).collect();
+        let all: Vec<PaneId> = self.tabs.iter().flat_map(|tab| tab.root.panes()).collect();
         let start = self.focused_id().and_then(|id| all.iter().position(|&p| p == id)).map_or(0, |i| i + 1);
         let order: Vec<PaneId> = all.iter().cycle().skip(start).take(all.len()).copied().collect();
         let state = |id: &PaneId| self.pane_state(*id, cx);
@@ -559,7 +574,7 @@ impl Workspace {
     }
 
     fn spin(&mut self, cx: &mut Context<Self>) {
-        let panes: Vec<PaneId> = self.layout.tabs.iter().flat_map(|t| t.root.panes()).collect();
+        let panes: Vec<PaneId> = self.tabs.iter().flat_map(|t| t.root.panes()).collect();
         let shared = cx.global::<Shared>();
         let busy = panes.iter().any(|id| shared.panes.get(id).is_some_and(|s| s.icon == "busy"));
         let flashing = panes.iter().any(|id| shared.flashes.get(id).is_some_and(|at| at.elapsed() <= FLASH));
@@ -805,7 +820,10 @@ impl Workspace {
             let ratio = layout::drag_ratio(divider, event.position.x.into(), event.position.y.into(), SPLIT_GAP);
             let path = divider.path.clone();
             // Move the divider right away; the server confirms with a layout.
-            if let Some(tab) = self.layout.tabs.get_mut(self.layout.active) {
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.root.set_ratio(&path, ratio);
+            }
+            if let Some(tab) = self.layout.active_tab_mut() {
                 tab.root.set_ratio(&path, ratio);
             }
             if let Some(window) = self.window {
@@ -978,7 +996,7 @@ impl Workspace {
     }
 
     fn tab_row(&self, index: usize, tab: &TabLayout, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let selected = index == self.layout.active;
+        let selected = index == self.active;
         let ids = tab.root.panes();
         let split = ids.len() > 1;
         let states: Vec<Option<&PaneState>> = ids.iter().map(|id| self.pane_state(*id, cx)).collect();
@@ -1132,7 +1150,28 @@ impl Workspace {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows: Vec<_> = self.layout.tabs.iter().enumerate().map(|(i, tab)| self.tab_row(i, tab, cx)).collect();
+        // With several workspaces, each starts a section.
+        let sections = self.layout.workspaces.len() > 1;
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            let (workspace, index) = self.places[i];
+            if sections && index == 0 {
+                let position = self.layout.workspaces.iter().position(|w| w.id == workspace).unwrap_or(0);
+                let name = self.layout.workspaces[position].name.clone().unwrap_or_else(|| format!("Workspace {}", position + 1));
+                rows.push(
+                    div()
+                        .px_2()
+                        .pt(px(if position == 0 { 0. } else { 8. }))
+                        .pb(px(2.))
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgba(0xffffff70))
+                        .child(Self::one_line(name))
+                        .into_any_element(),
+                );
+            }
+            rows.push(self.tab_row(i, tab, cx).into_any_element());
+        }
         let mismatch = cx.global::<Shared>().server_mismatch.is_some();
         div()
             .flex()
@@ -1357,7 +1396,7 @@ impl Workspace {
     }
 }
 
-impl Drop for Workspace {
+impl Drop for WindowView {
     fn drop(&mut self) {
         // The window closed: its tabs keep running in the server, detached.
         // (There's no `App` here; the server also notices a lost connection.)
@@ -1428,7 +1467,7 @@ struct PaneView {
     flash: f32,
 }
 
-impl Render for Workspace {
+impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         flush_detached(cx);
         if self.reload_config {
@@ -1445,7 +1484,7 @@ impl Render for Workspace {
         }
 
         // Lay out the active tab and keep the server's pane sizes in step.
-        let (rects, dividers) = self.layout.tabs.get(self.layout.active).map(|tab| layout_of(tab, self.area)).unwrap_or_default();
+        let (rects, dividers) = self.tabs.get(self.active).map(|tab| layout_of(tab, self.area)).unwrap_or_default();
         for (id, rect) in &rects {
             let size = self.size_for(*rect);
             if self.sizes.get(id) != Some(&size) {
@@ -1475,7 +1514,7 @@ impl Render for Workspace {
         let typing = window_focused && self.search.is_none() && self.renaming.is_none();
         self.blink_enabled = typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
-        let title = self.layout.tabs.get(self.layout.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default();
+        let title = self.tabs.get(self.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default();
         window.set_window_title(&title);
 
         let tint = Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
@@ -1502,7 +1541,7 @@ impl Render for Workspace {
 
         div()
             .track_focus(&self.focus)
-            .key_context("Workspace")
+            .key_context("WindowView")
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| this.open_tab(cx)))
             .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
@@ -1511,17 +1550,17 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
-                if let Some(window) = this.window {
-                    this.send(ClientMessage::CloseTab { window, tab: this.layout.active }, cx);
+                if let Some(&(workspace, tab)) = this.places.get(this.active) {
+                    this.send(ClientMessage::CloseTab { workspace, tab }, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| {
-                let next = (this.layout.active + 1) % this.layout.tabs.len().max(1);
+                let next = (this.active + 1) % this.tabs.len().max(1);
                 this.select(next, cx);
             }))
             .on_action(cx.listener(|this, _: &PreviousTab, _, cx| {
-                let count = this.layout.tabs.len().max(1);
-                this.select((this.layout.active + count - 1) % count, cx);
+                let count = this.tabs.len().max(1);
+                this.select((this.active + count - 1) % count, cx);
             }))
             .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(None, Axis::Horizontal, cx)))
             .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(None, Axis::Vertical, cx)))
@@ -1537,16 +1576,16 @@ impl Render for Workspace {
                 }
             }))
             .on_action(cx.listener(|this, _: &JumpToAttention, _, cx| this.jump_to_attention(cx)))
-            .on_action(cx.listener(|this, _: &RenameTab, _, cx| this.start_rename(this.layout.active, cx)))
+            .on_action(cx.listener(|this, _: &RenameTab, _, cx| this.start_rename(this.active, cx)))
             .on_action(cx.listener(|this, _: &MoveTabUp, _, cx| {
-                let active = this.layout.active;
+                let active = this.active;
                 if active > 0 {
                     this.move_tab(active, active - 1, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &MoveTabDown, _, cx| {
-                let active = this.layout.active;
-                if active + 1 < this.layout.tabs.len() {
+                let active = this.active;
+                if active + 1 < this.tabs.len() {
                     this.move_tab(active, active + 1, cx);
                 }
             }))
@@ -1653,7 +1692,7 @@ impl Render for Workspace {
 /// IME support: composition text is held here and only sent to the program
 /// (or the search query, or a tab name) once committed, so typing Hangul or
 /// kana works as in any Mac app.
-impl EntityInputHandler for Workspace {
+impl EntityInputHandler for WindowView {
     fn text_for_range(
         &mut self,
         range: Range<usize>,

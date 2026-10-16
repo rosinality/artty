@@ -107,7 +107,8 @@ hooks from older versions.
 ## Sessions
 
 The `artty server` process owns every terminal session; app windows attach
-to it. The app starts the server when needed, and the server exits once its
+to it. A window's tabs are grouped into workspaces — named sections of the
+sidebar, say one per project — which the server keeps as units of their own. The app starts the server when needed, and the server exits once its
 last session ends.
 
 - Closing a window detaches it: its tabs keep running, and
@@ -152,6 +153,7 @@ holds one or more.
 artty list                                  # panes with id, tab, status, title
 artty new --title server --background -- npm run dev
 artty new --split right -- npm run dev      # a pane next to your own
+artty new --workspace blog --cwd ~/blog     # a tab in workspace "blog" (made if needed)
 artty run --tab 3 -- cargo test             # prints output, exits with its code
 artty read --tab 3 --lines 50               # last 50 lines
 artty read --tab 3 --last                   # last command's output

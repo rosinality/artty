@@ -35,10 +35,11 @@ artty, your own pane is found automatically:
                                          run COMMAND in a tab's shell, print its
                                          output, and exit with its exit code
   artty new [--split right|down] [--tab N] [--cwd DIR] [--title T]
-            [--background] [-- COMMAND...]
+            [--workspace NAME] [--background] [-- COMMAND...]
                                          open a tab, or split pane N (default:
                                          your own, or the focused one); prints
-                                         the new pane's id
+                                         the new pane's id. --workspace opens it
+                                         in that workspace, creating it if needed
   artty focus N | artty close N
   artty rename [--tab N] TITLE           name the tab holding pane N (empty
                                          title: back to automatic)
@@ -121,6 +122,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--timeout" => _ = flags.insert("timeout", args.value("--timeout")?),
             "--cwd" => _ = flags.insert("cwd", args.value("--cwd")?),
             "--title" => _ = flags.insert("title", args.value("--title")?),
+            "--workspace" => _ = flags.insert("workspace", args.value("--workspace")?),
             "--message" => _ = flags.insert("message", args.value("--message")?),
             "--split" => _ = flags.insert("split", args.value("--split")?),
             "--agent" => _ = flags.insert("agent", args.value("--agent")?),
@@ -196,7 +198,12 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 Some("down") => Some(SplitDirection::Down),
                 Some(other) => return Err(format!("--split: expected right or down, not {other}")),
             };
+            let workspace = flags.get("workspace").cloned();
+            if split.is_some() && workspace.is_some() {
+                return Err("new: --split and --workspace don't go together".into());
+            }
             Request::New {
+                workspace,
                 cwd: flags.get("cwd").map(PathBuf::from),
                 command: rest,
                 title: flags.get("title").cloned(),
@@ -279,12 +286,13 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
                 println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
             } else {
                 println!(
-                    "artty server {} (pid {}), up {}\n{} windows ({} shown), {} panes, {} apps attached",
+                    "artty server {} (pid {}), up {}\n{} windows ({} shown), {} workspaces, {} panes, {} apps attached",
                     info.version,
                     info.pid,
                     duration(info.uptime_secs),
                     info.windows,
                     info.attached_windows,
+                    info.workspaces,
                     info.panes,
                     info.clients
                 );
@@ -313,17 +321,27 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             Ok(0)
         }
         Response::Tabs { tabs } => {
-            println!("    ID  WIN  TAB  STATUS   TITLE");
+            println!("    ID  WIN  WORKSPACE     TAB  STATUS   TITLE");
             for pane in tabs {
                 let marker = if pane.active { "*" } else if pane.needs_attention { "!" } else { " " };
                 let detail = pane.detail.map(|d| format!("  ({d})")).unwrap_or_default();
+                let workspace = workspace_label(pane.workspace, pane.workspace_name.as_deref());
                 println!(
-                    "{marker} {:>4}  {:>3}  {:>3}  {:<8} {}{detail}",
+                    "{marker} {:>4}  {:>3}  {workspace:<12}  {:>3}  {:<8} {}{detail}",
                     pane.id, pane.window, pane.tab, pane.status, pane.title
                 );
             }
             Ok(0)
         }
+    }
+}
+
+/// A workspace's name (shortened to fit a column), or its number.
+fn workspace_label(number: usize, name: Option<&str>) -> String {
+    match name {
+        Some(name) if name.chars().count() > 12 => format!("{}…", name.chars().take(11).collect::<String>()),
+        Some(name) => name.to_owned(),
+        None => format!("#{number}"),
     }
 }
 
@@ -365,14 +383,15 @@ fn process_table(panes: &[artty_core::control::PaneProcesses], by_cpu: bool) -> 
         panes.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
     }
     let mut out = String::new();
-    let _ = writeln!(out, "{}", bold("PANE WIN TAB  STATUS      CPU     MEM  TITLE"));
+    let _ = writeln!(out, "{}", bold("PANE WIN WORKSPACE     TAB  STATUS      CPU     MEM  TITLE"));
     for pane in panes {
         let shown = if pane.attached { "" } else { "  (detached)" };
         let _ = writeln!(
             out,
-            "{:>4} {:>3} {:>3}  {:<8} {:>5.1}% {:>7}  {}{}",
+            "{:>4} {:>3} {:<12}  {:>3}  {:<8} {:>5.1}% {:>7}  {}{}",
             pane.id,
             pane.window,
+            workspace_label(pane.workspace, pane.workspace_name.as_deref()),
             pane.tab,
             pane.status,
             pane.cpu_percent,
@@ -387,7 +406,8 @@ fn process_table(panes: &[artty_core::control::PaneProcesses], by_cpu: bool) -> 
         for process in processes {
             let marker = if process.foreground { "*" } else { " " };
             let line = format!(
-                "{:>16}{marker}{:<16} {:>5.1}% {:>7}  pid {:<6} {}",
+                // Lines CPU and memory up with the pane's.
+                "{:>19}{marker}{:<16} {:>5.1}% {:>7}  pid {:<6} {}",
                 "",
                 process.name,
                 process.cpu_percent,
@@ -431,12 +451,13 @@ fn top() -> Result<i32, String> {
         let total_memory: u64 = panes.iter().map(|p| p.memory_bytes).sum();
         let mut screen = String::from("\x1b[H\x1b[2J");
         screen.push_str(&format!(
-            "artty server {} · pid {} · up {} · {} windows ({} shown) · {} panes · CPU {:.1}% · memory {}\n\n",
+            "artty server {} · pid {} · up {} · {} windows ({} shown) · {} workspaces · {} panes · CPU {:.1}% · memory {}\n\n",
             info.version,
             info.pid,
             duration(info.uptime_secs),
             info.windows,
             info.attached_windows,
+            info.workspaces,
             info.panes,
             total_cpu,
             bytes(total_memory)

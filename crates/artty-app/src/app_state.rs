@@ -20,7 +20,7 @@ use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{App, AppContext, AsyncApp, Bounds, Global, WeakEntity, WindowBounds, WindowOptions, point, px, size};
 
-use crate::workspace::{self, Workspace};
+use crate::window_view::{self, WindowView};
 
 /// A pane's screen as last sent by the server, and its terminal mode.
 pub struct Screen {
@@ -39,8 +39,8 @@ pub struct Shared {
     /// Visual bells: when each pane last rang.
     pub flashes: HashMap<PaneId, Instant>,
     /// Windows asked to attach, in order; the server answers in order.
-    attaching: VecDeque<WeakEntity<Workspace>>,
-    windows: HashMap<WindowId, WeakEntity<Workspace>>,
+    attaching: VecDeque<WeakEntity<WindowView>>,
+    windows: HashMap<WindowId, WeakEntity<WindowView>>,
     settings: Option<gpui::WindowHandle<crate::settings::Settings>>,
     /// The running executable and when it was built, to notice rebuilds.
     executable: Option<(PathBuf, SystemTime)>,
@@ -55,6 +55,8 @@ pub struct Shared {
     /// Between losing the server and reopening windows from a new one, when
     /// having no windows doesn't mean quitting.
     reconnecting: bool,
+    /// When the connection was last lost, to stop reconnecting in a loop.
+    lost_at: Option<Instant>,
 }
 
 impl Global for Shared {}
@@ -86,6 +88,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         build: std::env::current_exe().map(|exe| artty_core::protocol::build_id(&exe)).unwrap_or_default(),
         stopped: false,
         reconnecting: false,
+        lost_at: None,
     });
     connect_and_open(spec, cx);
 
@@ -94,7 +97,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
             cx.background_executor().timer(Duration::from_secs(1)).await;
             let alive = cx.update(|cx| {
                 // Windows that closed since: detach them in the server.
-                workspace::flush_detached(cx);
+                window_view::flush_detached(cx);
                 check_for_update(cx);
             });
             if alive.is_err() {
@@ -174,9 +177,19 @@ fn connect(cx: &mut App) -> std::io::Result<()> {
     let (incoming, mut received) = mpsc::unbounded::<Option<ServerMessage>>();
     std::thread::Builder::new().name("artty-server-reader".into()).spawn(move || {
         let mut reader = std::io::BufReader::new(stream);
-        while let Ok(message) = read_message::<ServerMessage>(&mut reader) {
-            if incoming.unbounded_send(Some(message)).is_err() {
-                return;
+        loop {
+            match read_message::<ServerMessage>(&mut reader) {
+                Ok(message) => {
+                    if incoming.unbounded_send(Some(message)).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    if err.kind() != std::io::ErrorKind::UnexpectedEof {
+                        eprintln!("artty: reading from the server: {err}");
+                    }
+                    break;
+                }
             }
         }
         let _ = incoming.unbounded_send(None);
@@ -212,17 +225,24 @@ fn server_lost(cx: &mut App) {
     if shared.stopped {
         return cx.quit();
     }
+    // Losing it again right away means reconnecting won't help (say, the
+    // two can't understand each other): give up rather than loop.
+    let now = Instant::now();
+    if shared.lost_at.replace(now).is_some_and(|at| now.duration_since(at) < Duration::from_secs(10)) {
+        crate::notify::post("artty", "Lost the connection to the artty server again; quitting. Sessions may still be running.");
+        return cx.quit();
+    }
     shared.outgoing = None;
     shared.screens.clear();
     shared.panes.clear();
     shared.attaching.clear();
-    let windows: Vec<WeakEntity<Workspace>> = shared.windows.drain().map(|(_, w)| w).collect();
+    let windows: Vec<WeakEntity<WindowView>> = shared.windows.drain().map(|(_, w)| w).collect();
     if windows.is_empty() && !shared.reconnecting {
         return cx.quit();
     }
     shared.reconnecting = true;
     for window in windows.into_iter().filter_map(|w| w.upgrade()) {
-        window.update(cx, |workspace, _| workspace.forget_server());
+        window.update(cx, |view, _| view.forget_server());
         let handle = window.read(cx).window_handle();
         let _ = handle.update(cx, |_, window, _| window.remove_window());
     }
@@ -238,22 +258,22 @@ fn handle(message: ServerMessage, cx: &mut App) {
         }
         ServerMessage::Attached { window, bounds } => {
             let shared = cx.global_mut::<Shared>();
-            if let Some(workspace) = shared.attaching.pop_front() {
-                shared.windows.insert(window, workspace.clone());
-                if let Some(workspace) = workspace.upgrade() {
-                    workspace.update(cx, |workspace, cx| workspace.attached(window, bounds, cx));
+            if let Some(view) = shared.attaching.pop_front() {
+                shared.windows.insert(window, view.clone());
+                if let Some(view) = view.upgrade() {
+                    view.update(cx, |view, cx| view.attached(window, bounds, cx));
                 }
             }
         }
         ServerMessage::Layout { window, layout } => {
-            if let Some(workspace) = workspace_for(window, cx) {
-                workspace.update(cx, |workspace, cx| workspace.set_layout(layout, cx));
+            if let Some(view) = view_for(window, cx) {
+                view.update(cx, |view, cx| view.set_layout(layout, cx));
             }
         }
         ServerMessage::WindowClosed { window } => {
-            if let Some(workspace) = cx.global_mut::<Shared>().windows.remove(&window).and_then(|w| w.upgrade()) {
-                workspace.update(cx, |workspace, _| workspace.forget_server());
-                let handle = workspace.read(cx).window_handle();
+            if let Some(view) = cx.global_mut::<Shared>().windows.remove(&window).and_then(|w| w.upgrade()) {
+                view.update(cx, |view, _| view.forget_server());
+                let handle = view.read(cx).window_handle();
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
         }
@@ -284,8 +304,8 @@ fn handle(message: ServerMessage, cx: &mut App) {
         ServerMessage::Notify { title, body } => crate::notify::post(&title, &body),
         ServerMessage::App(command) => match command {
             AppCommand::Activate { window } => {
-                if let Some(workspace) = workspace_for(window, cx) {
-                    let handle = workspace.read(cx).window_handle();
+                if let Some(view) = view_for(window, cx) {
+                    let handle = view.read(cx).window_handle();
                     let _ = handle.update(cx, |_, window, _| window.activate_window());
                 }
             }
@@ -306,16 +326,16 @@ fn handle(message: ServerMessage, cx: &mut App) {
     }
 }
 
-fn workspace_for(window: WindowId, cx: &App) -> Option<gpui::Entity<Workspace>> {
+fn view_for(window: WindowId, cx: &App) -> Option<gpui::Entity<WindowView>> {
     cx.global::<Shared>().windows.get(&window)?.upgrade()
 }
 
 /// Redraw the window showing `pane`.
 fn refresh_pane(pane: PaneId, cx: &mut App) {
     let windows: Vec<_> = cx.global::<Shared>().windows.values().filter_map(WeakEntity::upgrade).collect();
-    for workspace in windows {
-        if workspace.read(cx).shows(pane) {
-            workspace.update(cx, |_, cx| cx.notify());
+    for view in windows {
+        if view.read(cx).shows(pane) {
+            view.update(cx, |_, cx| cx.notify());
         }
     }
 }
@@ -364,7 +384,7 @@ pub fn control(request: Request, cx: &mut App) -> oneshot::Receiver<Response> {
 pub fn open_window(window: Option<WindowId>, bounds: Option<SavedWindow>, spec: PaneSpec, cx: &mut App) {
     let (config, config_error) = Config::load();
     let open_windows = cx.global::<Shared>().windows.len();
-    let window_bounds = bounds.as_ref().map(workspace::window_bounds).unwrap_or_else(|| {
+    let window_bounds = bounds.as_ref().map(window_view::window_bounds).unwrap_or_else(|| {
         // New windows cascade.
         let offset = px(24.) * open_windows as f32;
         let base = Bounds::centered(None, size(px(1100.), px(680.)), cx);
@@ -377,10 +397,10 @@ pub fn open_window(window: Option<WindowId>, bounds: Option<SavedWindow>, spec: 
             appears_transparent: true,
             traffic_light_position: Some(point(px(14.), px(14.))),
         }),
-        window_background: workspace::background_appearance(&config),
+        window_background: window_view::background_appearance(&config),
         ..Default::default()
     };
-    let opened = cx.open_window(options, |window, cx| cx.new(|cx| Workspace::new(config, config_error, window, cx)));
+    let opened = cx.open_window(options, |window, cx| cx.new(|cx| WindowView::new(config, config_error, window, cx)));
     match opened {
         Ok(handle) => {
             if let Ok(entity) = handle.entity(cx) {
