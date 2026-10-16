@@ -1,0 +1,11 @@
+[package]
+name = "artty-core"
+version = "0.1.0"
+description = "Terminal sessions for artty: PTY, terminal state, and render snapshots"
+license = "Apache-2.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+artty-vt = { path = "../artty-vt" }
+log = "0.4"

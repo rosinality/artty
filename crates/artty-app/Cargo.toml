@@ -1,0 +1,13 @@
+[package]
+name = "artty"
+version = "0.1.0"
+description = "A GPU-accelerated terminal for working with AI agents"
+license = "Apache-2.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+artty-core = { path = "../artty-core" }
+futures = "0.3"
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+log = "0.4"
