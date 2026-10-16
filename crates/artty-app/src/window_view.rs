@@ -69,7 +69,8 @@ actions!(
 );
 
 pub const SIDEBAR_WIDTH: f32 = 232.;
-const TAB_LABEL_WIDTH: f32 = 28.;
+/// The last column of a tab row: its ⌘N label, or the close button.
+const TAB_LABEL_WIDTH: f32 = 22.;
 const TITLEBAR_HEIGHT: f32 = 32.;
 const PADDING: f32 = 12.;
 /// Space between split panes; a 1px divider line is drawn in its middle.
@@ -278,6 +279,8 @@ pub struct WindowView {
     selecting: bool,
     /// Scrolling the selection's pane while the drag is past its top or bottom.
     autoscrolling: bool,
+    /// ⌘ is held: the sidebar shows tabs' ⌘N shortcuts.
+    command_held: bool,
     /// Button held down while the program receives mouse reports.
     reporting_button: Option<Button>,
     /// Last cell reported for motion, to avoid duplicate reports.
@@ -332,6 +335,8 @@ impl WindowView {
 
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
+            // ⌘-Tab away and back: the key-up went elsewhere.
+            this.command_held = false;
             if let Some(id) = this.window {
                 app_state::send(ClientMessage::WindowFocused { window: id, focused: this.window_active }, cx);
             }
@@ -375,6 +380,7 @@ impl WindowView {
             mouse_pane: None,
             selecting: false,
             autoscrolling: false,
+            command_held: false,
             reporting_button: None,
             last_mouse_cell: None,
             scroll_remainder: 0.,
@@ -1451,6 +1457,15 @@ impl WindowView {
         }
     }
 
+    /// A detail to show next to `title`, without repeating it: shells put
+    /// the running command in the title, so "sleep 9 · 4s" becomes "4s".
+    fn beside(title: &str, detail: String) -> String {
+        match detail.split_once(" · ") {
+            Some((what, rest)) if title.starts_with(what) => rest.to_owned(),
+            _ => detail,
+        }
+    }
+
     fn urgency(state: Option<&PaneState>) -> u8 {
         match state.map(|s| s.icon.as_str()) {
             Some("waiting") => 5,
@@ -1486,51 +1501,59 @@ impl WindowView {
         let label: SharedString = if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
         let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
         let detail = if split { None } else { focused.and_then(Self::pane_detail) };
+        let detail = detail.map(|detail| Self::beside(&self.tab_title(tab, cx), detail));
         let group: SharedString = format!("tab-row-{index}").into();
 
+        // One line: icon, title, then what it's doing on the right, and a
+        // last column for the ⌘N label (while ⌘ is held) or, on hover, a close
+        // button. (Fading, not hiding: GPUI can't change layout on hover.)
+        let renaming = self.renaming.as_ref().filter(|r| r.target == RenameTarget::Tab(index));
         let header = div()
             .flex()
             .items_center()
             .gap(px(6.))
+            .h(px(22.))
             .child(self.icon_cell(summary))
-            .child(
-                div()
+            .child(match renaming {
+                Some(renaming) => {
+                    let marked = self.marked_text.as_deref().unwrap_or_default();
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .px_1()
+                        .rounded(px(4.))
+                        .bg(rgba(0x0000004d))
+                        .border_1()
+                        .border_color(rgba(0x8fb4ff99))
+                        .text_color(rgba(0xffffffee))
+                        .child(format!("{}{marked}▏", renaming.text))
+                }
+                None => Self::one_line(self.tab_title(tab, cx))
                     .flex_1()
                     .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(match self.renaming.as_ref().filter(|r| r.target == RenameTarget::Tab(index)) {
-                        Some(renaming) => {
-                            let marked = self.marked_text.as_deref().unwrap_or_default();
-                            div()
-                                .px_1()
-                                .rounded(px(4.))
-                                .bg(rgba(0x0000004d))
-                                .border_1()
-                                .border_color(rgba(0x8fb4ff99))
-                                .text_color(rgba(0xffffffee))
-                                .child(format!("{}{marked}▏", renaming.text))
-                        }
-                        None => Self::one_line(self.tab_title(tab, cx))
-                            .text_color(text_color)
-                            .when(attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
-                    })
-                    .when_some(detail, |d, detail| {
-                        d.child(Self::one_line(detail).text_size(px(11.)).text_color(rgba(0xffffff70)))
-                    }),
-            )
-            // The shortcut, or on hover a close button in its place.
-            // (Fading, not hiding: GPUI can't change layout on hover.)
+                    .text_color(text_color)
+                    .when(attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
+            })
+            .when_some(detail.filter(|_| renaming.is_none()), |d, detail| {
+                d.child(Self::one_line(detail).flex_none().max_w(px(104.)).text_size(px(11.)).text_color(rgba(0xffffff70)))
+            })
             .child(
                 div()
                     .relative()
                     .w(px(TAB_LABEL_WIDTH))
+                    .h_full()
                     .flex_none()
                     .flex()
+                    .items_center()
                     .justify_end()
                     .text_xs()
-                    .text_color(rgba(0xffffff66))
-                    .child(div().group_hover(group.clone(), |s| s.opacity(0.)).child(label))
+                    .text_color(rgba(0xffffff80))
+                    .child(
+                        div()
+                            .opacity(if self.command_held { 1. } else { 0. })
+                            .group_hover(group.clone(), |s| s.opacity(0.))
+                            .child(label),
+                    )
                     .child(
                         // Spans the slot's height, so the button sits at its center.
                         div().absolute().top_0().bottom_0().right_0().flex().items_center().child(
@@ -1563,10 +1586,7 @@ impl WindowView {
             ids.iter().zip(&states).map(|(&id, state)| {
                 let is_focused = id == tab.focused;
                 let title = state.map(|s| s.info.title.clone()).unwrap_or_else(|| "shell".into());
-                let line = match state.and_then(Self::pane_detail) {
-                    Some(detail) => format!("{title} · {detail}"),
-                    None => title,
-                };
+                let detail = state.and_then(Self::pane_detail).map(|detail| Self::beside(&title, detail));
                 let pane_attention = state.is_some_and(|s| s.info.needs_attention);
                 div()
                     .id(("pane", id as usize))
@@ -1580,12 +1600,17 @@ impl WindowView {
                     .on_click(cx.listener(move |this, _, _, cx| this.focus_pane(id, cx)))
                     .child(self.icon_cell(*state))
                     .child(
-                        Self::one_line(line)
+                        Self::one_line(title)
                             .flex_1()
                             .min_w_0()
                             .text_color(if is_focused && selected { rgba(0xffffffd0) } else { rgba(0xffffff80) })
                             .when(pane_attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
                     )
+                    // Lined up with the tab's own detail, left of its last column.
+                    .when_some(detail, |d, detail| {
+                        d.child(Self::one_line(detail).flex_none().max_w(px(104.)).text_size(px(11.)).text_color(rgba(0xffffff60)))
+                    })
+                    .child(div().w(px(TAB_LABEL_WIDTH)).flex_none())
             })
         });
 
@@ -1594,9 +1619,8 @@ impl WindowView {
             .group(group)
             .flex()
             .flex_col()
-            .gap(px(2.))
-            .min_h(px(30.))
-            .py(px(4.))
+            .gap(px(1.))
+            .py(px(3.))
             .px_2()
             .rounded(px(7.))
             .when(selected, |d| match self.tab_color(index) {
@@ -2415,6 +2439,10 @@ impl Render for WindowView {
             }))
             .on_mouse_move(cx.listener(Self::mouse_move))
             .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                if this.command_held != event.modifiers.platform {
+                    this.command_held = event.modifiers.platform;
+                    cx.notify();
+                }
                 this.update_hover_link(event.modifiers.platform, cx);
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))

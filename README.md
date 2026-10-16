@@ -53,7 +53,7 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘⌥←↑→↓, ⌘[ / ⌘] | Move to the pane in that direction / previous, next pane |
 | ⌘⇧↩ | Zoom the pane to fill the tab, and back |
 | Drag a divider | Resize panes |
-| ⌘1…⌘9, ⌘⇧[ / ⌘⇧] | Switch tabs |
+| ⌘1…⌘9, ⌘⇧[ / ⌘⇧] | Switch tabs (hold ⌘ to see their numbers) |
 | Double-click / drag a tab | Rename it / reorder it (also into another workspace) |
 | ⌘⇧N | New workspace (name it, then Enter) |
 | ⌘⇧O | Open a workspace: a hidden one, or one in another window |
