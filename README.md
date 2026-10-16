@@ -57,6 +57,7 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | Double-click / drag a tab | Rename it / reorder it (also into another workspace) |
 | ⌘⇧N | New workspace (name it, then Enter) |
 | ⌘⇧O | Open a workspace: a hidden one, or one in another window |
+| ⇧⌘A | Activity: every pane's processes, CPU and memory |
 | ⌃⌘[ / ⌃⌘] | Previous / next workspace |
 | Click / double-click / drag a workspace header | Fold it / rename it / reorder workspaces |
 | Right-click (or ⌃-click) | In a pane: copy, paste, links, split, rename, clear, close. On a tab or workspace in the sidebar: rename, move to a new workspace, fold, close |
@@ -155,6 +156,13 @@ artty server status         # pid, uptime, windows, panes, attached apps
 artty server restart        # restart on this build; tabs and agents return
 artty server stop           # end every session
 ```
+
+**Activity** (⇧⌘A, the top of the sidebar, or `artty activity`) shows what
+runs in every pane, live: workspaces, their panes and each pane's process
+tree, with CPU and memory totals at every level. Click a column to sort,
+type to filter, click a pane to go to it, and Stop a process (SIGTERM; ⌥
+for SIGKILL; a pane's shell or agent asks first). It's a view, not a tab:
+nothing runs in it, and it's in no workspace.
 
 The server logs to `~/Library/Logs/artty/server.log`.
 

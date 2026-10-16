@@ -274,6 +274,8 @@ pub enum AppCommand {
     Activate { window: WindowId },
     /// Open a view of a server window that has none.
     OpenWindow { window: WindowId },
+    /// Show the Activity view in a window (`artty activity`).
+    ShowActivity { window: WindowId },
     OpenSettings,
     /// Quit and reopen the app (sessions keep running).
     Restart,

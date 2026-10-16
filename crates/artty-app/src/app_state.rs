@@ -306,6 +306,12 @@ fn handle(message: ServerMessage, cx: &mut App) {
             AppCommand::Activate { window } => activate(window, cx),
             AppCommand::OpenWindow { window } => open_window(Some(window), None, PaneSpec::default(), cx),
             AppCommand::OpenSettings => open_settings(cx),
+            AppCommand::ShowActivity { window } => {
+                if let Some(view) = view_for(window, cx) {
+                    view.update(cx, |view, cx| view.show_activity(cx));
+                }
+                activate(window, cx);
+            }
             AppCommand::Restart => restart(cx),
         },
         ServerMessage::Reply { id, reply } => {

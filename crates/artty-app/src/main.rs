@@ -16,7 +16,7 @@ use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 use window_view::{
     ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
     FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, MoveTabDown, MoveTabUp,
-    NewTab, NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, Paste, PreviousPane, PreviousTab,
+    NewTab, NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, Paste, ShowActivity, PreviousPane, PreviousTab,
     PreviousWorkspace, RenameTab, ResetFontSize, SplitDown, SplitRight, ToggleZoom,
 };
 
@@ -106,6 +106,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("Show Next Workspace", NextWorkspace),
                 MenuItem::action("Show Previous Workspace", PreviousWorkspace),
                 MenuItem::action("Jump to Tab Needing Attention", JumpToAttention),
+                MenuItem::action("Activity", ShowActivity),
                 MenuItem::separator(),
                 MenuItem::action("Rename Tab…", RenameTab),
                 MenuItem::action("Move Tab Up", MoveTabUp),

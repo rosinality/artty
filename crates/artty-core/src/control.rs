@@ -70,6 +70,8 @@ pub enum Request {
     List,
     /// Open the Settings window.
     Settings,
+    /// Show the Activity view in the frontmost window.
+    Activity,
     /// Quit the app and start it again (e.g. after a rebuild); sessions keep
     /// running in the server.
     Restart,
@@ -85,6 +87,9 @@ pub enum Request {
     /// Terminate a pane's foreground program (`signal`, default TERM), or the
     /// whole pane with `pane: true`.
     Kill { tab: SessionId, signal: Option<i32>, pane: bool },
+    /// Send a signal (default SIGTERM) to one process; only processes running
+    /// in artty's panes.
+    Signal { pid: i32, signal: Option<i32> },
     /// Every workspace, shown or not.
     Workspaces,
     /// A workspace with one tab, in the frontmost window.

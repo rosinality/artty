@@ -28,6 +28,9 @@ use crate::keys;
 use crate::mouse::{self, Action, Button};
 use crate::terminal::{self, Metrics, hsla};
 
+#[path = "activity.rs"]
+mod activity;
+
 actions!(
     artty,
     [
@@ -41,6 +44,7 @@ actions!(
         MoveTabDown,
         NewWorkspace,
         OpenWorkspace,
+        ShowActivity,
         NextWorkspace,
         PreviousWorkspace,
         SplitRight,
@@ -288,6 +292,8 @@ pub struct WindowView {
     /// Asked for a new workspace: name it when it shows up.
     naming_new_workspace: bool,
     picker: Option<Picker>,
+    /// The Activity view, when it's shown instead of the active tab.
+    activity: Option<activity::Activity>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -374,6 +380,7 @@ impl WindowView {
             renaming: None,
             naming_new_workspace: false,
             picker: None,
+            activity: None,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -398,6 +405,10 @@ impl WindowView {
             let shown = |layout: &WindowLayout| (layout.active_workspace().map(|w| (w.id, w.active)), layout.active_tab().map(|t| t.focused));
             if shown(&layout) != shown(&self.layout) {
                 self.reset_input_state();
+                // Something opened or switched tabs: show it.
+                if !self.layout.workspaces.is_empty() {
+                    self.activity = None;
+                }
             }
             self.tabs = layout.tabs().map(|(_, _, tab)| tab.clone()).collect();
             self.places = layout.tabs().map(|(workspace, index, _)| (workspace, index)).collect();
@@ -735,7 +746,9 @@ impl WindowView {
     fn select(&mut self, tab: usize, cx: &mut Context<Self>) {
         if let Some(&(workspace, tab)) = self.places.get(tab) {
             self.close_search(cx);
+            self.activity = None;
             self.send(ClientMessage::SelectTab { workspace, tab }, cx);
+            cx.notify();
         }
     }
 
@@ -969,6 +982,9 @@ impl WindowView {
 
     /// Once a second: notice config changes (fonts, opacity are drawn here).
     fn poll(&mut self, cx: &mut Context<Self>) {
+        if self.showing_activity() {
+            self.refresh_activity(cx);
+        }
         let modified = config_modified();
         if modified != self.config_modified {
             self.config_modified = modified;
@@ -1056,6 +1072,13 @@ impl WindowView {
         }
         if self.search.is_some() {
             self.search_key(event, cx);
+            return;
+        }
+        if self.showing_activity() {
+            // Nothing typed here goes to a terminal.
+            if self.activity_key(event, cx) {
+                cx.stop_propagation();
+            }
             return;
         }
         let Some(pane) = self.focused_id() else { return };
@@ -1386,7 +1409,7 @@ impl WindowView {
     }
 
     fn tab_row(&self, index: usize, tab: &TabLayout, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
-        let selected = index == self.active;
+        let selected = index == self.active && !self.showing_activity();
         let ids = tab.root.panes();
         let split = ids.len() > 1;
         let states: Vec<Option<&PaneState>> = ids.iter().map(|id| self.pane_state(*id, cx)).collect();
@@ -1713,6 +1736,24 @@ impl WindowView {
             .px(px(8.))
             .pb(px(10.))
             .text_size(px(12.5))
+            .child(
+                div()
+                    .id("activity")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(30.))
+                    .mb(px(10.))
+                    .px_2()
+                    .rounded(px(7.))
+                    .text_color(if self.showing_activity() { rgba(0xffffffee) } else { rgba(0xffffffb0) })
+                    .when(self.showing_activity(), |d| d.bg(rgba(0xffffff1c)))
+                    .hover(|d| d.bg(rgba(0xffffff10)))
+                    .child(div().w(px(12.)).flex_none().flex().justify_center().text_color(rgba(0x8fb4ffff)).child("◔"))
+                    .child(div().flex_1().child("Activity"))
+                    .child(div().text_xs().text_color(rgba(0xffffff66)).child("⇧⌘A"))
+                    .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
+            )
             .child(
                 div()
                     .flex()
@@ -2116,10 +2157,14 @@ impl Render for WindowView {
         self.cursor = views.iter().find(|view| view.focused).and_then(|view| view.frame.cursor);
 
         let window_focused = self.focus.is_focused(window) && self.window_active;
-        let typing = window_focused && self.search.is_none() && self.renaming.is_none() && self.picker.is_none();
+        let typing =
+            window_focused && self.search.is_none() && self.renaming.is_none() && self.picker.is_none() && !self.showing_activity();
         self.blink_enabled = typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
-        let title = self.tabs.get(self.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default();
+        let title = match self.showing_activity() {
+            true => "Activity".into(),
+            false => self.tabs.get(self.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default(),
+        };
         window.set_window_title(&title);
 
         let tint = Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
@@ -2151,6 +2196,7 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &NewTab, _, cx| this.open_tab(cx)))
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
             .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
+            .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.cycle_workspace(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.cycle_workspace(-1, cx)))
             .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
@@ -2249,7 +2295,8 @@ impl Render for WindowView {
                             .text_color(rgba(0xffffffb8))
                             .child(Self::one_line(title).min_w_0()),
                     )
-                    .child(
+                    .when(self.showing_activity(), |d| d.child(div().flex_1().min_h_0().child(self.activity_view(cx))))
+                    .when(!self.showing_activity(), |d| d.child(
                         div()
                             .id("terminal")
                             .relative()
@@ -2292,7 +2339,7 @@ impl Render for WindowView {
                             )
                             .children(self.divider_handles(container, cx))
                             .children(self.search_bar(container)),
-                    ),
+                    )),
             )
             .children(self.context_menu_overlay(window.viewport_size(), cx))
             .children(self.picker_overlay(cx))
@@ -2402,6 +2449,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-t", NewTab, None),
         KeyBinding::new("cmd-shift-n", NewWorkspace, None),
         KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
+        KeyBinding::new("cmd-shift-a", ShowActivity, None),
         KeyBinding::new("ctrl-cmd-]", NextWorkspace, None),
         KeyBinding::new("ctrl-cmd-[", PreviousWorkspace, None),
         KeyBinding::new("cmd-w", ClosePane, None),

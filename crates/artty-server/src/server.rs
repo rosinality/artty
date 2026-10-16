@@ -1440,6 +1440,12 @@ impl Server {
                 }
                 Response::Ok
             }
+            Request::Activity => {
+                let window = self.frontmost().filter(|w| self.windows[w].client.is_some()).ok_or("the artty app isn't running")?;
+                let client = self.windows[&window].client.unwrap();
+                self.send(client, ServerMessage::App(AppCommand::ShowActivity { window }));
+                Response::Ok
+            }
             Request::Settings => {
                 let client = self.app_client().ok_or("the artty app isn't running")?;
                 self.send(client, ServerMessage::App(AppCommand::OpenSettings));
@@ -1473,6 +1479,24 @@ impl Server {
             }
             Request::Processes { tab } => Response::Processes { panes: self.processes(tab)? },
             Request::Workspaces => Response::Workspaces { workspaces: self.workspace_infos() },
+            Request::Signal { pid, signal } => {
+                // Only what runs in a pane: never the server, the app, or
+                // anything else of yours.
+                let samples = processes();
+                let ours = self
+                    .panes
+                    .values()
+                    .filter_map(|pane| pane.session.shell_pid())
+                    .any(|shell| process_tree(&samples, shell).iter().any(|p| p.pid == pid));
+                if !ours {
+                    return Err(format!("process {pid} isn't running in an artty pane"));
+                }
+                // SAFETY: plain syscall.
+                if unsafe { libc::kill(pid, signal.unwrap_or(libc::SIGTERM)) } != 0 {
+                    return Err(std::io::Error::last_os_error().to_string());
+                }
+                Response::Ok
+            }
             Request::NewWorkspace { name, cwd, command } => {
                 let command = (!command.is_empty()).then_some(command);
                 let spec = PaneSpec { command, cwd, title: None };

@@ -13,7 +13,7 @@ use artty_core::control::{
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "server", "ps", "top", "kill", "workspace", "workspaces", "hooks",
+    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "server", "ps", "top", "kill", "workspace", "workspaces", "activity", "hooks",
     "shell-integration",
 ];
 
@@ -73,6 +73,8 @@ artty, your own pane is found automatically:
                                          or restart it on this build (programs
                                          end; tabs and agents come back)
   artty settings                         open the Settings window
+  artty activity                         show the Activity view (processes,
+                                         CPU and memory of every pane)
   artty restart                          quit and reopen artty (e.g. to run a new
                                          build); tabs and agents are restored
   artty shell-integration zsh|bash       print the shell integration script, to
@@ -231,6 +233,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             }
         }
         "settings" => Request::Settings,
+        "activity" => Request::Activity,
         "restart" => Request::Restart,
         "read" => {
             let source = if switches.contains("screen") {
@@ -475,7 +478,7 @@ fn parse_signal(name: &str) -> Result<i32, String> {
 }
 
 /// `1536000` → `1.5M`.
-fn bytes(n: u64) -> String {
+pub fn bytes(n: u64) -> String {
     match n {
         0..1_000_000 => format!("{:.0}K", n as f64 / 1e3),
         1_000_000..1_000_000_000 => format!("{:.1}M", n as f64 / 1e6),
@@ -589,7 +592,7 @@ fn top() -> Result<i32, String> {
 }
 
 /// `90s` → `1m30s`, `5400s` → `1h30m`.
-fn duration(secs: u64) -> String {
+pub fn duration(secs: u64) -> String {
     match secs {
         0..60 => format!("{secs}s"),
         60..3600 => format!("{}m{}s", secs / 60, secs % 60),
