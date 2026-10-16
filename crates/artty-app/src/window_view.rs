@@ -1474,28 +1474,29 @@ impl WindowView {
                     .text_color(rgba(0xffffff66))
                     .child(div().group_hover(group.clone(), |s| s.opacity(0.)).child(label))
                     .child(
-                        div()
-                            .id(("close-tab", index))
-                            .absolute()
-                            .right_0()
-                            .top(px(-2.))
-                            .opacity(0.)
-                            .group_hover(group.clone(), |s| s.opacity(1.))
-                            .flex()
-                            .size(px(18.))
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .text_size(px(13.))
-                            .text_color(rgba(0xffffffa0))
-                            .hover(|d| d.bg(rgba(0xffffff1f)).text_color(rgba(0xffffffee)))
-                            .child("×")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(&(workspace, tab)) = this.places.get(index) {
-                                    this.send(ClientMessage::CloseTab { workspace, tab }, cx);
-                                }
-                                cx.stop_propagation();
-                            })),
+                        // Spans the slot's height, so the button sits at its center.
+                        div().absolute().top_0().bottom_0().right_0().flex().items_center().child(
+                            div()
+                                .id(("close-tab", index))
+                                .opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .flex()
+                                .size(px(18.))
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.))
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .text_color(rgba(0xffffffa0))
+                                .hover(|d| d.bg(rgba(0xffffff1f)).text_color(rgba(0xffffffee)))
+                                .child("×")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(&(workspace, tab)) = this.places.get(index) {
+                                        this.send(ClientMessage::CloseTab { workspace, tab }, cx);
+                                    }
+                                    cx.stop_propagation();
+                                })),
+                        ),
                     ),
             );
 
@@ -1664,6 +1665,12 @@ impl WindowView {
                 div()
                     .id(("workspace-close", id as usize))
                     .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .min_w(px(18.))
+                    .h(px(18.))
+                    .line_height(px(18.))
                     .px_1()
                     .rounded(px(4.))
                     .map(|d| {
