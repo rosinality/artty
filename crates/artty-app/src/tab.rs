@@ -68,6 +68,12 @@ pub struct Tab {
 
 const TITLE_ANIMATION_WINDOW: Duration = Duration::from_secs(2);
 
+/// Whether a process name is an interactive shell (login shells start with `-`).
+fn is_shell(name: &str) -> bool {
+    const SHELLS: &[&str] = &["fish", "zsh", "bash", "sh", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh", "login"];
+    SHELLS.contains(&name.trim_start_matches('-'))
+}
+
 impl Tab {
     pub fn new(session: Session, fixed_title: Option<String>, agents: Arc<[String]>) -> Self {
         Self {
@@ -147,9 +153,9 @@ impl Tab {
     /// Recompute the status from the latest process info and reports.
     pub fn refresh(&mut self) {
         // A program that reports agent status counts as an agent even if its
-        // name isn't on the list, until the shell is back in the foreground.
+        // name isn't on the list, until a shell is back in the foreground.
         let reporter = || {
-            let name = self.process.foreground.clone().filter(|_| !self.process.at_shell)?;
+            let name = self.process.foreground.clone().filter(|name| !is_shell(name))?;
             self.reported.map(|_| name)
         };
         let Some(agent) = self.agent_name().or_else(reporter) else {
