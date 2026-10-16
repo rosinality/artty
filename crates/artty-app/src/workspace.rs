@@ -1946,6 +1946,7 @@ impl Render for Workspace {
             window.remove_window();
             return div();
         }
+        let build_started = std::time::Instant::now();
         if self.reload_config {
             self.apply_config(window);
         }
@@ -2012,6 +2013,7 @@ impl Render for Workspace {
             .collect();
         let focus = self.focus.clone();
         let entity = cx.entity();
+        let build_time = build_started.elapsed();
         // The terminal container starts right of the sidebar, below the title bar.
         let container = point(px(SIDEBAR_WIDTH), px(TITLEBAR_HEIGHT));
 
@@ -2133,6 +2135,7 @@ impl Render for Workspace {
                                 canvas(
                                     |_, _, _| {},
                                     move |_, _, window, cx| {
+                                        let paint_started = std::time::Instant::now();
                                         if let Some(rect) = focused_rect {
                                             window.handle_input(&focus, ElementInputHandler::new(bounds(rect), entity), cx);
                                         }
@@ -2149,6 +2152,9 @@ impl Render for Workspace {
                                         }
                                         for line in &divider_lines {
                                             window.paint_quad(fill(*line, divider_color));
+                                        }
+                                        if crate::profile::enabled() {
+                                            crate::profile::record(build_time, paint_started.elapsed());
                                         }
                                     },
                                 )

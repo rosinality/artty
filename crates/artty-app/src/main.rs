@@ -7,6 +7,7 @@ mod layout;
 mod mouse;
 mod notify;
 mod pane;
+mod profile;
 mod settings;
 mod terminal;
 mod workspace;
