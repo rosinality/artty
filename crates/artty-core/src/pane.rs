@@ -3,10 +3,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use artty_core::control::{AgentState, TabInfo};
-use artty_core::vt::ansi::Progress;
-use artty_core::{ProcessInfo, SavedAgent, SavedPane, Session, ShellPhase};
-use gpui::SharedString;
+use crate::control::{AgentState, TabInfo};
+use artty_vt::ansi::Progress;
+use crate::{ProcessInfo, SavedAgent, SavedPane, Session, ShellPhase};
 
 /// What a pane is doing, as shown in the sidebar.
 #[derive(Clone, Debug, PartialEq)]
@@ -129,9 +128,9 @@ impl Pane {
         }
     }
 
-    pub fn title(&self) -> SharedString {
+    pub fn title(&self) -> String {
         let title = self.fixed_title.as_ref().or(self.title.as_ref());
-        title.cloned().or_else(|| self.process.foreground.clone()).unwrap_or_else(|| "shell".to_owned()).into()
+        title.cloned().or_else(|| self.process.foreground.clone()).unwrap_or_else(|| "shell".to_owned())
     }
 
     pub fn set_title(&mut self, title: Option<String>) {
@@ -320,7 +319,7 @@ impl Pane {
             id: self.session.id(),
             window,
             tab,
-            title: self.title().to_string(),
+            title: self.title(),
             active,
             focused,
             cwd: self.session.cwd(),
@@ -329,7 +328,7 @@ impl Pane {
             detail: self.detail(),
             needs_attention: self.attention,
             shell_integration: self.session.shell_integration(),
-            kitty_keyboard: self.session.mode().intersects(artty_core::vt::term::TermMode::KITTY_KEYBOARD_PROTOCOL),
+            kitty_keyboard: self.session.mode().intersects(artty_vt::term::TermMode::KITTY_KEYBOARD_PROTOCOL),
         }
     }
 }

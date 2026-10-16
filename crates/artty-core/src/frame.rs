@@ -13,7 +13,7 @@ use crate::theme::{Theme, dim};
 /// `column * cell_width`. ASCII text is grouped into runs; every other
 /// character gets its own run, so glyphs from fallback fonts (CJK, emoji,
 /// symbols) can't push the rest of the line off the cell grid.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Frame {
     pub columns: usize,
     pub lines: Vec<FrameLine>,
@@ -24,7 +24,7 @@ pub struct Frame {
     pub foreground: Rgb,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrameLine {
     pub runs: Vec<FrameRun>,
     /// Cells whose background differs from the default background.
@@ -35,7 +35,7 @@ pub struct FrameLine {
     pub matches: Vec<FrameRect>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrameRun {
     pub column: usize,
     /// Number of cells the run covers (2 for a double-width character).
@@ -48,14 +48,14 @@ pub struct FrameRun {
     pub strikeout: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrameRect {
     pub column: usize,
     pub width: usize,
     pub color: Rgb,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FrameCursor {
     pub line: usize,
     pub column: usize,

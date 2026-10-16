@@ -151,7 +151,7 @@ impl Response {
 }
 
 /// A pane (`id`) and the tab it's in.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TabInfo {
     pub id: SessionId,
     /// 1-based window number.

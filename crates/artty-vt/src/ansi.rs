@@ -847,6 +847,7 @@ pub enum Progress {
 
 /// Terminal cursor shape.
 #[derive(Debug, Default, Eq, PartialEq, Copy, Clone, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum CursorShape {
     /// Cursor is a block like `▒`.
     #[default]

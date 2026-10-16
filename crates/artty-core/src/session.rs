@@ -27,7 +27,7 @@ pub type SessionId = u64;
 
 /// Terminal size in cells, plus the cell size in pixels (reported to programs
 /// that ask for the text area size).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalSize {
     pub columns: u16,
     pub lines: u16,

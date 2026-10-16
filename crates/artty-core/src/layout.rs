@@ -1,11 +1,11 @@
 //! Split layouts: a binary tree of panes, and its geometry.
 
-use artty_core::SessionId;
+use crate::SessionId;
 
 pub type PaneId = SessionId;
 
 /// How a split arranges its two children.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Axis {
     /// Side by side, with a vertical divider.
     Horizontal,
@@ -44,7 +44,7 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Node {
     Pane(PaneId),
     Split {

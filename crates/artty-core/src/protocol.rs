@@ -1,0 +1,300 @@
+//! The protocol between the artty server, which owns every terminal session,
+//! and the app, whose windows attach to them.
+//!
+//! A connection starts with one JSON line. `{"cmd":"attach",...}` makes it an
+//! app connection that then exchanges length-prefixed postcard messages
+//! ([`ClientMessage`] / [`ServerMessage`]); any other [`Request`] is a one-off
+//! control request answered with one JSON line (the `artty` command).
+
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::control::{Request, Response, TabInfo};
+// `Request`/`Response` travel as JSON; see `ClientMessage::Control`.
+use crate::frame::{Frame, FrameCursor, FrameLine};
+use crate::layout::{Axis, Node, PaneId};
+use crate::vt::ansi::Rgb;
+use crate::{SavedWindow, TerminalSize};
+
+/// Bumped on incompatible changes; app and server must agree.
+pub const PROTOCOL_VERSION: u32 = 1;
+
+pub type WindowId = u64;
+
+/// Largest message accepted, against corrupt length prefixes.
+const MAX_MESSAGE: usize = 64 << 20;
+
+/// What a new pane runs; everything defaults to a shell in the directory of
+/// the pane it's opened from.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PaneSpec {
+    pub command: Option<Vec<String>>,
+    pub cwd: Option<PathBuf>,
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum SelectionOp {
+    /// Start at a viewport cell: kind (0 simple, 1 word, 2 line), line, column,
+    /// and whether the point is in the right half of the cell.
+    Start { kind: u8, line: usize, column: usize, right: bool },
+    Update { line: usize, column: usize, right: bool },
+    Clear,
+}
+
+/// App → server.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ClientMessage {
+    /// Attach a window: `None` opens a new one with a tab from `spec`.
+    AttachWindow { window: Option<WindowId>, spec: PaneSpec, bounds: Option<SavedWindow> },
+    /// The window closed; its tabs keep running.
+    DetachWindow { window: WindowId },
+    WindowBounds { window: WindowId, bounds: SavedWindow },
+
+    NewTab { window: WindowId, spec: PaneSpec },
+    Split { pane: PaneId, axis: Axis, spec: PaneSpec },
+    ClosePane { pane: PaneId },
+    CloseTab { window: WindowId, tab: usize },
+    SelectTab { window: WindowId, tab: usize },
+    FocusPane { pane: PaneId },
+    MoveTab { window: WindowId, from: usize, to: usize },
+    RenameTab { window: WindowId, tab: usize, title: Option<String> },
+    ToggleZoom { window: WindowId },
+    SetRatio { window: WindowId, path: Vec<bool>, ratio: f32 },
+
+    Input { pane: PaneId, bytes: Vec<u8> },
+    Resize { pane: PaneId, size: TerminalSize },
+    Scroll { pane: PaneId, lines: i32 },
+    Selection { pane: PaneId, op: SelectionOp },
+    Search { id: u64, pane: PaneId, query: String, older: bool, restart: bool },
+    EndSearch { pane: PaneId },
+    ClearBuffer { pane: PaneId },
+    /// The user saw the pane; clear its attention mark.
+    Seen { pane: PaneId },
+
+    /// Questions with an answer in [`ServerMessage::Reply`].
+    Query { id: u64, query: Query },
+    /// A control request (JSON of a [`Request`]), answered in
+    /// [`ServerMessage::Control`]. JSON because `Request` is internally
+    /// tagged, which postcard can't decode.
+    Control { id: u64, request: String },
+    /// Answer to [`ServerMessage::ClipboardLoad`].
+    Clipboard { pane: PaneId, request: u64, text: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Query {
+    /// Windows with no app attached.
+    DetachedWindows,
+    LinkSpan { pane: PaneId, line: usize, column: usize },
+    SelectionText { pane: PaneId },
+    Cwd { pane: PaneId },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum Reply {
+    Windows(Vec<WindowSummary>),
+    Link(Option<(String, usize, usize)>),
+    Text(Option<String>),
+    Path(Option<PathBuf>),
+    /// Search: matched, or the pattern's error.
+    Search(Result<bool, String>),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WindowSummary {
+    pub window: WindowId,
+    pub tabs: usize,
+    pub bounds: Option<SavedWindow>,
+}
+
+/// One tab of a window, as the app draws it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TabLayout {
+    pub title: Option<String>,
+    pub root: Node,
+    pub focused: PaneId,
+    pub zoomed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WindowLayout {
+    pub tabs: Vec<TabLayout>,
+    pub active: usize,
+}
+
+/// What the sidebar and input handling need to know about a pane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PaneState {
+    pub info: TabInfo,
+    /// Icon to show: `busy`, `waiting`, `done`, `failed`, `attention` or empty.
+    pub icon: String,
+    pub progress: Option<u8>,
+    pub agent: Option<String>,
+}
+
+/// A screen update: everything but the lines, plus the lines that changed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FrameUpdate {
+    pub columns: usize,
+    pub line_count: usize,
+    pub lines: Vec<(u32, FrameLine)>,
+    pub cursor: Option<FrameCursor>,
+    pub display_offset: usize,
+    pub background: Rgb,
+    pub foreground: Rgb,
+    /// Terminal mode bits (`TermMode`), for keys and mouse handling.
+    pub mode: u32,
+}
+
+impl FrameUpdate {
+    /// The update turning `previous` into `frame`.
+    pub fn diff(previous: Option<&Frame>, frame: &Frame, mode: u32) -> Self {
+        let lines = frame
+            .lines
+            .iter()
+            .enumerate()
+            .filter(|(i, line)| previous.and_then(|p| p.lines.get(*i)) != Some(*line))
+            .map(|(i, line)| (i as u32, line.clone()))
+            .collect();
+        Self {
+            columns: frame.columns,
+            line_count: frame.lines.len(),
+            lines,
+            cursor: frame.cursor,
+            display_offset: frame.display_offset,
+            background: frame.background,
+            foreground: frame.foreground,
+            mode,
+        }
+    }
+
+    /// Apply to the app's copy of the screen.
+    pub fn apply(self, frame: &mut Frame) {
+        frame.lines.resize_with(self.line_count, FrameLine::default);
+        for (index, line) in self.lines {
+            if let Some(slot) = frame.lines.get_mut(index as usize) {
+                *slot = line;
+            }
+        }
+        frame.columns = self.columns;
+        frame.cursor = self.cursor;
+        frame.display_offset = self.display_offset;
+        frame.background = self.background;
+        frame.foreground = self.foreground;
+    }
+}
+
+/// Server → app.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ServerMessage {
+    Welcome { version: u32, server_version: String },
+    /// A window is attached (also the reply to `AttachWindow`).
+    Attached { window: WindowId, bounds: Option<SavedWindow> },
+    Layout { window: WindowId, layout: WindowLayout },
+    /// The window's last tab closed.
+    WindowClosed { window: WindowId },
+    Frame { pane: PaneId, update: FrameUpdate },
+    Panes { panes: Vec<PaneState> },
+    Bell { pane: PaneId },
+    /// Show a desktop notification (the app can post native ones).
+    Notify { title: String, body: String },
+    ClipboardStore { text: String },
+    ClipboardLoad { pane: PaneId, request: u64 },
+    Reply { id: u64, reply: Reply },
+    /// JSON of a [`Response`].
+    Control { id: u64, response: String },
+}
+
+/// Encode a control request for [`ClientMessage::Control`].
+pub fn encode_request(request: &Request) -> String {
+    serde_json::to_string(request).unwrap_or_default()
+}
+
+/// Decode a [`ServerMessage::Control`] response.
+pub fn decode_response(response: &str) -> Response {
+    serde_json::from_str(response).unwrap_or_else(|err| Response::error(format!("bad response: {err}")))
+}
+
+/// Write one length-prefixed message.
+pub fn write_message<T: Serialize>(writer: &mut impl Write, message: &T) -> io::Result<()> {
+    let bytes = postcard::to_stdvec(message).map_err(io::Error::other)?;
+    writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
+    writer.write_all(&bytes)?;
+    writer.flush()
+}
+
+/// Read one length-prefixed message.
+pub fn read_message<T: for<'de> Deserialize<'de>>(reader: &mut impl Read) -> io::Result<T> {
+    let mut length = [0; 4];
+    reader.read_exact(&mut length)?;
+    let length = u32::from_le_bytes(length) as usize;
+    if length > MAX_MESSAGE {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "message too large"));
+    }
+    let mut bytes = vec![0; length];
+    reader.read_exact(&mut bytes)?;
+    postcard::from_bytes(&bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+/// The JSON line that starts an app connection.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "kebab-case")]
+pub enum Hello {
+    Attach { version: u32, app_version: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frame::FrameRun;
+
+    fn line(text: &str) -> FrameLine {
+        FrameLine {
+            runs: vec![FrameRun {
+                column: 0,
+                cells: text.len(),
+                text: text.into(),
+                fg: Rgb { r: 1, g: 2, b: 3 },
+                bold: false,
+                italic: false,
+                underline: false,
+                strikeout: false,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn diffs_send_changed_lines_only() {
+        let before = Frame { columns: 10, lines: vec![line("a"), line("b"), line("c")], ..Default::default() };
+        let mut after = before.clone();
+        after.lines[1] = line("B");
+        let update = FrameUpdate::diff(Some(&before), &after, 0);
+        assert_eq!(update.lines.len(), 1);
+        assert_eq!(update.lines[0].0, 1);
+
+        let mut copy = before.clone();
+        update.apply(&mut copy);
+        assert_eq!(copy, after);
+
+        // A first update carries everything.
+        assert_eq!(FrameUpdate::diff(None, &after, 0).lines.len(), 3);
+    }
+
+    #[test]
+    fn messages_round_trip() {
+        let mut buffer = Vec::new();
+        let message = ClientMessage::Input { pane: 7, bytes: b"ls\r".to_vec() };
+        write_message(&mut buffer, &message).unwrap();
+        let frame = Frame { columns: 4, lines: vec![line("hi")], ..Default::default() };
+        write_message(&mut buffer, &ServerMessage::Frame { pane: 7, update: FrameUpdate::diff(None, &frame, 5) }).unwrap();
+        let mut reader = &buffer[..];
+        assert!(matches!(read_message::<ClientMessage>(&mut reader).unwrap(), ClientMessage::Input { pane: 7, .. }));
+        let ServerMessage::Frame { update, .. } = read_message::<ServerMessage>(&mut reader).unwrap() else { panic!() };
+        assert_eq!(update.mode, 5);
+        assert_eq!(update.lines[0].1, line("hi"));
+    }
+}

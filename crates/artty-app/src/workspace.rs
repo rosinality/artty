@@ -31,9 +31,9 @@ use gpui::{
 
 use crate::app_state::{self, Shared};
 use crate::keys;
-use crate::layout::{self, Axis, Direction, Divider, Node, PaneId, Rect};
+use artty_core::layout::{self, Axis, Direction, Divider, Node, PaneId, Rect};
 use crate::mouse::{self, Action, Button};
-use crate::pane::{Pane, Status};
+use artty_core::pane::{Pane, Status};
 use crate::terminal::{self, Metrics, hsla};
 
 actions!(
@@ -769,7 +769,7 @@ impl Workspace {
     fn tab_title(&self, tab: &Tab) -> SharedString {
         match &tab.title {
             Some(title) => title.clone().into(),
-            None => self.panes.get(&tab.focused).map(Pane::title).unwrap_or_default(),
+            None => self.panes.get(&tab.focused).map(|pane| pane.title().into()).unwrap_or_default(),
         }
     }
 
