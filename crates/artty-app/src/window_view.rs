@@ -1449,20 +1449,17 @@ impl WindowView {
             .when_some(icon, |d, (icon, color, size)| d.text_color(color).text_size(px(size)).child(icon))
     }
 
-    fn pane_detail(state: &PaneState) -> Option<String> {
-        match (state.info.detail.clone(), state.progress) {
-            (Some(detail), Some(percent)) => Some(format!("{detail} · {percent}%")),
+    /// What a sidebar row shows at its right: the command or agent (not
+    /// its time or state; the icon tells that), an exit code, progress. Not
+    /// what the title already says: shells put the running command in it.
+    fn short_detail(title: &str, state: &PaneState) -> Option<String> {
+        let detail = state.info.detail.as_deref()?;
+        let what = detail.split_once(" · ").map_or(detail, |(what, _)| what);
+        let what = (!title.starts_with(what)).then(|| what.to_owned());
+        match (what, state.progress) {
+            (Some(what), Some(percent)) => Some(format!("{what} · {percent}%")),
             (None, Some(percent)) => Some(format!("{percent}%")),
-            (detail, None) => detail,
-        }
-    }
-
-    /// A detail to show next to `title`, without repeating it: shells put
-    /// the running command in the title, so "sleep 9 · 4s" becomes "4s".
-    fn beside(title: &str, detail: String) -> String {
-        match detail.split_once(" · ") {
-            Some((what, rest)) if title.starts_with(what) => rest.to_owned(),
-            _ => detail,
+            (what, None) => what,
         }
     }
 
@@ -1500,8 +1497,7 @@ impl WindowView {
         let attention = states.iter().flatten().any(|s| s.info.needs_attention);
         let label: SharedString = if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
         let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
-        let detail = if split { None } else { focused.and_then(Self::pane_detail) };
-        let detail = detail.map(|detail| Self::beside(&self.tab_title(tab, cx), detail));
+        let detail = if split { None } else { focused.and_then(|state| Self::short_detail(&self.tab_title(tab, cx), state)) };
         let group: SharedString = format!("tab-row-{index}").into();
 
         // One line: icon, title, then what it's doing on the right, and a
@@ -1534,22 +1530,38 @@ impl WindowView {
                     .text_color(text_color)
                     .when(attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
             })
-            .when_some(detail.filter(|_| renaming.is_none()), |d, detail| {
-                d.child(Self::one_line(detail).flex_none().max_w(px(104.)).text_size(px(11.)).text_color(rgba(0xffffff70)))
-            })
+            // The last column: what it's running; while ⌘ is held its ⌘N
+            // shortcut, and on hover the close button, in its place.
             .child(
                 div()
                     .relative()
-                    .w(px(TAB_LABEL_WIDTH))
+                    .min_w(px(TAB_LABEL_WIDTH))
+                    .max_w(px(110.))
                     .h_full()
                     .flex_none()
                     .flex()
                     .items_center()
                     .justify_end()
-                    .text_xs()
-                    .text_color(rgba(0xffffff80))
+                    .text_size(px(11.))
+                    .text_color(rgba(0xffffff70))
+                    .when_some(detail.filter(|_| renaming.is_none()), |d, detail| {
+                        d.child(
+                            Self::one_line(detail)
+                                .min_w_0()
+                                .opacity(if self.command_held { 0. } else { 1. })
+                                .group_hover(group.clone(), |s| s.opacity(0.)),
+                        )
+                    })
                     .child(
                         div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right_0()
+                            .flex()
+                            .items_center()
+                            .text_xs()
+                            .text_color(rgba(0xffffff80))
                             .opacity(if self.command_held { 1. } else { 0. })
                             .group_hover(group.clone(), |s| s.opacity(0.))
                             .child(label),
@@ -1586,7 +1598,7 @@ impl WindowView {
             ids.iter().zip(&states).map(|(&id, state)| {
                 let is_focused = id == tab.focused;
                 let title = state.map(|s| s.info.title.clone()).unwrap_or_else(|| "shell".into());
-                let detail = state.and_then(Self::pane_detail).map(|detail| Self::beside(&title, detail));
+                let detail = state.and_then(|state| Self::short_detail(&title, state));
                 let pane_attention = state.is_some_and(|s| s.info.needs_attention);
                 div()
                     .id(("pane", id as usize))
@@ -1606,11 +1618,10 @@ impl WindowView {
                             .text_color(if is_focused && selected { rgba(0xffffffd0) } else { rgba(0xffffff80) })
                             .when(pane_attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
                     )
-                    // Lined up with the tab's own detail, left of its last column.
+                    // At the right, as on the tab's own line.
                     .when_some(detail, |d, detail| {
-                        d.child(Self::one_line(detail).flex_none().max_w(px(104.)).text_size(px(11.)).text_color(rgba(0xffffff60)))
+                        d.child(Self::one_line(detail).flex_none().max_w(px(110.)).text_size(px(11.)).text_color(rgba(0xffffff60)))
                     })
-                    .child(div().w(px(TAB_LABEL_WIDTH)).flex_none())
             })
         });
 
@@ -1926,6 +1937,8 @@ impl WindowView {
             )
             .child(
                 div()
+                    .id("sidebar-heading")
+                    .group("sidebar-heading")
                     .flex()
                     .justify_between()
                     .items_center()
@@ -1938,6 +1951,9 @@ impl WindowView {
                     .child(
                         div()
                             .id("new-tab")
+                            // Shown on hover, like the sections' own +.
+                            .opacity(0.)
+                            .group_hover("sidebar-heading", |s| s.opacity(1.))
                             .px_1()
                             .rounded(px(4.))
                             .hover(|d| d.bg(rgba(0xffffff14)))
