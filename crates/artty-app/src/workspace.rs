@@ -1076,11 +1076,11 @@ impl Workspace {
                 self.notify_user(id, title.as_deref(), &body);
                 Response::Ok
             }
-            Request::Status { tab, state, message, agent_session } => {
+            Request::Status { tab, state, message, agent_session, agent } => {
                 let id = self.resolve(tab)?;
                 let pane = self.panes.get_mut(&id).ok_or("the pane closed")?;
                 let was_waiting = matches!(pane.status, Status::Agent { state: AgentState::Waiting, .. });
-                pane.report(state, message.clone(), agent_session);
+                pane.report(state, message.clone(), agent_session, agent);
                 match state {
                     AgentState::Waiting if !was_waiting => {
                         self.notify_user(id, Some("Needs input"), message.as_deref().unwrap_or(""));

@@ -94,6 +94,9 @@ pub enum Request {
         /// The agent's conversation id, so the tab can resume it later.
         #[serde(default)]
         agent_session: Option<String>,
+        /// Which agent is reporting (`claude`, `codex`, ...).
+        #[serde(default)]
+        agent: Option<String>,
     },
 }
 

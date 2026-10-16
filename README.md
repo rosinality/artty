@@ -3,7 +3,8 @@
 A GPU-accelerated macOS terminal for working with AI coding agents, written in
 Rust with [GPUI](https://gpui.rs).
 
-- A translucent, blurred window with a sidebar of tabs, each split into panes.
+- A translucent window (blurred or clear) with a sidebar of tabs, each split
+  into panes; as many windows as you like.
 - The sidebar shows what each tab is doing: a running command and how long it
   has run, a coding agent working, waiting for you, or done, a failed exit code,
   and progress.
@@ -16,60 +17,75 @@ Rust with [GPUI](https://gpui.rs).
 ## Build and run
 
 ```sh
-cargo run -p artty                 # the app
+./scripts/bundle.sh                # build target/release/artty.app
+cp -R target/release/artty.app /Applications/
+
+cargo run -p artty                 # or run from the tree
 cargo run -p artty -- -e htop      # run a command in the first tab
 cargo test --workspace
 ```
 
-GPUI's Metal shaders compile at startup (`runtime_shaders`), so the Xcode Metal
-toolchain isn't needed for development.
+The app bundle gets the icon (`scripts/make-icon.py` redraws it) and native
+notifications. GPUI's Metal shaders compile at startup (`runtime_shaders`), so
+the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 
 ## Keys
 
 | Keys | Action |
 |---|---|
-| ⌘T | New tab (in the current directory) |
+| ⌘N / ⌘T | New window / new tab (in the current directory) |
+| ⌘, | Settings |
 | ⌘D / ⌘⇧D | Split the pane right / down |
 | ⌘W / ⌘⇧W | Close pane (the tab closes with its last pane) / close tab |
 | ⌘⌥←↑→↓, ⌘[ / ⌘] | Move to the pane in that direction / previous, next pane |
 | ⌘⇧↩ | Zoom the pane to fill the tab, and back |
 | Drag a divider | Resize panes |
 | ⌘1…⌘9, ⌘⇧[ / ⌘⇧] | Switch tabs |
+| Double-click / drag a tab | Rename it / reorder it |
+| Right-click (or ⌃-click) | Copy, paste, links, split, rename, clear, close |
 | ⌘J | Jump to the next tab that needs attention |
 | ⌘C / ⌘V | Copy selection / paste |
-| ⌘F, ⌘G / ⌘⇧G | Find (regex); next older / newer match |
+| ⌘F, ⌘G / ⌘⇧G | Find (regex, all matches highlighted); next older / newer |
 | ⌘= / ⌘- / ⌘0 | Font size |
-| ⌘-click | Open a link |
+| ⌘-click | Open a link (underlined while ⌘ is held) |
 | Drag, double-, triple-click, ⇧-click | Select, select word, select line, extend |
 
 Programs that use the mouse (vim, htop, tmux) get mouse events; hold ⇧ to select
-text instead.
+text instead. Programs that ask for the kitty keyboard protocol (Claude Code,
+fish, neovim) can tell Shift+Enter, Ctrl+I and Escape apart.
 
 ## Configuration
 
-`~/.config/artty/config.toml`, reloaded when saved. See
-[`config.example.toml`](config.example.toml) for every setting: shell, fonts,
-opacity and blur, colors, Option as Meta, cursor blink, agent names, and
-notifications.
+⌘, opens Settings for the common options (themes, font, opacity and blur,
+keyboard, bell, notifications, sessions). Everything lives in
+`~/.config/artty/config.toml`, which Settings edits in place and every window
+reloads when it changes; see [`config.example.toml`](config.example.toml).
 
 ## Agents
 
 ### Status in the sidebar
 
 artty recognizes coding agents by their process name (`claude`, `codex`,
-`gemini`, … — configurable). Without help it can tell an agent is running and
-when it rings the bell or sends a notification. For exact
-working / needs-input / done status, let the agent report it. For Claude Code:
+`gemini`, … — configurable; scripts run by node or python are named after the
+script). Without help it can tell an agent is running and when it rings the
+bell or sends a notification. For exact working / needs-input / done status,
+let the agent report it through its hooks:
 
 ```sh
-artty hooks            # print the hooks
-artty hooks install    # add them to ~/.claude/settings.json (backs it up first)
+artty hooks install             # every installed agent (Settings has a button)
+artty hooks install codex       # or just one; `artty hooks codex` prints them
 ```
+
+| Agent | Hooks file | Notes |
+|---|---|---|
+| Claude Code | `~/.claude/settings.json` | |
+| Codex | `~/.codex/hooks.json` | approve them once with `/hooks` in Codex |
+| Gemini CLI | `~/.gemini/settings.json` | |
 
 The hooks call `artty status …` and do nothing outside artty. They also tell
 artty the conversation id, which is what lets restored tabs resume the right
-conversation. Rerunning `artty hooks install` upgrades hooks from older
-versions.
+conversation. The files are backed up first; rerunning `install` upgrades
+hooks from older versions.
 
 ### Restoring tabs and resuming agents
 
@@ -109,9 +125,9 @@ lists everything.
 ### Shell integration
 
 `artty run`, `read --last`, command status, and "finished" notifications
-use OSC 133 marks from the shell. fish 4 sends them natively. zsh and bash
-need a prompt hook that emits them (automatic setup isn't built yet). Without
-them, artty falls back to watching the foreground process.
+use OSC 133 marks from the shell. fish 4 sends them natively; artty sets up zsh
+and bash automatically (your startup files still load as usual). Elsewhere —
+over ssh, say — `artty shell-integration zsh|bash` prints a script to source.
 
 ## Layout
 

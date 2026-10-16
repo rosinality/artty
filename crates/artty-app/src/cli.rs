@@ -43,17 +43,19 @@ artty, your own pane is found automatically:
   artty rename [--tab N] TITLE           name the tab holding pane N (empty
                                          title: back to automatic)
   artty notify [--tab N] [--title T] BODY
-  artty status [--tab N] working|waiting|done|idle [--message M | --hook]
-                                         report an agent's state (for hooks);
-                                         --hook reads a Claude Code hook event
+  artty status [--tab N] working|waiting|done|idle [--agent NAME]
+             [--message M | --hook]      report an agent's state (for hooks);
+                                         --hook reads the agent's hook event
                                          from stdin (message and session id)
   artty settings                         open the Settings window
   artty shell-integration zsh|bash       print the shell integration script, to
                                          source from your startup file where
                                          artty can't set it up (e.g. over ssh)
-  artty hooks [install]                  print (or add to ~/.claude/settings.json)
-                                         Claude Code hooks that report status and
-                                         let artty resume conversations
+  artty hooks [claude|codex|gemini]      print an agent's status hooks
+  artty hooks install [AGENT...]         add them to the agent's settings
+                                         (default: every installed agent), so
+                                         artty shows exact status and resumes
+                                         the right conversation
 ";
 
 pub fn main(args: Vec<String>) -> i32 {
@@ -107,6 +109,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--title" => _ = flags.insert("title", args.value("--title")?),
             "--message" => _ = flags.insert("message", args.value("--message")?),
             "--split" => _ = flags.insert("split", args.value("--split")?),
+            "--agent" => _ = flags.insert("agent", args.value("--agent")?),
             "--screen" | "--last" | "--no-enter" | "--background" | "--json" | "--hook" => {
                 switches.insert(match arg.as_str() {
                     "--screen" => "screen",
@@ -200,9 +203,9 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             } else {
                 (flags.get("message").cloned(), None)
             };
-            Request::Status { tab: tab.or_else(own_tab), state, message, agent_session }
+            Request::Status { tab: tab.or_else(own_tab), state, message, agent_session, agent: flags.get("agent").cloned() }
         }
-        "hooks" => return hooks(rest.first().map(String::as_str)),
+        "hooks" => return hooks(&rest),
         "shell-integration" => {
             let shell = rest.first().map(String::as_str).unwrap_or_default();
             let script = artty_core::integration::script(shell)
@@ -264,13 +267,28 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
     }
 }
 
-/// The `message` and `session_id` of a Claude Code hook event on stdin.
+/// The message and session id of an agent's hook event on stdin (Claude
+/// Code, Codex and Gemini CLI all send `session_id`).
 fn hook_event() -> (Option<String>, Option<String>) {
     let mut input = String::new();
     let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
     let Ok(event) = serde_json::from_str::<Value>(&input) else { return (None, None) };
-    let field = |name: &str| event.get(name).and_then(Value::as_str).map(str::to_owned);
-    (field("message"), field("session_id"))
+    (hook_message(&event), event.get("session_id").and_then(Value::as_str).map(str::to_owned))
+}
+
+/// What to show for a hook event: its message, or for a permission request
+/// (Codex), the tool's description.
+fn hook_message(event: &Value) -> Option<String> {
+    let text = |value: &Value| value.as_str().filter(|s| !s.is_empty()).map(str::to_owned);
+    if let Some(message) = event.get("message").and_then(text) {
+        return Some(message);
+    }
+    if event.get("hook_event_name").and_then(Value::as_str) == Some("PermissionRequest") {
+        let description = event.pointer("/tool_input/description").and_then(text);
+        let tool = event.get("tool_name").and_then(Value::as_str).unwrap_or("a tool");
+        return Some(description.unwrap_or_else(|| format!("Approve {tool}?")));
+    }
+    None
 }
 
 fn socket() -> Result<PathBuf, String> {
@@ -296,85 +314,172 @@ fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String
     serde_json::from_str(&reply).map_err(|err| format!("bad reply: {err}"))
 }
 
-/// Claude Code hooks that report the agent's state (and conversation id) to
-/// artty. They do nothing outside artty.
-fn claude_hooks() -> Value {
-    let hook = |state: &str| {
-        json!([{ "hooks": [{
-            "type": "command",
-            "command": format!("[ -n \"$ARTTY_SOCKET\" ] && artty status {state} --hook || true"),
-        }]}])
-    };
-    json!({
-        "SessionStart": hook("idle"),
-        "UserPromptSubmit": hook("working"),
-        "PostToolUse": hook("working"),
-        "Notification": hook("waiting"),
-        "Stop": hook("done"),
-        "SessionEnd": hook("idle"),
-    })
+/// An agent artty can install status hooks for.
+struct AgentHooks {
+    agent: &'static str,
+    /// Hooks file, relative to the home directory; its `hooks` key is ours.
+    file: &'static str,
+    /// Hook event → the state it reports.
+    events: &'static [(&'static str, &'static str)],
+    /// The agent parses hook output as JSON (Gemini CLI).
+    json_output: bool,
 }
 
-fn hooks(action: Option<&str>) -> Result<i32, String> {
-    match action {
-        None => {
-            let snippet = json!({ "hooks": claude_hooks() });
-            println!("{}", serde_json::to_string_pretty(&snippet).unwrap());
-            eprintln!("Add these to ~/.claude/settings.json, or run `artty hooks install`.");
-            Ok(0)
+const AGENT_HOOKS: &[AgentHooks] = &[
+    AgentHooks {
+        agent: "claude",
+        file: ".claude/settings.json",
+        events: &[
+            ("SessionStart", "idle"),
+            ("UserPromptSubmit", "working"),
+            ("PostToolUse", "working"),
+            ("Notification", "waiting"),
+            ("Stop", "done"),
+            ("SessionEnd", "idle"),
+        ],
+        json_output: false,
+    },
+    AgentHooks {
+        agent: "codex",
+        file: ".codex/hooks.json",
+        events: &[
+            ("SessionStart", "idle"),
+            ("UserPromptSubmit", "working"),
+            ("PostToolUse", "working"),
+            ("PermissionRequest", "waiting"),
+            ("Stop", "done"),
+            ("SessionEnd", "idle"),
+        ],
+        json_output: false,
+    },
+    AgentHooks {
+        agent: "gemini",
+        file: ".gemini/settings.json",
+        events: &[
+            ("SessionStart", "idle"),
+            ("BeforeAgent", "working"),
+            ("AfterTool", "working"),
+            ("Notification", "waiting"),
+            ("AfterAgent", "done"),
+            ("SessionEnd", "idle"),
+        ],
+        json_output: true,
+    },
+];
+
+impl AgentHooks {
+    /// The hooks to add, keyed by event. They do nothing outside artty.
+    fn entries(&self) -> Value {
+        let command = |state: &str| {
+            let report = format!("[ -n \"$ARTTY_SOCKET\" ] && artty status {state} --hook --agent {}", self.agent);
+            if self.json_output { format!("{report} >/dev/null; echo '{{}}'") } else { format!("{report} || true") }
+        };
+        let mut hooks = serde_json::Map::new();
+        for (event, state) in self.events {
+            hooks.insert((*event).to_owned(), json!([{ "hooks": [{ "type": "command", "command": command(state) }] }]));
         }
+        Value::Object(hooks)
+    }
+
+    fn path(&self) -> Result<PathBuf, String> {
+        let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+        Ok(PathBuf::from(home).join(self.file))
+    }
+
+    /// Add (or upgrade) artty's hooks in the agent's file, backing it up
+    /// first. Returns what happened.
+    fn install(&self) -> Result<String, String> {
+        let path = self.path()?;
+        let name = path.display();
+        let mut settings: Value = match std::fs::read_to_string(&path) {
+            Ok(text) if text.trim().is_empty() => json!({}),
+            Ok(text) => serde_json::from_str(&text).map_err(|err| format!("{name}: {err}"))?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => json!({}),
+            Err(err) => return Err(format!("{name}: {err}")),
+        };
+        let root = settings.as_object_mut().ok_or(format!("{name} is not a JSON object"))?;
+        let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+        let hooks = hooks.as_object_mut().ok_or(format!("{name}: \"hooks\" is not an object"))?;
+
+        // Replace hooks from earlier versions of artty, keep everything else.
+        let mut changed = 0;
+        for (event, entries) in self.entries().as_object().unwrap() {
+            let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
+            let list = list.as_array_mut().ok_or(format!("{name}: hooks.{event} is not a list"))?;
+            let ours = |entry: &Value| entry.to_string().contains("artty status");
+            let current: Vec<Value> = list.iter().filter(|e| ours(e)).cloned().collect();
+            if current == *entries.as_array().unwrap() {
+                continue;
+            }
+            list.retain(|entry| !ours(entry));
+            list.extend(entries.as_array().unwrap().iter().cloned());
+            changed += 1;
+        }
+        if changed == 0 {
+            return Ok(format!("{}: hooks are up to date in {name}", self.agent));
+        }
+
+        let mut report = String::new();
+        if path.exists() {
+            let backup = path.with_extension("json.artty-backup");
+            std::fs::copy(&path, &backup).map_err(|err| format!("backup failed: {err}"))?;
+            report.push_str(&format!("{}: backed up {name} to {}\n", self.agent, backup.display()));
+        } else if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+        }
+        let text = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
+        std::fs::write(&path, text + "\n").map_err(|err| format!("{name}: {err}"))?;
+        report.push_str(&format!("{}: updated hooks for {changed} events in {name}", self.agent));
+        if self.agent == "codex" {
+            report.push_str("\ncodex: approve the new hooks once with /hooks in Codex");
+        }
+        Ok(report)
+    }
+
+    /// Whether the agent seems to be installed (its config directory exists).
+    fn present(&self) -> bool {
+        self.path().ok().and_then(|p| p.parent().map(|dir| dir.is_dir())).unwrap_or(false)
+    }
+}
+
+fn agent_hooks(name: &str) -> Result<&'static AgentHooks, String> {
+    AGENT_HOOKS
+        .iter()
+        .find(|hooks| hooks.agent == name)
+        .ok_or_else(|| format!("hooks: unknown agent {name} (claude, codex or gemini)"))
+}
+
+/// `artty hooks [AGENT]` prints hooks; `artty hooks install [AGENT...]`
+/// installs them (default: every agent that's installed).
+fn hooks(args: &[String]) -> Result<i32, String> {
+    match args.first().map(String::as_str) {
         Some("install") => {
-            println!("{}", install_claude_hooks()?);
+            let names: Vec<&str> = args[1..].iter().map(String::as_str).collect();
+            println!("{}", install_agent_hooks(&names)?);
             Ok(0)
         }
-        Some(other) => Err(format!("hooks: unknown action {other}")),
+        name => {
+            let hooks = agent_hooks(name.unwrap_or("claude"))?;
+            let snippet = json!({ "hooks": hooks.entries() });
+            println!("{}", serde_json::to_string_pretty(&snippet).unwrap());
+            eprintln!("Add these to ~/{}, or run `artty hooks install {}`.", hooks.file, hooks.agent);
+            Ok(0)
+        }
     }
 }
 
-/// Add (or upgrade) artty's hooks in ~/.claude/settings.json, backing it up
-/// first. Returns what happened.
-pub fn install_claude_hooks() -> Result<String, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-    let path = PathBuf::from(home).join(".claude").join("settings.json");
-    let mut settings: Value = match std::fs::read_to_string(&path) {
-        Ok(text) => serde_json::from_str(&text).map_err(|err| format!("{}: {err}", path.display()))?,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => json!({}),
-        Err(err) => return Err(format!("{}: {err}", path.display())),
+/// Install hooks for the named agents, or for every installed agent.
+pub fn install_agent_hooks(names: &[&str]) -> Result<String, String> {
+    let selected: Vec<&AgentHooks> = if names.is_empty() {
+        AGENT_HOOKS.iter().filter(|hooks| hooks.present()).collect()
+    } else {
+        names.iter().map(|name| agent_hooks(name)).collect::<Result<_, _>>()?
     };
-    let root = settings.as_object_mut().ok_or("settings.json is not an object")?;
-    let hooks = root.entry("hooks").or_insert_with(|| json!({}));
-    let hooks = hooks.as_object_mut().ok_or("settings.json: \"hooks\" is not an object")?;
-
-    // Replace hooks from earlier versions of artty, keep everything else.
-    let mut changed = 0;
-    for (event, entries) in claude_hooks().as_object().unwrap() {
-        let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
-        let list = list.as_array_mut().ok_or(format!("settings.json: hooks.{event} is not a list"))?;
-        let ours = |entry: &Value| entry.to_string().contains("artty status");
-        let current: Vec<Value> = list.iter().filter(|e| ours(e)).cloned().collect();
-        if current == *entries.as_array().unwrap() {
-            continue;
-        }
-        list.retain(|entry| !ours(entry));
-        list.extend(entries.as_array().unwrap().iter().cloned());
-        changed += 1;
+    if selected.is_empty() {
+        return Err("no supported agent found (~/.claude, ~/.codex or ~/.gemini)".into());
     }
-    if changed == 0 {
-        return Ok(format!("artty hooks are up to date in {}", path.display()));
-    }
-
-    let mut report = String::new();
-    if path.exists() {
-        let backup = path.with_extension("json.artty-backup");
-        std::fs::copy(&path, &backup).map_err(|err| format!("backup failed: {err}"))?;
-        report.push_str(&format!("Backed up {} to {}\n", path.display(), backup.display()));
-    } else if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
-    }
-    let text = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
-    std::fs::write(&path, text + "\n").map_err(|err| format!("{}: {err}", path.display()))?;
-    report.push_str(&format!("Updated artty hooks for {changed} events in {}", path.display()));
-    Ok(report)
+    let reports: Vec<String> = selected.iter().map(|hooks| hooks.install().unwrap_or_else(|err| err)).collect();
+    Ok(reports.join("\n"))
 }
 
 #[cfg(test)]
@@ -382,10 +487,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hooks_are_guarded() {
-        let hooks = claude_hooks();
-        let command = hooks["Notification"][0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(command, "[ -n \"$ARTTY_SOCKET\" ] && artty status waiting --hook || true");
-        assert!(hooks["SessionStart"].is_array());
+    fn hooks_are_guarded_and_named() {
+        let claude = agent_hooks("claude").unwrap().entries();
+        let command = claude["Notification"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert_eq!(command, "[ -n \"$ARTTY_SOCKET\" ] && artty status waiting --hook --agent claude || true");
+        let gemini = agent_hooks("gemini").unwrap().entries();
+        let command = gemini["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.ends_with(">/dev/null; echo '{}'"), "{command}");
+        assert!(agent_hooks("codex").unwrap().entries()["PermissionRequest"].is_array());
+    }
+
+    #[test]
+    fn hook_messages() {
+        let codex = json!({"hook_event_name": "PermissionRequest", "tool_name": "Bash",
+                           "tool_input": {"command": "rm -rf x", "description": "Delete the build dir"}});
+        assert_eq!(hook_message(&codex).as_deref(), Some("Delete the build dir"));
+        let bare = json!({"hook_event_name": "PermissionRequest", "tool_name": "apply_patch"});
+        assert_eq!(hook_message(&bare).as_deref(), Some("Approve apply_patch?"));
+        let gemini = json!({"hook_event_name": "Notification", "message": "Allow shell?"});
+        assert_eq!(hook_message(&gemini).as_deref(), Some("Allow shell?"));
+        assert_eq!(hook_message(&json!({"hook_event_name": "Stop"})), None);
     }
 }

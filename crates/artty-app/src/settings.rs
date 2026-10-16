@@ -427,10 +427,10 @@ impl Render for Settings {
             "Agents",
             vec![
                 Self::row(
-                    "Claude Code hooks",
-                    Some("Exact status and resuming the right conversation"),
+                    "Agent hooks",
+                    Some("Claude Code, Codex, Gemini CLI: exact status, resuming"),
                     self.button("hooks", "Install", cx, |this, cx| {
-                        this.status = Some(crate::cli::install_claude_hooks().unwrap_or_else(|err| err));
+                        this.status = Some(crate::cli::install_agent_hooks(&[]).unwrap_or_else(|err| err));
                         cx.notify();
                     }),
                 ),

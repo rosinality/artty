@@ -51,11 +51,20 @@ restore-scrollback = 1000
 # Resume coding agents that were running in restored tabs.
 resume-agents = true
 
-# How to resume an agent, by process name. `session` is used when the agent's
-# hooks reported its conversation id ({session}); `latest` otherwise.
+# How to resume an agent, by name. `session` is used when the agent's hooks
+# reported its conversation id ({session}); `latest` otherwise. Claude Code,
+# Codex and Gemini CLI are built in; add others the same way.
 [resume.claude]
 session = "claude --resume {session}"
 latest = "claude --continue"
+
+[resume.codex]
+session = "codex resume {session}"
+latest = "codex resume --last"
+
+[resume.gemini]
+session = "gemini --resume {session}"
+latest = "gemini --resume latest"
 
 [colors]
 # foreground = "#d8dee9"

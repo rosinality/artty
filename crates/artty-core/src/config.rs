@@ -100,13 +100,29 @@ impl Default for Config {
             restore_sessions: true,
             restore_scrollback: 1000,
             resume_agents: true,
-            resume: BTreeMap::from([(
-                "claude".to_owned(),
-                ResumeCommand {
-                    session: Some("claude --resume {session}".to_owned()),
-                    latest: Some("claude --continue".to_owned()),
-                },
-            )]),
+            resume: BTreeMap::from([
+                (
+                    "claude".to_owned(),
+                    ResumeCommand {
+                        session: Some("claude --resume {session}".to_owned()),
+                        latest: Some("claude --continue".to_owned()),
+                    },
+                ),
+                (
+                    "codex".to_owned(),
+                    ResumeCommand {
+                        session: Some("codex resume {session}".to_owned()),
+                        latest: Some("codex resume --last".to_owned()),
+                    },
+                ),
+                (
+                    "gemini".to_owned(),
+                    ResumeCommand {
+                        session: Some("gemini --resume {session}".to_owned()),
+                        latest: Some("gemini --resume latest".to_owned()),
+                    },
+                ),
+            ]),
             colors: Colors::default(),
         }
     }

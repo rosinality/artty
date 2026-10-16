@@ -82,6 +82,8 @@ pub struct Pane {
     pub command: Option<Vec<String>>,
     /// The agent's conversation id, from its hooks.
     agent_session: Option<String>,
+    /// The agent's name, from its hooks (`claude`, `codex`, ...).
+    reported_agent: Option<String>,
     /// Typed into the shell once it shows a prompt (resuming an agent).
     pending_input: Option<(String, Instant)>,
 }
@@ -122,6 +124,7 @@ impl Pane {
             agents,
             command,
             agent_session: None,
+            reported_agent: None,
             pending_input: None,
         }
     }
@@ -151,9 +154,18 @@ impl Pane {
         }
     }
 
-    pub fn report(&mut self, state: AgentState, message: Option<String>, agent_session: Option<String>) {
+    pub fn report(
+        &mut self,
+        state: AgentState,
+        message: Option<String>,
+        agent_session: Option<String>,
+        agent: Option<String>,
+    ) {
         if agent_session.is_some() {
             self.agent_session = agent_session;
+        }
+        if agent.is_some() {
+            self.reported_agent = agent;
         }
         if state == AgentState::Waiting || state == AgentState::Done {
             self.attention = true;
@@ -192,12 +204,14 @@ impl Pane {
         // name isn't on the list, until a shell is back in the foreground.
         let reporter = || {
             let name = self.process.foreground.clone().filter(|name| !is_shell(name))?;
-            self.reported.map(|_| name)
+            self.reported?;
+            Some(self.reported_agent.clone().unwrap_or(name))
         };
         let Some(agent) = self.agent_name().or_else(reporter) else {
             // The agent exited: forget what it reported.
             self.reported = None;
             self.agent_session = None;
+            self.reported_agent = None;
             self.status = self.shell_status();
             return;
         };

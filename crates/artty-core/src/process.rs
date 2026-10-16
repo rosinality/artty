@@ -36,7 +36,8 @@ impl ProcessProbe {
         if pgrp <= 0 {
             return ProcessInfo::default();
         }
-        ProcessInfo { foreground: process_name(pgrp), at_shell: pgrp == self.shell_pid }
+        let name = process_name(pgrp).map(|name| script_name(pgrp, &name).unwrap_or(name));
+        ProcessInfo { foreground: name, at_shell: pgrp == self.shell_pid }
     }
 
     /// The shell's current directory.
@@ -95,6 +96,61 @@ fn process_cwd(_pid: i32) -> Option<PathBuf> {
     None
 }
 
+/// Interpreters whose processes are better named after the script they run
+/// (Gemini CLI is `node .../bin/gemini`).
+const INTERPRETERS: &[&str] = &["node", "bun", "deno", "python", "python3"];
+
+/// For an interpreter, the name of the script it runs.
+fn script_name(pid: i32, name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    if !INTERPRETERS.contains(&lower.as_str()) && !lower.starts_with("python") {
+        return None;
+    }
+    let args = process_args(pid)?;
+    let script = args.iter().skip(1).find(|arg| !arg.starts_with('-'))?;
+    let file = std::path::Path::new(script).file_stem()?.to_str()?;
+    // `node /usr/lib/node_modules/x/dist/index.js`: the package is the name.
+    if matches!(file, "index" | "main" | "cli") {
+        let parts: Vec<&str> = script.split('/').collect();
+        let package = parts.iter().rposition(|p| *p == "node_modules").and_then(|i| parts.get(i + 1))?;
+        return Some(package.trim_start_matches('@').rsplit('/').next()?.to_owned());
+    }
+    Some(file.to_owned())
+}
+
+/// A process's arguments (macOS: `KERN_PROCARGS2`).
+#[cfg(target_os = "macos")]
+fn process_args(pid: i32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    // SAFETY: a size query with a null buffer.
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    // SAFETY: `buf` is valid for `size` bytes.
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    // Layout: argc (i32), executable path, NUL padding, then argc arguments.
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?) as usize;
+    let mut fields = buf[4..].split(|&b| b == 0).filter(|field| !field.is_empty());
+    fields.next()?; // The executable path.
+    Some(fields.take(argc).map(|field| String::from_utf8_lossy(field).into_owned()).collect())
+}
+
+#[cfg(target_os = "linux")]
+fn process_args(pid: i32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(raw.split(|&b| b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_args(_pid: i32) -> Option<Vec<String>> {
+    None
+}
+
 /// The account's login shell, from the user database.
 pub(crate) fn login_shell() -> Option<String> {
     use std::ffi::CStr;
@@ -139,6 +195,22 @@ mod tests {
         assert_eq!(path_from_file_url("file://host/Users/me/a%20b"), Some(PathBuf::from("/Users/me/a b")));
         assert_eq!(path_from_file_url("file:///tmp"), Some(PathBuf::from("/tmp")));
         assert_eq!(path_from_file_url("http://x/y"), None);
+    }
+
+    #[test]
+    fn interpreter_scripts_are_named() {
+        // A real interpreter process: python running a script file.
+        let dir = std::env::temp_dir().join(format!("artty-script-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("my-agent.py");
+        std::fs::write(&script, "import time\ntime.sleep(5)\n").unwrap();
+        let Ok(mut child) = std::process::Command::new("python3").arg(&script).spawn() else { return };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let pid = child.id() as i32;
+        let name = process_name(pid).unwrap_or_default();
+        let resolved = script_name(pid, if name.starts_with("python") { "python3" } else { &name });
+        let _ = child.kill();
+        assert_eq!(resolved.as_deref(), Some("my-agent"));
     }
 
     #[cfg(target_os = "macos")]
