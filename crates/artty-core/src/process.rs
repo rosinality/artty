@@ -17,6 +17,8 @@ pub struct ProcessInfo {
     pub foreground: Option<String>,
     /// The foreground process is the shell itself, i.e. nothing is running.
     pub at_shell: bool,
+    /// The foreground process group.
+    pub foreground_group: Option<i32>,
 }
 
 impl ProcessProbe {
@@ -37,7 +39,11 @@ impl ProcessProbe {
             return ProcessInfo::default();
         }
         let name = process_name(pgrp).map(|name| script_name(pgrp, &name).unwrap_or(name));
-        ProcessInfo { foreground: name, at_shell: pgrp == self.shell_pid }
+        ProcessInfo { foreground: name, at_shell: pgrp == self.shell_pid, foreground_group: Some(pgrp) }
+    }
+
+    pub(crate) fn shell_pid(&self) -> i32 {
+        self.shell_pid
     }
 
     /// The shell's current directory.
@@ -94,6 +100,105 @@ fn process_name(_pid: i32) -> Option<String> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn process_cwd(_pid: i32) -> Option<PathBuf> {
     None
+}
+
+/// One process, as sampled for `artty ps`.
+#[derive(Clone, Debug)]
+pub struct ProcessSample {
+    pub pid: i32,
+    pub ppid: i32,
+    pub pgid: i32,
+    pub name: String,
+    /// CPU time used so far, in nanoseconds.
+    pub cpu_ns: u64,
+    /// Resident memory in bytes.
+    pub memory: u64,
+    /// Start time, in seconds since the Unix epoch.
+    pub started: u64,
+}
+
+/// This user's processes.
+#[cfg(target_os = "macos")]
+// libc's Mach bindings are deprecated in favor of the `mach2` crate, but this
+// one call is all that's needed.
+#[allow(deprecated)]
+pub fn processes() -> Vec<ProcessSample> {
+    use std::mem::{MaybeUninit, size_of};
+
+    // Task CPU times are in Mach time units (not nanoseconds on Apple Silicon).
+    let mut timebase = libc::mach_timebase_info { numer: 1, denom: 1 };
+    // SAFETY: fills the struct.
+    unsafe { libc::mach_timebase_info(&mut timebase) };
+    let to_ns = |ticks: u64| (ticks as u128 * timebase.numer as u128 / timebase.denom.max(1) as u128) as u64;
+
+    // SAFETY: a size query, then a buffer of that size.
+    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    let mut pids = vec![0i32; count as usize + 64];
+    let bytes = (pids.len() * size_of::<i32>()) as i32;
+    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+    pids.truncate(count.max(0) as usize);
+
+    // SAFETY: getuid can't fail.
+    let uid = unsafe { libc::getuid() };
+    let mut samples = Vec::new();
+    for pid in pids.into_iter().filter(|&pid| pid > 0) {
+        let mut bsd = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = size_of::<libc::proc_bsdinfo>() as i32;
+        // SAFETY: `bsd` is valid for `size` bytes.
+        if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, bsd.as_mut_ptr().cast(), size) } != size {
+            continue;
+        }
+        // SAFETY: filled by the kernel.
+        let bsd = unsafe { bsd.assume_init() };
+        if bsd.pbi_uid != uid {
+            continue;
+        }
+        let mut task = MaybeUninit::<libc::proc_taskinfo>::zeroed();
+        let size = size_of::<libc::proc_taskinfo>() as i32;
+        // SAFETY: `task` is valid for `size` bytes.
+        let (cpu_ns, memory) =
+            if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, task.as_mut_ptr().cast(), size) } == size {
+                // SAFETY: filled by the kernel.
+                let task = unsafe { task.assume_init() };
+                (to_ns(task.pti_total_user + task.pti_total_system), task.pti_resident_size)
+            } else {
+                (0, 0)
+            };
+        let name = process_name(pid).unwrap_or_default();
+        let name = script_name(pid, &name).unwrap_or(name);
+        samples.push(ProcessSample {
+            pid,
+            ppid: bsd.pbi_ppid as i32,
+            pgid: bsd.pbi_pgid as i32,
+            name,
+            cpu_ns,
+            memory,
+            started: bsd.pbi_start_tvsec,
+        });
+    }
+    samples
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn processes() -> Vec<ProcessSample> {
+    Vec::new()
+}
+
+/// `root` and its descendants. `root` itself may be missing from the samples
+/// (a pane's `login` process runs as root); its descendants are still found.
+pub fn process_tree(samples: &[ProcessSample], root: i32) -> Vec<&ProcessSample> {
+    let mut tree: Vec<&ProcessSample> = samples.iter().filter(|p| p.pid == root).collect();
+    let mut parents = vec![root];
+    while let Some(parent) = parents.pop() {
+        for child in samples.iter().filter(|p| p.ppid == parent && p.pid != parent) {
+            tree.push(child);
+            parents.push(child.pid);
+        }
+    }
+    tree
 }
 
 /// Interpreters whose processes are better named after the script they run
@@ -195,6 +300,20 @@ mod tests {
         assert_eq!(path_from_file_url("file://host/Users/me/a%20b"), Some(PathBuf::from("/Users/me/a b")));
         assert_eq!(path_from_file_url("file:///tmp"), Some(PathBuf::from("/tmp")));
         assert_eq!(path_from_file_url("http://x/y"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn samples_own_process_tree() {
+        let mut child = std::process::Command::new("sleep").arg("5").spawn().unwrap();
+        let me = std::process::id() as i32;
+        let samples = processes();
+        let tree = process_tree(&samples, me);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(tree.first().map(|p| p.pid), Some(me));
+        assert!(tree.iter().any(|p| p.pid == child.id() as i32 && p.name == "sleep"));
+        assert!(tree[0].memory > 0 && tree[0].cpu_ns > 0);
     }
 
     #[test]

@@ -233,7 +233,13 @@ fn requested_pane(request: &Request) -> Option<Option<SessionId>> {
         | Request::Rename { tab, .. } => Some(*tab),
         Request::Focus { tab } | Request::Close { tab } => Some(Some(*tab)),
         Request::New { target, .. } => Some(*target),
-        Request::List | Request::Settings | Request::Restart => None,
+        Request::List
+        | Request::Settings
+        | Request::Restart
+        | Request::ServerStatus
+        | Request::StopServer
+        | Request::Processes { .. }
+        | Request::Kill { .. } => None,
     }
 }
 

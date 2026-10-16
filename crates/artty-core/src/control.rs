@@ -24,6 +24,15 @@ fn socket_dirs() -> Vec<PathBuf> {
     if temp == fallback { vec![temp] } else { vec![temp, fallback] }
 }
 
+/// The artty server's socket. Everything goes through it: the app's windows,
+/// the `artty` command, and agent hooks.
+pub fn server_socket_path() -> PathBuf {
+    // SAFETY: getuid can't fail.
+    let uid = unsafe { libc::getuid() };
+    let path = std::env::temp_dir().join("artty-server.sock");
+    if path.as_os_str().len() <= MAX_SOCKET_PATH { path } else { PathBuf::from(format!("/tmp/artty-server-{uid}.sock")) }
+}
+
 /// Socket path for the app process `pid`.
 pub fn socket_path(pid: u32) -> PathBuf {
     let name = format!("artty-{pid}.sock");
@@ -61,8 +70,18 @@ pub enum Request {
     List,
     /// Open the Settings window.
     Settings,
-    /// Quit and start again (e.g. after a rebuild); tabs are restored.
+    /// Quit the app and start it again (e.g. after a rebuild); sessions keep
+    /// running in the server.
     Restart,
+    /// Server status: version, uptime, sessions.
+    ServerStatus,
+    /// End every session and stop the server.
+    StopServer,
+    /// Processes and resource use of panes (all, or `tab`).
+    Processes { tab: Option<SessionId> },
+    /// Terminate a pane's foreground program (`signal`, default TERM), or the
+    /// whole pane with `pane: true`.
+    Kill { tab: SessionId, signal: Option<i32>, pane: bool },
     /// Text from a tab.
     Read { tab: Option<SessionId>, source: ReadSource },
     /// Type text into a tab.
@@ -142,6 +161,48 @@ pub enum Response {
     Text { text: String },
     Tab { id: SessionId },
     Command { command: Option<String>, output: String, exit: Option<i32>, truncated: bool },
+    Server { info: ServerInfo },
+    Processes { panes: Vec<PaneProcesses> },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ServerInfo {
+    pub version: String,
+    pub pid: u32,
+    pub uptime_secs: u64,
+    pub windows: usize,
+    /// Windows shown by the app; the rest are detached.
+    pub attached_windows: usize,
+    pub panes: usize,
+    /// Connected apps.
+    pub clients: usize,
+}
+
+/// A pane and the processes running in it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PaneProcesses {
+    pub id: SessionId,
+    pub window: usize,
+    pub tab: usize,
+    pub title: String,
+    pub status: String,
+    pub attached: bool,
+    pub cwd: Option<PathBuf>,
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
+    pub processes: Vec<ProcessRow>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessRow {
+    pub pid: i32,
+    pub ppid: i32,
+    pub name: String,
+    pub cpu_percent: f32,
+    pub memory_bytes: u64,
+    /// In the pane's foreground process group (what the user is running).
+    pub foreground: bool,
+    pub elapsed_secs: u64,
 }
 
 impl Response {

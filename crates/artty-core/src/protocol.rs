@@ -52,6 +52,8 @@ pub enum ClientMessage {
     /// The window closed; its tabs keep running.
     DetachWindow { window: WindowId },
     WindowBounds { window: WindowId, bounds: SavedWindow },
+    /// The window gained or lost focus (for notifications and focus reports).
+    WindowFocused { window: WindowId, focused: bool },
 
     NewTab { window: WindowId, spec: PaneSpec },
     Split { pane: PaneId, axis: Axis, spec: PaneSpec },
@@ -71,8 +73,6 @@ pub enum ClientMessage {
     Search { id: u64, pane: PaneId, query: String, older: bool, restart: bool },
     EndSearch { pane: PaneId },
     ClearBuffer { pane: PaneId },
-    /// The user saw the pane; clear its attention mark.
-    Seen { pane: PaneId },
 
     /// Questions with an answer in [`ServerMessage::Reply`].
     Query { id: u64, query: Query },
@@ -80,8 +80,6 @@ pub enum ClientMessage {
     /// [`ServerMessage::Control`]. JSON because `Request` is internally
     /// tagged, which postcard can't decode.
     Control { id: u64, request: String },
-    /// Answer to [`ServerMessage::ClipboardLoad`].
-    Clipboard { pane: PaneId, request: u64, text: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -187,6 +185,15 @@ impl FrameUpdate {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AppCommand {
+    /// Bring a window forward (`artty focus`).
+    Activate { window: WindowId },
+    OpenSettings,
+    /// Quit and reopen the app (sessions keep running).
+    Restart,
+}
+
 /// Server → app.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMessage {
@@ -201,8 +208,8 @@ pub enum ServerMessage {
     Bell { pane: PaneId },
     /// Show a desktop notification (the app can post native ones).
     Notify { title: String, body: String },
-    ClipboardStore { text: String },
-    ClipboardLoad { pane: PaneId, request: u64 },
+    /// Something for the app to do, from the `artty` command.
+    App(AppCommand),
     Reply { id: u64, reply: Reply },
     /// JSON of a [`Response`].
     Control { id: u64, response: String },

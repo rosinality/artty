@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 artty-core = { path = "../artty-core" }
+artty-server = { path = "../artty-server" }
 futures = "0.3"
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 log = "0.4"

@@ -285,6 +285,11 @@ impl Session {
         *self.term.lock().mode()
     }
 
+    /// The shell's process id.
+    pub fn shell_pid(&self) -> Option<i32> {
+        self.probe.as_ref().map(ProcessProbe::shell_pid)
+    }
+
     /// Foreground process, for detecting agents and running commands.
     pub fn process(&self) -> ProcessInfo {
         self.probe.as_ref().map(ProcessProbe::info).unwrap_or_default()

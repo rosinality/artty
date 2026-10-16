@@ -13,7 +13,7 @@ use artty_core::control::{
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "hooks",
+    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "server", "hooks",
     "shell-integration",
 ];
 
@@ -47,6 +47,9 @@ artty, your own pane is found automatically:
              [--message M | --hook]      report an agent's state (for hooks);
                                          --hook reads the agent's hook event
                                          from stdin (message and session id)
+  artty server [status|stop]             the server that keeps sessions running:
+                                         show it, or end every session and stop
+                                         it (`artty server` alone runs one)
   artty settings                         open the Settings window
   artty restart                          quit and reopen artty (e.g. to run a new
                                          build); tabs and agents are restored
@@ -212,6 +215,14 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             Request::Status { tab: tab.or_else(own_tab), state, message, agent_session, agent: flags.get("agent").cloned() }
         }
         "hooks" => return hooks(&rest),
+        "server" => match rest.first().map(String::as_str) {
+            None | Some("run") => {
+                return artty_server::run().map(|()| 0).map_err(|err| format!("server: {err}"));
+            }
+            Some("status") => Request::ServerStatus,
+            Some("stop") => Request::StopServer,
+            Some(other) => return Err(format!("server: unknown action {other} (run, status, stop)")),
+        },
         "shell-integration" => {
             let shell = rest.first().map(String::as_str).unwrap_or_default();
             let script = artty_core::integration::script(shell)
@@ -245,6 +256,27 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             println!("{text}");
             Ok(0)
         }
+        Response::Server { info } => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+            } else {
+                println!(
+                    "artty server {} (pid {}), up {}\n{} windows ({} shown), {} panes, {} apps attached",
+                    info.version,
+                    info.pid,
+                    duration(info.uptime_secs),
+                    info.windows,
+                    info.attached_windows,
+                    info.panes,
+                    info.clients
+                );
+            }
+            Ok(0)
+        }
+        Response::Processes { panes } => {
+            println!("{}", serde_json::to_string_pretty(&panes).unwrap_or_default());
+            Ok(0)
+        }
         Response::Command { output, exit, truncated, .. } => {
             if truncated {
                 eprintln!("artty: output truncated");
@@ -270,6 +302,16 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             }
             Ok(0)
         }
+    }
+}
+
+/// `90s` → `1m30s`, `5400s` → `1h30m`.
+fn duration(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m{}s", secs / 60, secs % 60),
+        3600..86400 => format!("{}h{}m", secs / 3600, secs % 3600 / 60),
+        _ => format!("{}d{}h", secs / 86400, secs % 86400 / 3600),
     }
 }
 
@@ -301,7 +343,11 @@ fn socket() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os(SOCKET_ENV) {
         return Ok(PathBuf::from(path));
     }
-    // Outside artty: use the most recently started instance.
+    let path = artty_core::control::server_socket_path();
+    if UnixStream::connect(&path).is_ok() {
+        return Ok(path);
+    }
+    // An app from before the server existed.
     live_sockets().into_iter().next().ok_or_else(|| "artty is not running".to_owned())
 }
 

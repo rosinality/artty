@@ -1069,6 +1069,9 @@ impl Workspace {
             }
             Request::Run { .. } => unreachable!("handled in handle_request"),
             Request::Settings | Request::Restart => return Err("handled by the app".into()),
+            Request::ServerStatus | Request::StopServer | Request::Processes { .. } | Request::Kill { .. } => {
+                return Err("handled by the artty server".into());
+            }
             Request::Notify { tab, title, body } => {
                 let id = self.resolve(tab)?;
                 if let Some(pane) = self.panes.get_mut(&id) {
