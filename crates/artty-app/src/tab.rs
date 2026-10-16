@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use artty_core::control::{AgentState, TabInfo};
 use artty_core::vt::ansi::Progress;
-use artty_core::{ProcessInfo, Session, ShellPhase};
+use artty_core::{ProcessInfo, SavedAgent, SavedTab, Session, ShellPhase};
 use gpui::SharedString;
 
 /// What a tab is doing, as shown in the sidebar.
@@ -64,7 +64,17 @@ pub struct Tab {
     last_exit: Option<i32>,
     /// Process names treated as coding agents.
     agents: Arc<[String]>,
+    /// Program the tab was opened with, if not the shell.
+    pub command: Option<Vec<String>>,
+    /// The agent's conversation id, from its hooks.
+    agent_session: Option<String>,
+    /// Typed into the shell once it shows a prompt (resuming an agent).
+    pending_input: Option<(String, Instant)>,
 }
+
+/// How long to wait for a prompt before typing pending input anyway (for
+/// shells without shell integration).
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(3);
 
 const TITLE_ANIMATION_WINDOW: Duration = Duration::from_secs(2);
 
@@ -75,7 +85,12 @@ fn is_shell(name: &str) -> bool {
 }
 
 impl Tab {
-    pub fn new(session: Session, fixed_title: Option<String>, agents: Arc<[String]>) -> Self {
+    pub fn new(
+        session: Session,
+        fixed_title: Option<String>,
+        command: Option<Vec<String>>,
+        agents: Arc<[String]>,
+    ) -> Self {
         Self {
             session,
             title: None,
@@ -90,6 +105,9 @@ impl Tab {
             running: None,
             last_exit: None,
             agents,
+            command,
+            agent_session: None,
+            pending_input: None,
         }
     }
 
@@ -118,7 +136,10 @@ impl Tab {
         }
     }
 
-    pub fn report(&mut self, state: AgentState, message: Option<String>) {
+    pub fn report(&mut self, state: AgentState, message: Option<String>, agent_session: Option<String>) {
+        if agent_session.is_some() {
+            self.agent_session = agent_session;
+        }
         if state == AgentState::Waiting || state == AgentState::Done {
             self.attention = true;
         }
@@ -161,6 +182,7 @@ impl Tab {
         let Some(agent) = self.agent_name().or_else(reporter) else {
             // The agent exited: forget what it reported.
             self.reported = None;
+            self.agent_session = None;
             self.status = self.shell_status();
             return;
         };
@@ -227,6 +249,39 @@ impl Tab {
             }
             Status::Failed { exit } => Some(format!("exit {exit}")),
             Status::Idle => self.message.clone(),
+        }
+    }
+
+    /// Type `input` (and Enter) once the shell is ready.
+    pub fn type_when_ready(&mut self, input: String) {
+        self.pending_input = Some((input, Instant::now()));
+    }
+
+    /// Send pending input if the shell is at its prompt, or has had time to
+    /// get there.
+    pub fn flush_pending_input(&mut self) {
+        let Some((input, since)) = &self.pending_input else { return };
+        if self.session.shell_phase() == ShellPhase::Prompt || since.elapsed() >= PROMPT_TIMEOUT {
+            self.session.write(format!("{input}\r").into_bytes());
+            self.pending_input = None;
+        }
+    }
+
+    /// What to save so the tab can be reopened.
+    pub fn saved(&self, scrollback_lines: usize) -> SavedTab {
+        let agent = match &self.status {
+            Status::Agent { name, .. } => Some(SavedAgent { name: name.clone(), session: self.agent_session.clone() }),
+            _ => None,
+        };
+        // An agent tab reopens as a shell that resumes the agent, not as a
+        // fresh copy of whatever command started it.
+        let command = if agent.is_some() { None } else { self.command.clone() };
+        SavedTab {
+            title: self.fixed_title.clone(),
+            cwd: self.session.cwd(),
+            command,
+            agent,
+            scrollback: self.session.styled_scrollback(scrollback_lines),
         }
     }
 

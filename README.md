@@ -10,6 +10,8 @@ Rust with [GPUI](https://gpui.rs).
 - Notifications when a tab needs you while you're elsewhere, and ⌘J to jump to it.
 - An `artty` command that lets agents (or scripts) list tabs, read their
   output, run commands in other tabs and get the result, and report status.
+- Tabs come back after a restart or crash: directories, recent output, and
+  the coding agents running in them, resumed in the same conversation.
 
 ## Build and run
 
@@ -59,7 +61,24 @@ artty hooks            # print the hooks
 artty hooks install    # add them to ~/.claude/settings.json (backs it up first)
 ```
 
-The hooks call `artty status …` and do nothing outside artty.
+The hooks call `artty status …` and do nothing outside artty. They also tell
+artty the conversation id, which is what lets restored tabs resume the right
+conversation. Rerunning `artty hooks install` upgrades hooks from older
+versions.
+
+### Restoring tabs and resuming agents
+
+artty saves your tabs every few seconds and on quit, and reopens them on the
+next launch: each tab's directory, its last 1000 lines of output (with colors),
+and the program it was opened with. A tab where an agent was running reopens
+its shell and runs the agent's resume command — for Claude Code,
+`claude --resume <id>` with the conversation id its hooks reported (or
+`claude --continue` without hooks). Resuming opens the conversation; nothing
+is sent until you type.
+
+Only the first artty instance saves and restores; later ones start fresh. See
+`restore-sessions`, `restore-scrollback`, `resume-agents` and `[resume.*]` in
+the config to change or turn this off.
 
 ### The `artty` command
 

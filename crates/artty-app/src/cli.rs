@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use artty_core::SessionId;
-use artty_core::control::{AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV};
+use artty_core::control::{AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV, live_sockets};
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &["list", "read", "send", "new", "run", "notify", "status", "focus", "close", "hooks"];
@@ -35,9 +35,10 @@ control a running artty (inside a tab, the current one is found automatically):
   artty status [--tab N] working|waiting|done|idle [--message M | --hook]
                                          report an agent's state (for hooks);
                                          --hook reads a Claude Code hook event
-                                         from stdin
+                                         from stdin (message and session id)
   artty hooks [install]                  print (or add to ~/.claude/settings.json)
-                                         Claude Code hooks that report status
+                                         Claude Code hooks that report status and
+                                         let artty resume conversations
 ";
 
 pub fn main(args: Vec<String>) -> i32 {
@@ -166,8 +167,12 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 Some("idle") => AgentState::Idle,
                 _ => return Err("status: expected working, waiting, done or idle".into()),
             };
-            let message = if switches.contains("hook") { hook_message() } else { flags.get("message").cloned() };
-            Request::Status { tab: tab.or_else(own_tab), state, message }
+            let (message, agent_session) = if switches.contains("hook") {
+                hook_event()
+            } else {
+                (flags.get("message").cloned(), None)
+            };
+            Request::Status { tab: tab.or_else(own_tab), state, message, agent_session }
         }
         "hooks" => return hooks(rest.first().map(String::as_str)),
         _ => {
@@ -220,12 +225,13 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
     }
 }
 
-/// The `message` of a Claude Code hook event on stdin, if any.
-fn hook_message() -> Option<String> {
+/// The `message` and `session_id` of a Claude Code hook event on stdin.
+fn hook_event() -> (Option<String>, Option<String>) {
     let mut input = String::new();
-    std::io::stdin().take(1 << 20).read_to_string(&mut input).ok()?;
-    let event: Value = serde_json::from_str(&input).ok()?;
-    event.get("message")?.as_str().map(str::to_owned)
+    let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
+    let Ok(event) = serde_json::from_str::<Value>(&input) else { return (None, None) };
+    let field = |name: &str| event.get(name).and_then(Value::as_str).map(str::to_owned);
+    (field("message"), field("session_id"))
 }
 
 fn socket() -> Result<PathBuf, String> {
@@ -233,23 +239,7 @@ fn socket() -> Result<PathBuf, String> {
         return Ok(PathBuf::from(path));
     }
     // Outside artty: use the most recently started instance.
-    let mut sockets: Vec<_> = std::fs::read_dir(std::env::temp_dir())
-        .map_err(|err| err.to_string())?
-        .flatten()
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("artty-") && name.ends_with(".sock")
-        })
-        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
-        .collect();
-    sockets.sort();
-    sockets
-        .into_iter()
-        .rev()
-        .map(|(_, path)| path)
-        .find(|path| UnixStream::connect(path).is_ok())
-        .ok_or_else(|| "artty is not running".to_owned())
+    live_sockets().into_iter().next().ok_or_else(|| "artty is not running".to_owned())
 }
 
 fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String> {
@@ -267,21 +257,22 @@ fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String
     serde_json::from_str(&reply).map_err(|err| format!("bad reply: {err}"))
 }
 
-/// Claude Code hooks that report the agent's state to artty. They do nothing
-/// outside artty.
+/// Claude Code hooks that report the agent's state (and conversation id) to
+/// artty. They do nothing outside artty.
 fn claude_hooks() -> Value {
-    let hook = |state: &str, extra: &str| {
+    let hook = |state: &str| {
         json!([{ "hooks": [{
             "type": "command",
-            "command": format!("[ -n \"$ARTTY_SOCKET\" ] && artty status {state}{extra} || true"),
+            "command": format!("[ -n \"$ARTTY_SOCKET\" ] && artty status {state} --hook || true"),
         }]}])
     };
     json!({
-        "UserPromptSubmit": hook("working", ""),
-        "PostToolUse": hook("working", ""),
-        "Notification": hook("waiting", " --hook"),
-        "Stop": hook("done", ""),
-        "SessionEnd": hook("idle", ""),
+        "SessionStart": hook("idle"),
+        "UserPromptSubmit": hook("working"),
+        "PostToolUse": hook("working"),
+        "Notification": hook("waiting"),
+        "Stop": hook("done"),
+        "SessionEnd": hook("idle"),
     })
 }
 
@@ -310,19 +301,22 @@ fn install_hooks() -> Result<i32, String> {
     let hooks = root.entry("hooks").or_insert_with(|| json!({}));
     let hooks = hooks.as_object_mut().ok_or("settings.json: \"hooks\" is not an object")?;
 
-    let mut added = 0;
+    // Replace hooks from earlier versions of artty, keep everything else.
+    let mut changed = 0;
     for (event, entries) in claude_hooks().as_object().unwrap() {
         let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
         let list = list.as_array_mut().ok_or(format!("settings.json: hooks.{event} is not a list"))?;
         let ours = |entry: &Value| entry.to_string().contains("artty status");
-        if list.iter().any(ours) {
+        let current: Vec<Value> = list.iter().filter(|e| ours(e)).cloned().collect();
+        if current == *entries.as_array().unwrap() {
             continue;
         }
+        list.retain(|entry| !ours(entry));
         list.extend(entries.as_array().unwrap().iter().cloned());
-        added += 1;
+        changed += 1;
     }
-    if added == 0 {
-        println!("artty hooks are already installed in {}", path.display());
+    if changed == 0 {
+        println!("artty hooks are up to date in {}", path.display());
         return Ok(0);
     }
 
@@ -335,7 +329,7 @@ fn install_hooks() -> Result<i32, String> {
     }
     let text = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
     std::fs::write(&path, text + "\n").map_err(|err| format!("{}: {err}", path.display()))?;
-    println!("Added artty status hooks for {added} events to {}", path.display());
+    println!("Updated artty hooks for {changed} events in {}", path.display());
     Ok(0)
 }
 
@@ -348,5 +342,6 @@ mod tests {
         let hooks = claude_hooks();
         let command = hooks["Notification"][0]["hooks"][0]["command"].as_str().unwrap();
         assert_eq!(command, "[ -n \"$ARTTY_SOCKET\" ] && artty status waiting --hook || true");
+        assert!(hooks["SessionStart"].is_array());
     }
 }

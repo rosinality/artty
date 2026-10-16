@@ -2,6 +2,7 @@
 //!
 //! Every key is optional; see `config.example.toml` at the repository root.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -33,7 +34,37 @@ pub struct Config {
     pub agents: Vec<String>,
     /// macOS notifications when a tab needs attention while you're elsewhere.
     pub notifications: bool,
+    /// Reopen the previous tabs on launch.
+    pub restore_sessions: bool,
+    /// Lines of each tab's output to save and show again; 0 saves none.
+    pub restore_scrollback: usize,
+    /// Resume coding agents that were running in restored tabs.
+    pub resume_agents: bool,
+    /// How to resume each agent, by process name.
+    pub resume: BTreeMap<String, ResumeCommand>,
     pub colors: Colors,
+}
+
+/// Commands that resume an agent's conversation.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ResumeCommand {
+    /// Resume a specific conversation; `{session}` is replaced by its id.
+    pub session: Option<String>,
+    /// Resume the latest conversation in the directory, when the id is unknown.
+    pub latest: Option<String>,
+}
+
+impl ResumeCommand {
+    /// The command line to run, if this agent can be resumed. Session ids are
+    /// only used if they can't break out of the command.
+    pub fn command(&self, session: Option<&str>) -> Option<String> {
+        let safe = |id: &&str| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        match (session.filter(safe), &self.session) {
+            (Some(id), Some(template)) => Some(template.replace("{session}", id)),
+            _ => self.latest.clone(),
+        }
+    }
 }
 
 /// Coding agents recognized by default.
@@ -54,6 +85,16 @@ impl Default for Config {
             cursor_blink: true,
             agents: DEFAULT_AGENTS.iter().map(|&s| s.to_owned()).collect(),
             notifications: true,
+            restore_sessions: true,
+            restore_scrollback: 1000,
+            resume_agents: true,
+            resume: BTreeMap::from([(
+                "claude".to_owned(),
+                ResumeCommand {
+                    session: Some("claude --resume {session}".to_owned()),
+                    latest: Some("claude --continue".to_owned()),
+                },
+            )]),
             colors: Colors::default(),
         }
     }
@@ -115,7 +156,12 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(text)
+        let mut config: Self = toml::from_str(text)?;
+        // Agents configured by the user add to the built-in ones.
+        for (agent, command) in Self::default().resume {
+            config.resume.entry(agent).or_insert(command);
+        }
+        Ok(config)
     }
 
     pub fn theme(&self) -> Theme {
@@ -156,6 +202,20 @@ mod tests {
         assert_eq!(theme.background, Rgb { r: 0, g: 0, b: 0 });
         assert_eq!(theme.ansi[1], Rgb { r: 255, g: 0, b: 0 });
         assert_eq!(theme.ansi[2], Theme::default().ansi[2]);
+    }
+
+    #[test]
+    fn resume_commands() {
+        let config = Config::default();
+        let claude = &config.resume["claude"];
+        assert_eq!(claude.command(Some("0f1e-2d")).as_deref(), Some("claude --resume 0f1e-2d"));
+        assert_eq!(claude.command(None).as_deref(), Some("claude --continue"));
+        // An id that could inject shell syntax falls back to the latest.
+        assert_eq!(claude.command(Some("x; rm -rf ~")).as_deref(), Some("claude --continue"));
+
+        let custom = Config::parse("[resume.codex]\nlatest = \"codex resume --last\"").unwrap();
+        assert_eq!(custom.resume["codex"].command(Some("abc")).as_deref(), Some("codex resume --last"));
+        assert!(custom.resume.contains_key("claude"));
     }
 
     #[test]

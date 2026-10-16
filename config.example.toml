@@ -30,6 +30,21 @@ agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cur
 # macOS notifications when a tab needs you while you're in another tab or app.
 notifications = true
 
+# Reopen the previous tabs on launch: their directories, recent output, and
+# programs. Saved every few seconds and on quit (owner-only file in
+# ~/Library/Application Support/artty/state.json).
+restore-sessions = true
+# Lines of each tab's output to save; 0 saves none.
+restore-scrollback = 1000
+# Resume coding agents that were running in restored tabs.
+resume-agents = true
+
+# How to resume an agent, by process name. `session` is used when the agent's
+# hooks reported its conversation id ({session}); `latest` otherwise.
+[resume.claude]
+session = "claude --resume {session}"
+latest = "claude --continue"
+
 [colors]
 # foreground = "#d8dee9"
 # background = "#161a22"

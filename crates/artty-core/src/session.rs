@@ -66,6 +66,8 @@ pub struct SessionOptions {
     pub working_directory: Option<PathBuf>,
     pub env: HashMap<String, String>,
     pub scrollback: Option<usize>,
+    /// Output shown before the program starts, e.g. a restored tab's history.
+    pub initial_output: Option<Vec<u8>>,
 }
 
 /// Something the UI should react to, produced by [`Session::handle`].
@@ -145,7 +147,11 @@ impl Session {
         if let Some(scrollback) = options.scrollback {
             config.scrolling_history = scrollback;
         }
-        let term = Arc::new(FairMutex::new(Term::new(config, &size, proxy.clone())));
+        let mut term = Term::new(config, &size, proxy.clone());
+        if let Some(output) = &options.initial_output {
+            artty_vt::ansi::Processor::<artty_vt::ansi::StdSyncHandler>::new().advance(&mut term, output);
+        }
+        let term = Arc::new(FairMutex::new(term));
 
         let mut env = HashMap::from([
             ("TERM".to_owned(), "xterm-256color".to_owned()),
@@ -297,6 +303,11 @@ impl Session {
         let top = (bottom.0 - lines.max(1) as i32 + 1).max(term.topmost_line().0);
         let text = term.bounds_to_string(Point::new(Line(top), Column(0)), Point::new(bottom, term.last_column()));
         trim_lines(text)
+    }
+
+    /// The last `lines` lines of output with color codes, for saving.
+    pub fn styled_scrollback(&self, lines: usize) -> String {
+        crate::state::styled_text(&self.term.lock(), lines)
     }
 
     /// Find `query` (a regex) and select the match, starting from the current

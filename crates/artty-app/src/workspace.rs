@@ -12,13 +12,14 @@ use artty_core::vt::index::Side;
 use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
 use artty_core::{
-    Config, FrameCursor, Notice, Session, SessionId, SessionOptions, ShellPhase, TerminalSize,
-    Theme,
+    Config, FrameCursor, Notice, SavedState, SavedWindow, Session, SessionId, SessionOptions,
+    ShellPhase, TerminalSize, Theme,
 };
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
+    WindowBounds,
     FontWeight, Hsla, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task,
     UTF16Selection, Window, WindowBackgroundAppearance, actions, canvas, div, point, prelude::*,
@@ -58,6 +59,10 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// How often tabs are saved for the next launch.
+const SAVE_EVERY_POLLS: u32 = 5;
+/// Shown under a restored tab's old output.
+const RESTORED_BANNER: &str = "\r\n\x1b[2m── restored ──\x1b[0m\r\n";
 /// Background commands running at least this long notify when they finish.
 const LONG_COMMAND: Duration = Duration::from_secs(10);
 const MIN_FONT_SIZE: f32 = 6.;
@@ -68,6 +73,17 @@ struct PendingRun {
     tab: SessionId,
     reply: oneshot::Sender<Response>,
     deadline: Option<Instant>,
+}
+
+/// What to open in a new tab; everything defaults to a shell in the active
+/// tab's directory.
+#[derive(Default)]
+pub struct TabSpec {
+    pub command: Option<Vec<String>>,
+    pub cwd: Option<PathBuf>,
+    pub title: Option<String>,
+    /// Output to show before the program starts.
+    pub initial_output: Option<Vec<u8>>,
 }
 
 struct Search {
@@ -97,6 +113,11 @@ pub struct Workspace {
     cli_dir: Option<PathBuf>,
     runs: Vec<PendingRun>,
     search: Option<Search>,
+    /// Save tabs for the next launch (off when another artty owns the state).
+    save_enabled: bool,
+    last_saved: Option<String>,
+    polls: u32,
+    window_bounds: Option<SavedWindow>,
     /// IME composition in progress, shown at the cursor until committed.
     marked_text: Option<String>,
     /// Cursor position from the last render, for placing the IME window.
@@ -144,6 +165,8 @@ impl Workspace {
         config: Config,
         config_error: Option<String>,
         command: Option<Vec<String>>,
+        restore: Option<SavedState>,
+        save_enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -193,6 +216,10 @@ impl Workspace {
         let poll = every(POLL_INTERVAL, Self::poll);
         let spinner = every(SPINNER_INTERVAL, Self::spin);
 
+        let quit = cx.on_app_quit(|this, _| {
+            this.save();
+            async {}
+        });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
             this.report_focus(this.window_active);
@@ -226,6 +253,10 @@ impl Workspace {
             cli_dir: cli_dir(),
             runs: Vec::new(),
             search: None,
+            save_enabled,
+            last_saved: None,
+            polls: 0,
+            window_bounds: None,
             marked_text: None,
             cursor: None,
             cursor_visible: true,
@@ -238,11 +269,58 @@ impl Workspace {
             last_mouse_cell: None,
             scroll_remainder: 0.,
             _tasks: vec![events, requests, blink, poll, spinner],
-            _subscriptions: vec![activation],
+            _subscriptions: vec![activation, quit],
         };
         this.size = this.terminal_size(window);
-        let _ = this.open_tab(command, None, None, true, cx);
+        match restore.filter(|state| !state.tabs.is_empty() && command.is_none()) {
+            Some(state) => this.restore(state, cx),
+            None => {
+                if let Err(err) = this.open_tab(TabSpec { command, ..Default::default() }, true, cx) {
+                    log::error!("{err}");
+                }
+            }
+        }
         this
+    }
+
+    /// Reopen saved tabs: their directories and output, and their agents.
+    fn restore(&mut self, state: SavedState, cx: &mut Context<Self>) {
+        for saved in state.tabs {
+            let initial_output = (!saved.scrollback.is_empty())
+                .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
+            let spec = TabSpec { command: saved.command, cwd: saved.cwd, title: saved.title, initial_output };
+            if let Err(err) = self.open_tab(spec, false, cx) {
+                log::error!("restoring a tab: {err}");
+                continue;
+            }
+            let resume = saved.agent.filter(|_| self.config.resume_agents).and_then(|agent| {
+                self.config.resume.get(&agent.name)?.command(agent.session.as_deref())
+            });
+            if let (Some(resume), Some(tab)) = (resume, self.tabs.last_mut()) {
+                tab.type_when_ready(resume);
+            }
+        }
+        if self.tabs.is_empty() {
+            let _ = self.open_tab(TabSpec::default(), true, cx);
+        }
+        self.select(state.active.min(self.tabs.len().saturating_sub(1)), cx);
+    }
+
+    /// Save the tabs for the next launch, if anything changed.
+    fn save(&mut self) {
+        if !self.save_enabled {
+            return;
+        }
+        let tabs = self.tabs.iter().map(|tab| tab.saved(self.config.restore_scrollback)).collect();
+        let state = SavedState::new(self.window_bounds, self.active, tabs);
+        let Ok(json) = serde_json::to_string(&state) else { return };
+        if self.last_saved.as_ref() == Some(&json) {
+            return;
+        }
+        match state.save() {
+            Ok(()) => self.last_saved = Some(json),
+            Err(err) => log::error!("saving tabs: {err}"),
+        }
     }
 
     fn terminal_size(&self, window: &Window) -> TerminalSize {
@@ -275,20 +353,13 @@ impl Workspace {
         ((y as usize).min(lines - 1), column, side)
     }
 
-    /// Open a tab running `command` (default: the configured shell) in `cwd`
-    /// (default: the active tab's directory).
-    fn open_tab(
-        &mut self,
-        command: Option<Vec<String>>,
-        cwd: Option<PathBuf>,
-        title: Option<String>,
-        focus: bool,
-        cx: &mut Context<Self>,
-    ) -> Result<SessionId, String> {
+    /// Open a tab as described by `spec`.
+    fn open_tab(&mut self, spec: TabSpec, focus: bool, cx: &mut Context<Self>) -> Result<SessionId, String> {
         let id = self.next_id;
         self.next_id += 1;
-        let command = command.or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
-        let cwd = cwd.or_else(|| self.active_session().and_then(Session::cwd));
+        let explicit = spec.command.clone().filter(|c| !c.is_empty());
+        let command = explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
+        let cwd = spec.cwd.or_else(|| self.active_session().and_then(Session::cwd));
 
         let mut env = std::collections::HashMap::new();
         env.insert(SESSION_ENV.to_owned(), id.to_string());
@@ -304,10 +375,11 @@ impl Workspace {
             working_directory: cwd.filter(|dir| dir.is_dir()),
             env,
             scrollback: Some(self.config.scrollback),
+            initial_output: spec.initial_output,
         };
         let session = Session::spawn(id, options, self.size, self.theme.clone(), self.sink.clone())
             .map_err(|err| format!("failed to start: {err}"))?;
-        self.tabs.push(Tab::new(session, title, self.agents.clone()));
+        self.tabs.push(Tab::new(session, spec.title, explicit, self.agents.clone()));
         if focus {
             self.select(self.tabs.len() - 1, cx);
         }
@@ -492,7 +564,7 @@ impl Workspace {
             }
             Request::New { cwd, command, title, focus } => {
                 let command = (!command.is_empty()).then_some(command);
-                let id = self.open_tab(command, cwd, title, focus, cx)?;
+                let id = self.open_tab(TabSpec { command, cwd, title, initial_output: None }, focus, cx)?;
                 Response::Tab { id }
             }
             Request::Focus { tab } => {
@@ -512,10 +584,10 @@ impl Workspace {
                 self.notify_user(index, title.as_deref(), &body);
                 Response::Ok
             }
-            Request::Status { tab, state, message } => {
+            Request::Status { tab, state, message, agent_session } => {
                 let index = self.resolve(tab)?;
                 let was_waiting = matches!(self.tabs[index].status, Status::Agent { state: AgentState::Waiting, .. });
-                self.tabs[index].report(state, message.clone());
+                self.tabs[index].report(state, message.clone(), agent_session);
                 match state {
                     AgentState::Waiting if !was_waiting => {
                         self.notify_user(index, Some("Needs input"), message.as_deref().unwrap_or(""));
@@ -568,7 +640,12 @@ impl Workspace {
             let before = (tab.status.clone(), tab.process.clone());
             tab.process = process;
             tab.refresh();
+            tab.flush_pending_input();
             changed |= before != (tab.status.clone(), tab.process.clone()) || tab.status.busy();
+        }
+        self.polls += 1;
+        if self.polls.is_multiple_of(SAVE_EVERY_POLLS) {
+            self.save();
         }
 
         let now = Instant::now();
@@ -979,7 +1056,7 @@ impl Workspace {
                             .text_size(px(14.))
                             .child("+")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                let _ = this.open_tab(None, None, None, true, cx);
+                                let _ = this.open_tab(TabSpec::default(), true, cx);
                             })),
                     ),
             )
@@ -1035,6 +1112,34 @@ impl Workspace {
     }
 }
 
+fn saved_window(bounds: WindowBounds) -> SavedWindow {
+    let (rect, maximized, fullscreen) = match bounds {
+        WindowBounds::Windowed(rect) => (rect, false, false),
+        WindowBounds::Maximized(rect) => (rect, true, false),
+        WindowBounds::Fullscreen(rect) => (rect, false, true),
+    };
+    SavedWindow {
+        x: rect.origin.x.into(),
+        y: rect.origin.y.into(),
+        width: rect.size.width.into(),
+        height: rect.size.height.into(),
+        maximized,
+        fullscreen,
+    }
+}
+
+/// Window bounds to open with, from a saved window.
+pub fn window_bounds(saved: &SavedWindow) -> WindowBounds {
+    let rect = Bounds::new(point(px(saved.x), px(saved.y)), gpui::size(px(saved.width), px(saved.height)));
+    if saved.fullscreen {
+        WindowBounds::Fullscreen(rect)
+    } else if saved.maximized {
+        WindowBounds::Maximized(rect)
+    } else {
+        WindowBounds::Windowed(rect)
+    }
+}
+
 pub fn background_appearance(config: &Config) -> WindowBackgroundAppearance {
     if config.background_opacity >= 1. {
         WindowBackgroundAppearance::Opaque
@@ -1054,6 +1159,7 @@ impl Render for Workspace {
         for tab in &mut self.tabs {
             tab.session.resize(self.size);
         }
+        self.window_bounds = Some(saved_window(window.window_bounds()));
         self.window_active = window.is_window_active();
         if self.window_active
             && let Some(tab) = self.tabs.get_mut(self.active)
@@ -1082,7 +1188,7 @@ impl Render for Workspace {
             .key_context("Workspace")
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| {
-                if let Err(err) = this.open_tab(None, None, None, true, cx) {
+                if let Err(err) = this.open_tab(TabSpec::default(), true, cx) {
                     log::error!("{err}");
                 }
             }))

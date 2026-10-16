@@ -7,7 +7,8 @@ mod tab;
 mod terminal;
 mod workspace;
 
-use artty_core::Config;
+use artty_core::control::live_sockets;
+use artty_core::{Config, SavedState};
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
     WindowBounds, WindowOptions, actions, point, px, size,
@@ -52,6 +53,11 @@ fn main() {
     let command = parse_args();
     let (config, config_error) = Config::load();
 
+    // Only one instance restores and saves tabs; later ones start fresh.
+    let first_instance = live_sockets().is_empty();
+    let save_enabled = config.restore_sessions && first_instance;
+    let restore = (save_enabled && command.is_none()).then(SavedState::load).flatten();
+
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
@@ -95,10 +101,12 @@ fn main() {
         ]);
 
         let window_background = workspace::background_appearance(&config);
-        let bounds = Bounds::centered(None, size(px(1100.), px(680.)), cx);
+        let window_bounds = restore.as_ref().and_then(|state| state.window.as_ref()).map(workspace::window_bounds);
+        let window_bounds = window_bounds
+            .unwrap_or_else(|| WindowBounds::Windowed(Bounds::centered(None, size(px(1100.), px(680.)), cx)));
         cx.open_window(
             WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_bounds: Some(window_bounds),
                 titlebar: Some(TitlebarOptions {
                     title: Some("artty".into()),
                     appears_transparent: true,
@@ -107,7 +115,9 @@ fn main() {
                 window_background,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| Workspace::new(config, config_error, command, window, cx)),
+            |window, cx| {
+                cx.new(|cx| Workspace::new(config, config_error, command, restore, save_enabled, window, cx))
+            },
         )
         .expect("failed to open window");
         cx.activate(true);
