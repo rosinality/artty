@@ -95,6 +95,24 @@ fn process_cwd(_pid: i32) -> Option<PathBuf> {
     None
 }
 
+/// The account's login shell, from the user database.
+pub(crate) fn login_shell() -> Option<String> {
+    use std::ffi::CStr;
+    let mut buf = vec![0 as libc::c_char; 4096];
+    let mut pw = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut result = std::ptr::null_mut();
+    // SAFETY: all pointers are valid for the sizes given.
+    let status = unsafe {
+        libc::getpwuid_r(libc::getuid(), pw.as_mut_ptr(), buf.as_mut_ptr(), buf.len(), &mut result)
+    };
+    if status != 0 || result.is_null() {
+        return None;
+    }
+    // SAFETY: getpwuid_r filled `pw`, and pw_shell points into `buf`.
+    let shell = unsafe { CStr::from_ptr(pw.assume_init().pw_shell) };
+    shell.to_str().ok().filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
 /// Decode an OSC 7 `file://host/path` URL into a path.
 pub(crate) fn path_from_file_url(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;

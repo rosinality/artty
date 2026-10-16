@@ -7,6 +7,7 @@
 mod config;
 pub mod control;
 mod frame;
+pub mod integration;
 mod process;
 mod session;
 mod shell;

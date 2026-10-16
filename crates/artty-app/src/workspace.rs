@@ -152,6 +152,8 @@ pub struct Workspace {
     sink: Arc<dyn Fn(SessionId, Event) + Send + Sync>,
     control: Option<ControlServer>,
     cli_dir: Option<PathBuf>,
+    /// Where zsh/bash integration scripts are installed.
+    integration_dir: Option<PathBuf>,
     runs: Vec<PendingRun>,
     search: Option<Search>,
     /// Save tabs for the next launch (off when another artty owns the state).
@@ -302,6 +304,9 @@ impl Workspace {
             sink,
             control,
             cli_dir: cli_dir(),
+            integration_dir: artty_core::integration::install()
+                .inspect_err(|err| log::error!("shell integration: {err}"))
+                .ok(),
             runs: Vec::new(),
             search: None,
             save_enabled,
@@ -490,10 +495,17 @@ impl Workspace {
         let id = self.next_id;
         self.next_id += 1;
         let explicit = spec.command.clone().filter(|c| !c.is_empty());
-        let command = explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
+        let mut command = explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
         let cwd = spec.cwd.or_else(|| self.focused_session().and_then(Session::cwd));
 
         let mut env = HashMap::new();
+        if self.config.shell_integration
+            && let Some(dir) = &self.integration_dir
+            && let Some(injection) = artty_core::integration::inject(dir, command.as_deref())
+        {
+            env.extend(injection.env);
+            command = injection.command.or(command);
+        }
         env.insert(SESSION_ENV.to_owned(), id.to_string());
         if let Some(control) = &self.control {
             env.insert(SOCKET_ENV.to_owned(), control.path().display().to_string());

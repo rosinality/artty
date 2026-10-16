@@ -34,6 +34,8 @@ pub struct Config {
     pub agents: Vec<String>,
     /// macOS notifications when a tab needs attention while you're elsewhere.
     pub notifications: bool,
+    /// Set up zsh and bash to report prompts and commands (fish does natively).
+    pub shell_integration: bool,
     /// Reopen the previous tabs on launch.
     pub restore_sessions: bool,
     /// Lines of each tab's output to save and show again; 0 saves none.
@@ -85,6 +87,7 @@ impl Default for Config {
             cursor_blink: true,
             agents: DEFAULT_AGENTS.iter().map(|&s| s.to_owned()).collect(),
             notifications: true,
+            shell_integration: true,
             restore_sessions: true,
             restore_scrollback: 1000,
             resume_agents: true,

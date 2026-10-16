@@ -1,0 +1,14 @@
+# artty points ZDOTDIR here so this runs first: restore the real ZDOTDIR, load
+# the user's .zshenv, then artty's integration. zsh reads the remaining startup
+# files (.zprofile, .zshrc, .zlogin) from the restored ZDOTDIR as usual.
+if [[ -n ${ARTTY_ZDOTDIR+set} ]]; then
+  ZDOTDIR=$ARTTY_ZDOTDIR
+else
+  unset ZDOTDIR
+fi
+unset ARTTY_ZDOTDIR
+{
+  [[ -f ${ZDOTDIR:-$HOME}/.zshenv ]] && source "${ZDOTDIR:-$HOME}/.zshenv"
+} always {
+  [[ -o interactive && -n $ARTTY_SHELL_INTEGRATION ]] && source "$ARTTY_SHELL_INTEGRATION/artty.zsh"
+}

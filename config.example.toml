@@ -30,6 +30,10 @@ agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cur
 # macOS notifications when a tab needs you while you're in another tab or app.
 notifications = true
 
+# Set up zsh and bash to report prompts, commands and exit codes (for
+# `artty run`, command status and notifications). fish does this natively.
+shell-integration = true
+
 # Reopen the previous tabs on launch: their directories, recent output, and
 # programs. Saved every few seconds and on quit (owner-only file in
 # ~/Library/Application Support/artty/state.json).
