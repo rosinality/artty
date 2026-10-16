@@ -61,6 +61,8 @@ pub enum Request {
     List,
     /// Open the Settings window.
     Settings,
+    /// Quit and start again (e.g. after a rebuild); tabs are restored.
+    Restart,
     /// Text from a tab.
     Read { tab: Option<SessionId>, source: ReadSource },
     /// Type text into a tab.

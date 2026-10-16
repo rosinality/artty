@@ -1,26 +1,40 @@
 #!/bin/sh
 # Build target/release/artty.app: a release build wrapped in a macOS app bundle
-# with an icon, signed ad hoc so it runs locally. Copy it to /Applications to
-# launch artty from Finder, the Dock or Spotlight.
+# with an icon, signed ad hoc so it runs locally.
+#
+#   ./scripts/bundle.sh             build (or rebuild) the bundle
+#   ./scripts/bundle.sh --install   also link /Applications/artty.app to it, so
+#                                   every later build updates the installed app
 #
 #   ARTTY_BUNDLE_ID   bundle identifier (default: dev.artty.terminal)
 #   ARTTY_SIGN        signing identity (default: "-", ad hoc)
+#   ARTTY_APPS        where --install links the app (default: /Applications)
 set -eu
 cd "$(dirname "$0")/.."
 
 BUNDLE_ID="${ARTTY_BUNDLE_ID:-dev.artty.terminal}"
 SIGN="${ARTTY_SIGN:--}"
+APPS="${ARTTY_APPS:-/Applications}"
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' crates/artty-app/Cargo.toml | head -1)
+INSTALL=false
+case "${1:-}" in
+  --install) INSTALL=true ;;
+  "") ;;
+  *) echo "usage: $0 [--install]" >&2; exit 2 ;;
+esac
 
 cargo build --release -p artty
 
-APP=target/release/artty.app
-rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/artty "$APP/Contents/MacOS/artty"
-cp assets/artty.icns "$APP/Contents/Resources/artty.icns"
+# Assemble the new bundle next to the old one, then swap it in with a rename:
+# a running artty keeps its (now unlinked) files and is never modified in place.
+APP="$PWD/target/release/artty.app"
+NEW="$APP.new"
+rm -rf "$NEW"
+mkdir -p "$NEW/Contents/MacOS" "$NEW/Contents/Resources"
+cp target/release/artty "$NEW/Contents/MacOS/artty"
+cp assets/artty.icns "$NEW/Contents/Resources/artty.icns"
 
-cat > "$APP/Contents/Info.plist" <<PLIST
+cat > "$NEW/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -41,5 +55,26 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign "$SIGN" "$APP"
+codesign --force --sign "$SIGN" "$NEW"
+rm -rf "$APP"
+mv "$NEW" "$APP"
 echo "Built $APP ($BUNDLE_ID $VERSION)"
+
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+
+if $INSTALL; then
+  LINK="$APPS/artty.app"
+  if [ -L "$LINK" ]; then
+    rm "$LINK"
+  elif [ -e "$LINK" ]; then
+    # An earlier copy: move it to the Trash rather than deleting it.
+    TRASHED="$HOME/.Trash/artty.app $(date +%Y-%m-%d\ %H.%M.%S)"
+    mv "$LINK" "$TRASHED"
+    echo "Moved the old copy to $TRASHED"
+  fi
+  ln -s "$APP" "$LINK"
+  echo "Linked $LINK -> $APP"
+fi
+
+# Let Finder, the Dock and Spotlight see the new build (icon, version).
+[ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$APP" >/dev/null 2>&1 || true

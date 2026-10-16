@@ -1,7 +1,7 @@
 //! State shared by all windows: pane ids, the control socket, and saving.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use artty_core::control::{Request, Response};
 use artty_core::{Config, SavedState, SavedWorkspace, SessionId};
@@ -29,7 +29,15 @@ pub struct Shared {
     save_enabled: bool,
     last_saved: Option<String>,
     settings: Option<gpui::WindowHandle<crate::settings::Settings>>,
+    /// The running executable and when it was built, to notice rebuilds.
+    executable: Option<(PathBuf, SystemTime)>,
+    /// A newer build has replaced the executable; restarting picks it up.
+    update_ready: bool,
     _control: Option<ControlServer>,
+}
+
+fn modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
 }
 
 impl Global for Shared {}
@@ -51,6 +59,11 @@ pub fn init(save_enabled: bool, cx: &mut App) {
         save_enabled,
         last_saved: None,
         settings: None,
+        executable: std::env::current_exe().ok().and_then(|path| {
+            let built = modified(&path)?;
+            Some((path, built))
+        }),
+        update_ready: false,
         _control: control,
     });
 
@@ -65,7 +78,12 @@ pub fn init(save_enabled: bool, cx: &mut App) {
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor().timer(SAVE_INTERVAL).await;
-            if cx.update(save).is_err() {
+            if cx.update(|cx| {
+                save(cx);
+                check_for_update(cx);
+            })
+            .is_err()
+            {
                 break;
             }
         }
@@ -148,6 +166,48 @@ pub fn open_window(restore: Option<SavedWorkspace>, spec: TabSpec, cx: &mut App)
     }
 }
 
+pub fn update_ready(cx: &App) -> bool {
+    cx.global::<Shared>().update_ready
+}
+
+/// Notice when a build replaces the running executable.
+fn check_for_update(cx: &mut App) {
+    let shared = cx.global::<Shared>();
+    let Some((path, built)) = &shared.executable else { return };
+    if shared.update_ready {
+        return;
+    }
+    // Mid-rebuild the file can be missing for a moment; check again later.
+    if modified(path).is_some_and(|now| now != *built) {
+        cx.global_mut::<Shared>().update_ready = true;
+        cx.refresh_windows();
+    }
+}
+
+/// Quit and start the new build, which restores the tabs saved on the way out.
+pub fn restart(cx: &mut App) {
+    let Some((path, _)) = cx.global::<Shared>().executable.clone() else { return };
+    save(cx);
+    // Inside an app bundle, reopen the bundle; otherwise run the binary.
+    let bundle = path.ancestors().nth(3).filter(|dir| dir.extension().is_some_and(|ext| ext == "app"));
+    let target = bundle.unwrap_or(&path);
+    let relaunch = if bundle.is_some() { "exec open \"$2\"" } else { "exec \"$2\" >/dev/null 2>&1" };
+    // Wait for this process to exit first, so the new one is the instance
+    // that restores and saves tabs.
+    let script = format!("while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; {relaunch}");
+    let spawned = std::process::Command::new("/bin/sh")
+        .args(["-c", &script, "sh", &std::process::id().to_string()])
+        .arg(target)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    match spawned {
+        Ok(_) => cx.quit(),
+        Err(err) => log::error!("restarting: {err}"),
+    }
+}
+
 /// Open the Settings window, or bring it forward.
 pub fn open_settings(cx: &mut App) {
     let existing = cx.global::<Shared>().settings;
@@ -173,7 +233,7 @@ fn requested_pane(request: &Request) -> Option<Option<SessionId>> {
         | Request::Rename { tab, .. } => Some(*tab),
         Request::Focus { tab } | Request::Close { tab } => Some(Some(*tab)),
         Request::New { target, .. } => Some(*target),
-        Request::List | Request::Settings => None,
+        Request::List | Request::Settings | Request::Restart => None,
     }
 }
 
@@ -193,6 +253,11 @@ fn route(request: Request, reply: oneshot::Sender<Response>, cx: &mut App) {
     if let Request::Settings = request {
         open_settings(cx);
         let _ = reply.send(Response::Ok);
+        return;
+    }
+    if let Request::Restart = request {
+        let _ = reply.send(Response::Ok);
+        restart(cx);
         return;
     }
 

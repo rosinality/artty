@@ -23,7 +23,7 @@ use workspace::{
     SplitDown, SplitRight, TabSpec, ToggleZoom,
 };
 
-actions!(artty, [Quit, NewWindow, OpenSettings]);
+actions!(artty, [Quit, NewWindow, OpenSettings, RestartToUpdate]);
 
 const USAGE: &str = "usage: artty [-e command [args...]]\n       artty help    (commands for controlling a running artty)";
 
@@ -60,6 +60,7 @@ fn menus() -> Vec<Menu> {
             name: "artty".into(),
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
+                MenuItem::action("Restart to Update", RestartToUpdate),
                 MenuItem::separator(),
                 MenuItem::action("Quit artty", Quit),
             ],
@@ -131,6 +132,7 @@ fn main() {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &NewWindow, cx| app_state::new_window(cx));
         cx.on_action(|_: &OpenSettings, cx| app_state::open_settings(cx));
+        cx.on_action(|_: &RestartToUpdate, cx| app_state::restart(cx));
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
             KeyBinding::new("cmd-n", NewWindow, None),

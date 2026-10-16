@@ -17,8 +17,10 @@ Rust with [GPUI](https://gpui.rs).
 ## Build and run
 
 ```sh
-./scripts/bundle.sh                # build target/release/artty.app
-cp -R target/release/artty.app /Applications/
+./scripts/bundle.sh --install      # build target/release/artty.app and link
+                                   # /Applications/artty.app to it (once)
+./scripts/bundle.sh                # later builds update the installed app
+artty restart                      # switch to the new build; tabs reopen
 
 cargo run -p artty                 # or run from the tree
 cargo run -p artty -- -e htop      # run a command in the first tab
@@ -26,7 +28,10 @@ cargo test --workspace
 ```
 
 The app bundle gets the icon (`scripts/make-icon.py` redraws it) and native
-notifications. GPUI's Metal shaders compile at startup (`runtime_shaders`), so
+notifications. A rebuild replaces the bundle atomically, so a running artty is
+never modified underneath itself; it notices the new build and offers
+"Restart to update", which reopens your tabs and resumes agents (running
+programs in them do restart). GPUI's Metal shaders compile at startup (`runtime_shaders`), so
 the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 
 ## Keys

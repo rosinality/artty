@@ -13,7 +13,7 @@ use artty_core::control::{
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "hooks",
+    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "hooks",
     "shell-integration",
 ];
 
@@ -48,6 +48,8 @@ artty, your own pane is found automatically:
                                          --hook reads the agent's hook event
                                          from stdin (message and session id)
   artty settings                         open the Settings window
+  artty restart                          quit and reopen artty (e.g. to run a new
+                                         build); tabs and agents are restored
   artty shell-integration zsh|bash       print the shell integration script, to
                                          source from your startup file where
                                          artty can't set it up (e.g. over ssh)
@@ -136,6 +138,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
     let request = match command.as_str() {
         "list" => Request::List,
         "settings" => Request::Settings,
+        "restart" => Request::Restart,
         "read" => {
             let source = if switches.contains("screen") {
                 ReadSource::Screen

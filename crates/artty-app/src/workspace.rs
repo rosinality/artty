@@ -1067,7 +1067,7 @@ impl Workspace {
                 Response::Ok
             }
             Request::Run { .. } => unreachable!("handled in handle_request"),
-            Request::Settings => return Err("handled by the app".into()),
+            Request::Settings | Request::Restart => return Err("handled by the app".into()),
             Request::Notify { tab, title, body } => {
                 let id = self.resolve(tab)?;
                 if let Some(pane) = self.panes.get_mut(&id) {
@@ -1724,6 +1724,41 @@ impl Workspace {
                         .text_xs()
                         .text_color(rgba(0xf7768eff))
                         .child(format!("Config error — using previous settings. {error}")),
+                )
+            })
+            .when(app_state::update_ready(cx), |d| {
+                d.child(
+                    div()
+                        .mt_2()
+                        .mx_1()
+                        .p_2()
+                        .rounded(px(8.))
+                        .bg(rgba(0x3478f626))
+                        .border_1()
+                        .border_color(rgba(0x3478f666))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(div().text_color(rgba(0xffffffee)).child("New build ready"))
+                                .child(div().text_size(px(11.)).text_color(rgba(0xffffff80)).child("Tabs reopen after restart")),
+                        )
+                        .child(
+                            div()
+                                .id("restart")
+                                .px_2()
+                                .py(px(3.))
+                                .rounded(px(6.))
+                                .bg(rgba(0x3478f6ff))
+                                .hover(|d| d.bg(rgba(0x4a88ffff)))
+                                .text_color(rgba(0xffffffff))
+                                .child("Restart")
+                                .on_click(|_, _, cx| app_state::restart(cx)),
+                        ),
                 )
             })
     }
