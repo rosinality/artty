@@ -5,6 +5,7 @@
 //! a renderer-independent snapshot of the visible screen.
 
 mod config;
+pub mod config_file;
 pub mod control;
 mod frame;
 pub mod integration;

@@ -28,6 +28,7 @@ pub struct Shared {
     /// Save tabs for the next launch (off when another artty owns the state).
     save_enabled: bool,
     last_saved: Option<String>,
+    settings: Option<gpui::WindowHandle<crate::settings::Settings>>,
     _control: Option<ControlServer>,
 }
 
@@ -49,6 +50,7 @@ pub fn init(save_enabled: bool, cx: &mut App) {
         frontmost: None,
         save_enabled,
         last_saved: None,
+        settings: None,
         _control: control,
     });
 
@@ -75,7 +77,9 @@ pub fn init(save_enabled: bool, cx: &mut App) {
     })
     .detach();
     cx.on_window_closed(|cx| {
-        if cx.windows().is_empty() {
+        // The Settings window alone doesn't keep the app open.
+        let settings = cx.global::<Shared>().settings.map(|handle| handle.window_id());
+        if cx.windows().iter().all(|window| Some(window.window_id()) == settings) {
             cx.quit();
         }
     })
@@ -144,6 +148,13 @@ pub fn open_window(restore: Option<SavedWorkspace>, spec: TabSpec, cx: &mut App)
     }
 }
 
+/// Open the Settings window, or bring it forward.
+pub fn open_settings(cx: &mut App) {
+    let existing = cx.global::<Shared>().settings;
+    let handle = crate::settings::open(existing, cx);
+    cx.global_mut::<Shared>().settings = handle;
+}
+
 /// A new window starting in the frontmost window's directory.
 pub fn new_window(cx: &mut App) {
     let cwd = frontmost(cx).and_then(|w| w.read(cx).focused_cwd());
@@ -162,7 +173,7 @@ fn requested_pane(request: &Request) -> Option<Option<SessionId>> {
         | Request::Rename { tab, .. } => Some(*tab),
         Request::Focus { tab } | Request::Close { tab } => Some(Some(*tab)),
         Request::New { target, .. } => Some(*target),
-        Request::List => None,
+        Request::List | Request::Settings => None,
     }
 }
 
@@ -177,6 +188,11 @@ fn route(request: Request, reply: oneshot::Sender<Response>, cx: &mut App) {
             tabs.extend(window.read(cx).pane_infos(index + 1, is_front));
         }
         let _ = reply.send(Response::Tabs { tabs });
+        return;
+    }
+    if let Request::Settings = request {
+        open_settings(cx);
+        let _ = reply.send(Response::Ok);
         return;
     }
 

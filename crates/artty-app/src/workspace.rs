@@ -1067,6 +1067,7 @@ impl Workspace {
                 Response::Ok
             }
             Request::Run { .. } => unreachable!("handled in handle_request"),
+            Request::Settings => return Err("handled by the app".into()),
             Request::Notify { tab, title, body } => {
                 let id = self.resolve(tab)?;
                 if let Some(pane) = self.panes.get_mut(&id) {

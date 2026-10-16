@@ -1,0 +1,166 @@
+//! Editing the config file in place, keeping the user's comments and layout.
+//! Used by the Settings window; the app reloads the file when it changes.
+
+use std::io;
+use std::path::PathBuf;
+
+use toml_edit::{Array, DocumentMut, Item, Table, value};
+
+use crate::Config;
+
+pub struct ConfigFile {
+    path: PathBuf,
+    doc: DocumentMut,
+}
+
+impl ConfigFile {
+    /// The config file, or an empty one if it doesn't exist yet.
+    pub fn open() -> io::Result<Self> {
+        let path = Config::path().ok_or_else(|| io::Error::other("no config directory"))?;
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err),
+        };
+        Self::parse(path, &text)
+    }
+
+    fn parse(path: PathBuf, text: &str) -> io::Result<Self> {
+        let doc = text.parse::<DocumentMut>().map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(Self { path, doc })
+    }
+
+    pub fn set_bool(&mut self, key: &str, v: bool) {
+        self.doc[key] = value(v);
+    }
+
+    pub fn set_float(&mut self, key: &str, v: f64) {
+        // Two decimals are plenty for sizes and opacity; avoid 0.7000000001.
+        self.doc[key] = value((v * 100.).round() / 100.);
+    }
+
+    pub fn set_int(&mut self, key: &str, v: i64) {
+        self.doc[key] = value(v);
+    }
+
+    pub fn set_strings(&mut self, key: &str, v: &[String]) {
+        self.doc[key] = value(v.iter().collect::<Array>());
+    }
+
+    /// Use a theme's colors, or the built-in ones (`None`).
+    pub fn set_theme(&mut self, theme: Option<&ThemePreset>) {
+        let Some(theme) = theme else {
+            self.doc.remove("colors");
+            return;
+        };
+        let mut colors = Table::new();
+        colors["foreground"] = value(theme.foreground);
+        colors["background"] = value(theme.background);
+        colors["cursor"] = value(theme.cursor);
+        colors["selection"] = value(theme.selection);
+        colors["palette"] = value(theme.palette.iter().copied().collect::<Array>());
+        self.doc["colors"] = Item::Table(colors);
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let temp = self.path.with_extension("toml.tmp");
+        std::fs::write(&temp, self.doc.to_string())?;
+        std::fs::rename(temp, &self.path)
+    }
+}
+
+/// A built-in color theme.
+pub struct ThemePreset {
+    pub name: &'static str,
+    pub foreground: &'static str,
+    pub background: &'static str,
+    pub cursor: &'static str,
+    pub selection: &'static str,
+    pub palette: [&'static str; 16],
+}
+
+/// Dark themes (the window chrome is dark). "artty" is the built-in default.
+pub const THEMES: &[ThemePreset] = &[
+    ThemePreset {
+        name: "Tokyo Night",
+        foreground: "#c0caf5",
+        background: "#1a1b26",
+        cursor: "#c0caf5",
+        selection: "#33467c",
+        palette: [
+            "#15161e", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#a9b1d6",
+            "#414868", "#f7768e", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#c0caf5",
+        ],
+    },
+    ThemePreset {
+        name: "Nord",
+        foreground: "#d8dee9",
+        background: "#2e3440",
+        cursor: "#d8dee9",
+        selection: "#434c5e",
+        palette: [
+            "#3b4252", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#88c0d0", "#e5e9f0",
+            "#4c566a", "#bf616a", "#a3be8c", "#ebcb8b", "#81a1c1", "#b48ead", "#8fbcbb", "#eceff4",
+        ],
+    },
+    ThemePreset {
+        name: "Gruvbox",
+        foreground: "#ebdbb2",
+        background: "#282828",
+        cursor: "#ebdbb2",
+        selection: "#504945",
+        palette: [
+            "#282828", "#cc241d", "#98971a", "#d79921", "#458588", "#b16286", "#689d6a", "#a89984",
+            "#928374", "#fb4934", "#b8bb26", "#fabd2f", "#83a598", "#d3869b", "#8ec07c", "#ebdbb2",
+        ],
+    },
+    ThemePreset {
+        name: "Solarized",
+        foreground: "#93a1a1",
+        background: "#002b36",
+        cursor: "#93a1a1",
+        selection: "#073642",
+        palette: [
+            "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+            "#586e75", "#cb4b16", "#93a1a1", "#839496", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+        ],
+    },
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edits_keep_comments_and_parse() {
+        let text = "# my settings\nfont-size = 13 # small\n\n[colors]\nforeground = \"#ffffff\"\n";
+        let mut file = ConfigFile::parse(PathBuf::from("/x"), text).unwrap();
+        file.set_float("font-size", 14.000001);
+        file.set_bool("background-blur", false);
+        file.set_float("background-opacity", 0.7000000001);
+        let out = file.doc.to_string();
+        assert!(out.starts_with("# my settings\n"), "{out}");
+        assert!(out.contains("font-size = 14.0"), "{out}");
+        assert!(out.contains("background-opacity = 0.7\n"), "{out}");
+
+        let config = Config::parse(&out).unwrap();
+        assert_eq!(config.font_size, 14.);
+        assert!(!config.background_blur);
+        assert_eq!(config.colors.foreground.map(|c| c.r), Some(255));
+    }
+
+    #[test]
+    fn themes_round_trip() {
+        let mut file = ConfigFile::parse(PathBuf::from("/x"), "").unwrap();
+        for theme in THEMES {
+            file.set_theme(Some(theme));
+            let config = Config::parse(&file.doc.to_string()).unwrap_or_else(|e| panic!("{}: {e}", theme.name));
+            assert_eq!(config.colors.palette.len(), 16);
+        }
+        file.set_theme(None);
+        assert!(Config::parse(&file.doc.to_string()).unwrap().colors.foreground.is_none());
+    }
+}

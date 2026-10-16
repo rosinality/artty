@@ -59,6 +59,8 @@ pub fn live_sockets() -> Vec<PathBuf> {
 pub enum Request {
     /// All tabs.
     List,
+    /// Open the Settings window.
+    Settings,
     /// Text from a tab.
     Read { tab: Option<SessionId>, source: ReadSource },
     /// Type text into a tab.

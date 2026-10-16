@@ -118,6 +118,8 @@ mod native {
     pub fn locale() -> Option<(String, Option<String>)> {
         let locale = NSLocale::currentLocale();
         let language = locale.languageCode().to_string();
+        // `regionCode` replaces this on macOS 13+, but the app supports 12.
+        #[allow(deprecated)]
         let region = locale.countryCode().map(|code| code.to_string());
         Some((language, region))
     }

@@ -7,6 +7,7 @@ mod layout;
 mod mouse;
 mod notify;
 mod pane;
+mod settings;
 mod terminal;
 mod workspace;
 
@@ -21,7 +22,7 @@ use workspace::{
     SplitDown, SplitRight, TabSpec, ToggleZoom,
 };
 
-actions!(artty, [Quit, NewWindow]);
+actions!(artty, [Quit, NewWindow, OpenSettings]);
 
 const USAGE: &str = "usage: artty [-e command [args...]]\n       artty help    (commands for controlling a running artty)";
 
@@ -54,7 +55,14 @@ fn parse_args() -> Option<Vec<String>> {
 
 fn menus() -> Vec<Menu> {
     vec![
-        Menu { name: "artty".into(), items: vec![MenuItem::action("Quit artty", Quit)] },
+        Menu {
+            name: "artty".into(),
+            items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
+                MenuItem::action("Quit artty", Quit),
+            ],
+        },
         Menu {
             name: "Shell".into(),
             items: vec![
@@ -121,7 +129,12 @@ fn main() {
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &NewWindow, cx| app_state::new_window(cx));
-        cx.bind_keys([KeyBinding::new("cmd-q", Quit, None), KeyBinding::new("cmd-n", NewWindow, None)]);
+        cx.on_action(|_: &OpenSettings, cx| app_state::open_settings(cx));
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-n", NewWindow, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
+        ]);
         workspace::bind_keys(cx);
         cx.set_menus(menus());
         app_state::init(save_enabled, cx);

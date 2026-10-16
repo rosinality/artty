@@ -13,7 +13,8 @@ use artty_core::control::{
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "hooks", "shell-integration",
+    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "hooks",
+    "shell-integration",
 ];
 
 const HELP: &str = "\
@@ -46,6 +47,7 @@ artty, your own pane is found automatically:
                                          report an agent's state (for hooks);
                                          --hook reads a Claude Code hook event
                                          from stdin (message and session id)
+  artty settings                         open the Settings window
   artty shell-integration zsh|bash       print the shell integration script, to
                                          source from your startup file where
                                          artty can't set it up (e.g. over ssh)
@@ -130,6 +132,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
 
     let request = match command.as_str() {
         "list" => Request::List,
+        "settings" => Request::Settings,
         "read" => {
             let source = if switches.contains("screen") {
                 ReadSource::Screen
@@ -320,12 +323,17 @@ fn hooks(action: Option<&str>) -> Result<i32, String> {
             eprintln!("Add these to ~/.claude/settings.json, or run `artty hooks install`.");
             Ok(0)
         }
-        Some("install") => install_hooks(),
+        Some("install") => {
+            println!("{}", install_claude_hooks()?);
+            Ok(0)
+        }
         Some(other) => Err(format!("hooks: unknown action {other}")),
     }
 }
 
-fn install_hooks() -> Result<i32, String> {
+/// Add (or upgrade) artty's hooks in ~/.claude/settings.json, backing it up
+/// first. Returns what happened.
+pub fn install_claude_hooks() -> Result<String, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
     let path = PathBuf::from(home).join(".claude").join("settings.json");
     let mut settings: Value = match std::fs::read_to_string(&path) {
@@ -352,21 +360,21 @@ fn install_hooks() -> Result<i32, String> {
         changed += 1;
     }
     if changed == 0 {
-        println!("artty hooks are up to date in {}", path.display());
-        return Ok(0);
+        return Ok(format!("artty hooks are up to date in {}", path.display()));
     }
 
+    let mut report = String::new();
     if path.exists() {
         let backup = path.with_extension("json.artty-backup");
         std::fs::copy(&path, &backup).map_err(|err| format!("backup failed: {err}"))?;
-        println!("Backed up {} to {}", path.display(), backup.display());
+        report.push_str(&format!("Backed up {} to {}\n", path.display(), backup.display()));
     } else if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
     }
     let text = serde_json::to_string_pretty(&settings).map_err(|err| err.to_string())?;
     std::fs::write(&path, text + "\n").map_err(|err| format!("{}: {err}", path.display()))?;
-    println!("Updated artty hooks for {changed} events in {}", path.display());
-    Ok(0)
+    report.push_str(&format!("Updated artty hooks for {changed} events in {}", path.display()));
+    Ok(report)
 }
 
 #[cfg(test)]
