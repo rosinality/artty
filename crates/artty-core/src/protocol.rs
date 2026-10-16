@@ -19,7 +19,7 @@ use crate::vt::ansi::Rgb;
 use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes; app and server must agree.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Identifies a build: the package version and when the executable was
 /// built (rebuilds don't change the version). The server runs from a copy
@@ -84,6 +84,13 @@ pub enum ClientMessage {
     RenameWorkspace { workspace: WorkspaceId, name: Option<String> },
     /// Close every tab in it.
     CloseWorkspace { workspace: WorkspaceId },
+    /// Fold a workspace's section in the sidebar.
+    SetCollapsed { workspace: WorkspaceId, collapsed: bool },
+    /// Move a workspace to index `to` among `window`'s (possibly another
+    /// window's).
+    MoveWorkspace { workspace: WorkspaceId, window: WindowId, to: usize },
+    /// Move a tab into a new workspace right after its own.
+    TabToNewWorkspace { workspace: WorkspaceId, tab: usize },
     ToggleZoom { window: WindowId },
     SetRatio { window: WindowId, path: Vec<bool>, ratio: f32 },
 
@@ -146,6 +153,8 @@ pub struct WorkspaceLayout {
     pub tabs: Vec<TabLayout>,
     /// The tab shown when this workspace is the window's active one.
     pub active: usize,
+    /// Its section is folded in the sidebar.
+    pub collapsed: bool,
 }
 
 /// A window's workspaces; the active workspace's active tab fills it.
@@ -370,7 +379,8 @@ mod tests {
         };
         let state = PaneState { info, icon: String::new(), progress: None, agent: None };
         let tab = TabLayout { title: None, root: Node::Pane(3), focused: 3, zoomed: false };
-        let layout = WindowLayout { workspaces: vec![WorkspaceLayout { id: 2, name: None, tabs: vec![tab], active: 0 }], active: 0 };
+        let workspace = WorkspaceLayout { id: 2, name: None, tabs: vec![tab], active: 0, collapsed: true };
+        let layout = WindowLayout { workspaces: vec![workspace], active: 0 };
         let mut buffer = Vec::new();
         write_message(&mut buffer, &ServerMessage::Panes { panes: vec![state.clone()] }).unwrap();
         write_message(&mut buffer, &ServerMessage::Layout { window: 1, layout: layout.clone() }).unwrap();

@@ -55,7 +55,7 @@ impl SavedWindowState {
     fn upgraded(mut self) -> Self {
         if !self.tabs.is_empty() {
             let tabs = std::mem::take(&mut self.tabs);
-            self.workspaces.insert(0, SavedWorkspace { name: None, active: self.active, tabs });
+            self.workspaces.insert(0, SavedWorkspace { name: None, active: self.active, tabs, collapsed: false });
             self.active = 0;
         }
         self.workspaces.retain(|workspace| !workspace.tabs.is_empty());
@@ -74,6 +74,7 @@ pub struct SavedWorkspace {
     pub name: Option<String>,
     pub active: usize,
     pub tabs: Vec<SavedTab>,
+    pub collapsed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -168,7 +169,7 @@ impl SavedState {
     pub fn into_windows(self) -> Vec<SavedWindowState> {
         let mut windows = self.windows;
         if !self.tabs.is_empty() {
-            let workspace = SavedWorkspace { name: None, active: self.active, tabs: self.tabs };
+            let workspace = SavedWorkspace { name: None, active: self.active, tabs: self.tabs, collapsed: false };
             windows.insert(0, SavedWindowState::new(self.window, 0, vec![workspace]));
         }
         let mut windows: Vec<_> = windows.into_iter().map(SavedWindowState::upgraded).collect();
@@ -398,7 +399,7 @@ mod tests {
             focused: 1,
             zoomed: false,
         };
-        let workspace = SavedWorkspace { name: Some("artty".into()), active: 0, tabs: vec![tab] };
+        let workspace = SavedWorkspace { name: Some("artty".into()), active: 0, tabs: vec![tab], collapsed: true };
         let window = SavedWindowState::new(None, 1, vec![workspace.clone(), workspace]);
         let state = SavedState::new(vec![window.clone(), window]);
         let json = serde_json::to_string(&state).unwrap();

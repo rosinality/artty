@@ -38,6 +38,9 @@ actions!(
         RenameTab,
         MoveTabUp,
         MoveTabDown,
+        NewWorkspace,
+        NextWorkspace,
+        PreviousWorkspace,
         SplitRight,
         SplitDown,
         FocusLeft,
@@ -88,18 +91,40 @@ enum MenuCommand {
     RenameTab,
     ClearBuffer,
     ClosePane,
+    CloseTab,
+    TabToNewWorkspace,
+    NewTabInWorkspace,
+    RenameWorkspace,
+    ToggleCollapsed,
+    CloseWorkspace,
+}
+
+/// What was right-clicked.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MenuTarget {
+    Pane(PaneId),
+    /// A tab in the sidebar, as an index into `tabs`.
+    Tab(usize),
+    Workspace(WorkspaceId),
 }
 
 struct ContextMenu {
     position: Point<Pixels>,
-    pane: PaneId,
+    target: MenuTarget,
     link: Option<String>,
     has_selection: bool,
 }
 
-/// A tab title being edited in the sidebar.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RenameTarget {
+    /// An index into `tabs`.
+    Tab(usize),
+    Workspace(WorkspaceId),
+}
+
+/// A tab title or workspace name being edited in the sidebar.
 struct Renaming {
-    tab: usize,
+    target: RenameTarget,
     text: String,
 }
 
@@ -110,20 +135,38 @@ struct DraggedTab {
     title: SharedString,
 }
 
+/// A workspace section being dragged by its header.
+#[derive(Clone)]
+struct DraggedWorkspace {
+    workspace: WorkspaceId,
+    title: SharedString,
+}
+
+impl Render for DraggedWorkspace {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        drag_preview(self.title.clone())
+    }
+}
+
 impl Render for DraggedTab {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .px_3()
-            .py_1()
-            .rounded(px(7.))
-            .bg(rgba(0x2a3140f0))
-            .border_1()
-            .border_color(rgba(0xffffff30))
-            .text_size(px(12.5))
-            .text_color(rgba(0xffffffee))
-            .font_family(".SystemUIFont")
-            .child(self.title.clone())
+        drag_preview(self.title.clone())
     }
+}
+
+/// What follows the pointer while dragging in the sidebar.
+fn drag_preview(title: SharedString) -> gpui::Div {
+    div()
+        .px_3()
+        .py_1()
+        .rounded(px(7.))
+        .bg(rgba(0x2a3140f0))
+        .border_1()
+        .border_color(rgba(0xffffff30))
+        .text_size(px(12.5))
+        .text_color(rgba(0xffffffee))
+        .font_family(".SystemUIFont")
+        .child(title)
 }
 
 struct Search {
@@ -194,6 +237,8 @@ pub struct WindowView {
     hover_cell: Option<(PaneId, usize, usize)>,
     context_menu: Option<ContextMenu>,
     renaming: Option<Renaming>,
+    /// Asked for a new workspace: name it when it shows up.
+    naming_new_workspace: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -278,6 +323,7 @@ impl WindowView {
             hover_cell: None,
             context_menu: None,
             renaming: None,
+            naming_new_workspace: false,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -307,7 +353,13 @@ impl WindowView {
             self.places = layout.tabs().map(|(workspace, index, _)| (workspace, index)).collect();
             let before: usize = layout.workspaces.iter().take(layout.active).map(|w| w.tabs.len()).sum();
             self.active = before + layout.active_workspace().map_or(0, |w| w.active);
+            let new = layout.workspaces.iter().map(|w| w.id).find(|id| !self.layout.workspaces.iter().any(|w| w.id == *id));
+            let first = self.layout.workspaces.is_empty();
             self.layout = layout;
+            if let Some(id) = new.filter(|_| self.naming_new_workspace && !first) {
+                self.naming_new_workspace = false;
+                self.start_workspace_rename(id, cx);
+            }
             cx.notify();
         }
     }
@@ -393,9 +445,61 @@ impl WindowView {
     }
 
     fn open_tab(&self, cx: &App) {
+        self.open_tab_in(None, cx);
+    }
+
+    /// A new tab at the end of `workspace`, or of the active one.
+    fn open_tab_in(&self, workspace: Option<WorkspaceId>, cx: &App) {
         if let Some(window) = self.window {
-            self.send(ClientMessage::NewTab { window, workspace: None, spec: PaneSpec::default() }, cx);
+            self.send(ClientMessage::NewTab { window, workspace, spec: PaneSpec::default() }, cx);
         }
+    }
+
+    /// A new workspace, named as soon as it appears.
+    fn new_workspace(&mut self, cx: &mut Context<Self>) {
+        if let Some(window) = self.window {
+            self.naming_new_workspace = true;
+            self.send(ClientMessage::NewWorkspace { window, name: None, spec: PaneSpec::default() }, cx);
+        }
+    }
+
+    /// Show the workspace `offset` sections away (wrapping), at its active tab.
+    fn cycle_workspace(&mut self, offset: isize, cx: &mut Context<Self>) {
+        let count = self.layout.workspaces.len() as isize;
+        if count < 2 {
+            return;
+        }
+        let target = (self.layout.active as isize + offset).rem_euclid(count) as usize;
+        let workspace = &self.layout.workspaces[target];
+        if let Some(index) = self.places.iter().position(|&p| p == (workspace.id, workspace.active)) {
+            self.select(index, cx);
+        }
+    }
+
+    fn toggle_collapsed(&self, workspace: WorkspaceId, cx: &App) {
+        if let Some(state) = self.layout.workspaces.iter().find(|w| w.id == workspace) {
+            self.send(ClientMessage::SetCollapsed { workspace, collapsed: !state.collapsed }, cx);
+        }
+    }
+
+    /// A workspace's name: what the user called it, or its position.
+    fn workspace_title(&self, position: usize) -> SharedString {
+        let workspace = &self.layout.workspaces[position];
+        workspace.name.clone().unwrap_or_else(|| format!("Workspace {}", position + 1)).into()
+    }
+
+    /// Whether the sidebar shows workspace sections: not for one unnamed
+    /// workspace, which looks like a plain list of tabs.
+    fn sections(&self) -> bool {
+        self.layout.workspaces.len() > 1 || self.layout.workspaces.iter().any(|w| w.name.is_some())
+    }
+
+    fn open_sidebar_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.renaming.is_some() {
+            self.finish_rename(true, cx);
+        }
+        self.context_menu = Some(ContextMenu { position, target, link: None, has_selection: false });
+        cx.notify();
     }
 
     fn split(&self, pane: Option<PaneId>, axis: Axis, cx: &App) {
@@ -455,17 +559,32 @@ impl WindowView {
         let text = self.tab_title(tab, cx).to_string();
         self.close_search(cx);
         self.marked_text = None;
-        self.renaming = Some(Renaming { tab: index, text });
+        self.renaming = Some(Renaming { target: RenameTarget::Tab(index), text });
+        cx.notify();
+    }
+
+    fn start_workspace_rename(&mut self, workspace: WorkspaceId, cx: &mut Context<Self>) {
+        let Some(position) = self.layout.workspaces.iter().position(|w| w.id == workspace) else { return };
+        let text = self.layout.workspaces[position].name.clone().unwrap_or_default();
+        self.close_search(cx);
+        self.marked_text = None;
+        self.renaming = Some(Renaming { target: RenameTarget::Workspace(workspace), text });
         cx.notify();
     }
 
     fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
-        if let Some(Renaming { tab, text }) = self.renaming.take()
+        if let Some(Renaming { target, text }) = self.renaming.take()
             && commit
-            && let Some(&(workspace, tab)) = self.places.get(tab)
         {
-            let title = Some(text.trim().to_owned()).filter(|t| !t.is_empty());
-            self.send(ClientMessage::RenameTab { workspace, tab, title }, cx);
+            let name = Some(text.trim().to_owned()).filter(|t| !t.is_empty());
+            match target {
+                RenameTarget::Tab(index) => {
+                    if let Some(&(workspace, tab)) = self.places.get(index) {
+                        self.send(ClientMessage::RenameTab { workspace, tab, title: name }, cx);
+                    }
+                }
+                RenameTarget::Workspace(workspace) => self.send(ClientMessage::RenameWorkspace { workspace, name }, cx),
+            }
         }
         self.marked_text = None;
         cx.notify();
@@ -498,7 +617,7 @@ impl WindowView {
             };
             let has_selection = matches!(selection.await, Ok(Reply::Text(Some(_))));
             let _ = this.update(cx, |this, cx| {
-                this.context_menu = Some(ContextMenu { position, pane, link, has_selection });
+                this.context_menu = Some(ContextMenu { position, target: MenuTarget::Pane(pane), link, has_selection });
                 cx.notify();
             });
         })
@@ -507,7 +626,32 @@ impl WindowView {
 
     fn run_menu_command(&mut self, command: MenuCommand, window: &mut Window, cx: &mut Context<Self>) {
         let Some(menu) = self.context_menu.take() else { return };
-        let pane = menu.pane;
+        let place = |index: usize| self.places.get(index).copied();
+        match menu.target {
+            MenuTarget::Tab(index) => {
+                match (command, place(index)) {
+                    (MenuCommand::RenameTab, _) => self.start_rename(index, cx),
+                    (MenuCommand::CloseTab, Some((workspace, tab))) => self.send(ClientMessage::CloseTab { workspace, tab }, cx),
+                    (MenuCommand::TabToNewWorkspace, Some((workspace, tab))) => {
+                        self.send(ClientMessage::TabToNewWorkspace { workspace, tab }, cx)
+                    }
+                    _ => {}
+                }
+                return cx.notify();
+            }
+            MenuTarget::Workspace(workspace) => {
+                match command {
+                    MenuCommand::NewTabInWorkspace => self.open_tab_in(Some(workspace), cx),
+                    MenuCommand::RenameWorkspace => self.start_workspace_rename(workspace, cx),
+                    MenuCommand::ToggleCollapsed => self.toggle_collapsed(workspace, cx),
+                    MenuCommand::CloseWorkspace => self.send(ClientMessage::CloseWorkspace { workspace }, cx),
+                    _ => {}
+                }
+                return cx.notify();
+            }
+            MenuTarget::Pane(_) => {}
+        }
+        let MenuTarget::Pane(pane) = menu.target else { return };
         match command {
             MenuCommand::Copy => self.copy(&Copy, window, cx),
             MenuCommand::Paste => self.paste(&Paste, window, cx),
@@ -530,6 +674,7 @@ impl WindowView {
             }
             MenuCommand::ClearBuffer => self.send(ClientMessage::ClearBuffer { pane }, cx),
             MenuCommand::ClosePane => self.send(ClientMessage::ClosePane { pane }, cx),
+            _ => {}
         }
         cx.notify();
     }
@@ -1024,7 +1169,7 @@ impl WindowView {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(match self.renaming.as_ref().filter(|r| r.tab == index) {
+                    .child(match self.renaming.as_ref().filter(|r| r.target == RenameTarget::Tab(index)) {
                         Some(renaming) => {
                             let marked = self.marked_text.as_deref().unwrap_or_default();
                             div()
@@ -1105,6 +1250,13 @@ impl WindowView {
                     this.select(index, cx);
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.open_sidebar_menu(MenuTarget::Tab(index), event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .on_drag(DraggedTab { index, title: self.tab_title(tab, cx) }, |dragged, _, _, cx| {
                 cx.new(|_| dragged.clone())
             })
@@ -1112,6 +1264,118 @@ impl WindowView {
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.move_tab(dragged.index, index, cx)))
             .child(header)
             .children(pane_rows.into_iter().flatten())
+    }
+
+    /// A section header: fold arrow, name, what its tabs are doing, and a
+    /// button for a new tab there.
+    fn workspace_header(&self, position: usize, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let workspace = &self.layout.workspaces[position];
+        let id = workspace.id;
+        let active = position == self.layout.active;
+        let title = self.workspace_title(position);
+        let states: Vec<&PaneState> =
+            workspace.tabs.iter().flat_map(|t| t.root.panes()).filter_map(|pane| self.pane_state(pane, cx)).collect();
+        // The most urgent state, and how many panes share it.
+        let top = states.iter().copied().max_by_key(|s| Self::urgency(Some(s))).filter(|s| Self::urgency(Some(s)) > 0);
+        let count = top.map_or(0, |top| states.iter().filter(|s| s.icon == top.icon).count());
+        let attention = states.iter().any(|s| s.info.needs_attention);
+        let renaming = self.renaming.as_ref().filter(|r| r.target == RenameTarget::Workspace(id));
+        let name = match renaming {
+            Some(renaming) => {
+                let marked = self.marked_text.as_deref().unwrap_or_default();
+                div()
+                    .flex_1()
+                    .px_1()
+                    .rounded(px(4.))
+                    .bg(rgba(0x0000004d))
+                    .border_1()
+                    .border_color(rgba(0x8fb4ff99))
+                    .text_color(rgba(0xffffffee))
+                    .child(format!("{}{marked}▏", renaming.text))
+            }
+            None => Self::one_line(title.clone())
+                .flex_1()
+                .min_w_0()
+                .text_color(if active { rgba(0xffffffd8) } else { rgba(0xffffff90) })
+                .when(attention, |d| d.text_color(rgba(0xe0af68ff))),
+        };
+        let tabs = workspace.tabs.len();
+        div()
+            .id(("workspace", id as usize))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .mt(px(if position == 0 { 0. } else { 8. }))
+            .h(px(24.))
+            .px(px(4.))
+            .rounded(px(6.))
+            .text_size(px(11.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .hover(|d| d.bg(rgba(0xffffff0a)))
+            .child(
+                div()
+                    .w(px(12.))
+                    .flex_none()
+                    .text_size(px(9.))
+                    .text_color(rgba(0xffffff70))
+                    .child(if workspace.collapsed { "▶" } else { "▼" }),
+            )
+            .child(name)
+            // Folded, it says how many tabs it holds.
+            .when(workspace.collapsed && renaming.is_none(), |d| {
+                d.child(div().flex_none().text_size(px(11.)).text_color(rgba(0xffffff60)).child(tabs.to_string()))
+            })
+            .when_some(top, |d, top| {
+                d.child(self.icon_cell(Some(top))).when(count > 1, |d| {
+                    d.child(div().flex_none().text_size(px(10.5)).text_color(rgba(0xffffff90)).child(count.to_string()))
+                })
+            })
+            .child(
+                div()
+                    .id(("workspace-new-tab", id as usize))
+                    .flex_none()
+                    .px_1()
+                    .rounded(px(4.))
+                    .text_size(px(13.))
+                    .text_color(rgba(0xffffff70))
+                    .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffd0)))
+                    .child("+")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_tab_in(Some(id), cx);
+                        cx.stop_propagation();
+                    })),
+            )
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                if event.click_count() >= 2 {
+                    this.start_workspace_rename(id, cx);
+                } else {
+                    this.toggle_collapsed(id, cx);
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.open_sidebar_menu(MenuTarget::Workspace(id), event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .on_drag(DraggedWorkspace { workspace: id, title }, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
+            .drag_over::<DraggedWorkspace>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
+            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedWorkspace, _, cx| {
+                if let Some(window) = this.window
+                    && dragged.workspace != id
+                {
+                    this.send(ClientMessage::MoveWorkspace { workspace: dragged.workspace, window, to: position }, cx);
+                }
+            }))
+            // A tab dropped on a header goes to the start of that workspace.
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                if let Some(&(workspace, from)) = this.places.get(dragged.index) {
+                    this.renaming = None;
+                    this.send(ClientMessage::MoveTab { workspace, from, to_workspace: id, to: 0 }, cx);
+                }
+            }))
     }
 
     fn banner(id: &'static str, title: &'static str, hint: &'static str, button: &'static str, action: fn(&mut App)) -> gpui::Div {
@@ -1150,27 +1414,20 @@ impl WindowView {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // With several workspaces, each starts a section.
-        let sections = self.layout.workspaces.len() > 1;
+        // Workspaces are sections; a folded one still shows the tab on screen.
+        let sections = self.sections();
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
-        for (i, tab) in self.tabs.iter().enumerate() {
-            let (workspace, index) = self.places[i];
-            if sections && index == 0 {
-                let position = self.layout.workspaces.iter().position(|w| w.id == workspace).unwrap_or(0);
-                let name = self.layout.workspaces[position].name.clone().unwrap_or_else(|| format!("Workspace {}", position + 1));
-                rows.push(
-                    div()
-                        .px_2()
-                        .pt(px(if position == 0 { 0. } else { 8. }))
-                        .pb(px(2.))
-                        .text_size(px(10.5))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgba(0xffffff70))
-                        .child(Self::one_line(name))
-                        .into_any_element(),
-                );
+        let mut index = 0;
+        for (position, workspace) in self.layout.workspaces.iter().enumerate() {
+            if sections {
+                rows.push(self.workspace_header(position, cx).into_any_element());
             }
-            rows.push(self.tab_row(i, tab, cx).into_any_element());
+            for tab in &workspace.tabs {
+                if !(sections && workspace.collapsed) || index == self.active {
+                    rows.push(self.tab_row(index, tab, cx).into_any_element());
+                }
+                index += 1;
+            }
         }
         let mismatch = cx.global::<Shared>().server_mismatch.is_some();
         div()
@@ -1196,7 +1453,7 @@ impl WindowView {
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgba(0xffffff70))
-                    .child("TABS")
+                    .child(if self.sections() { "WORKSPACES" } else { "TABS" })
                     .child(
                         div()
                             .id("new-tab")
@@ -1241,23 +1498,48 @@ impl WindowView {
         let item = |label: &'static str, keys: &'static str, enabled: bool, command: MenuCommand| {
             Some((label, keys, enabled, command))
         };
-        let mut items = vec![
-            item("Copy", "⌘C", menu.has_selection, MenuCommand::Copy),
-            item("Paste", "⌘V", true, MenuCommand::Paste),
-            None,
-        ];
-        if menu.link.is_some() {
-            items.extend([item("Open Link", "", true, MenuCommand::OpenLink), item("Copy Link", "", true, MenuCommand::CopyLink), None]);
-        }
-        items.extend([
-            item("Split Right", "⌘D", true, MenuCommand::SplitRight),
-            item("Split Down", "⇧⌘D", true, MenuCommand::SplitDown),
-            None,
-            item("Rename Tab…", "", true, MenuCommand::RenameTab),
-            item("Clear Buffer", "", true, MenuCommand::ClearBuffer),
-            None,
-            item("Close Pane", "⌘W", true, MenuCommand::ClosePane),
-        ]);
+        let items = match menu.target {
+            MenuTarget::Pane(_) => {
+                let mut items = vec![
+                    item("Copy", "⌘C", menu.has_selection, MenuCommand::Copy),
+                    item("Paste", "⌘V", true, MenuCommand::Paste),
+                    None,
+                ];
+                if menu.link.is_some() {
+                    items.extend([item("Open Link", "", true, MenuCommand::OpenLink), item("Copy Link", "", true, MenuCommand::CopyLink), None]);
+                }
+                items.extend([
+                    item("Split Right", "⌘D", true, MenuCommand::SplitRight),
+                    item("Split Down", "⇧⌘D", true, MenuCommand::SplitDown),
+                    None,
+                    item("Rename Tab…", "", true, MenuCommand::RenameTab),
+                    item("Clear Buffer", "", true, MenuCommand::ClearBuffer),
+                    None,
+                    item("Close Pane", "⌘W", true, MenuCommand::ClosePane),
+                ]);
+                items
+            }
+            MenuTarget::Tab(index) => {
+                // A workspace's only tab is a workspace already.
+                let alone = self.places.get(index).and_then(|&(w, _)| self.layout.workspaces.iter().find(|ws| ws.id == w)).is_some_and(|w| w.tabs.len() < 2);
+                vec![
+                    item("Rename Tab…", "", true, MenuCommand::RenameTab),
+                    item("Move to New Workspace", "", !alone, MenuCommand::TabToNewWorkspace),
+                    None,
+                    item("Close Tab", "⇧⌘W", true, MenuCommand::CloseTab),
+                ]
+            }
+            MenuTarget::Workspace(workspace) => {
+                let collapsed = self.layout.workspaces.iter().find(|w| w.id == workspace).is_some_and(|w| w.collapsed);
+                vec![
+                    item("New Tab Here", "", true, MenuCommand::NewTabInWorkspace),
+                    item("Rename Workspace…", "", true, MenuCommand::RenameWorkspace),
+                    item(if collapsed { "Expand" } else { "Collapse" }, "", true, MenuCommand::ToggleCollapsed),
+                    None,
+                    item("Close Workspace", "", true, MenuCommand::CloseWorkspace),
+                ]
+            }
+        };
 
         // Keep the menu on screen.
         let height = 10. + items.iter().map(|i| if i.is_some() { ITEM } else { SEPARATOR }).sum::<f32>();
@@ -1544,6 +1826,9 @@ impl Render for WindowView {
             .key_context("WindowView")
             .on_key_down(cx.listener(Self::key_down))
             .on_action(cx.listener(|this, _: &NewTab, _, cx| this.open_tab(cx)))
+            .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
+            .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.cycle_workspace(1, cx)))
+            .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.cycle_workspace(-1, cx)))
             .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
                 if let Some(pane) = this.focused_id() {
                     this.send(ClientMessage::ClosePane { pane }, cx);
@@ -1784,6 +2069,9 @@ pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
     cx.bind_keys([
         KeyBinding::new("cmd-t", NewTab, None),
+        KeyBinding::new("cmd-shift-n", NewWorkspace, None),
+        KeyBinding::new("ctrl-cmd-]", NextWorkspace, None),
+        KeyBinding::new("ctrl-cmd-[", PreviousWorkspace, None),
         KeyBinding::new("cmd-w", ClosePane, None),
         KeyBinding::new("cmd-shift-w", CloseTab, None),
         KeyBinding::new("cmd-shift-]", NextTab, None),

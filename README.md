@@ -54,8 +54,11 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘⇧↩ | Zoom the pane to fill the tab, and back |
 | Drag a divider | Resize panes |
 | ⌘1…⌘9, ⌘⇧[ / ⌘⇧] | Switch tabs |
-| Double-click / drag a tab | Rename it / reorder it |
-| Right-click (or ⌃-click) | Copy, paste, links, split, rename, clear, close |
+| Double-click / drag a tab | Rename it / reorder it (also into another workspace) |
+| ⌘⇧N | New workspace (name it, then Enter) |
+| ⌃⌘[ / ⌃⌘] | Previous / next workspace |
+| Click / double-click / drag a workspace header | Fold it / rename it / reorder workspaces |
+| Right-click (or ⌃-click) | In a pane: copy, paste, links, split, rename, clear, close. On a tab or workspace in the sidebar: rename, move to a new workspace, fold, close |
 | ⌘J | Jump to the next tab that needs attention |
 | ⌘C / ⌘V | Copy selection / paste |
 | ⌘F, ⌘G / ⌘⇧G | Find (regex, all matches highlighted); next older / newer |
@@ -108,7 +111,9 @@ hooks from older versions.
 
 The `artty server` process owns every terminal session; app windows attach
 to it. A window's tabs are grouped into workspaces — named sections of the
-sidebar, say one per project — which the server keeps as units of their own. The app starts the server when needed, and the server exits once its
+sidebar, say one per project — which the server keeps as units of their own.
+A section header shows what its tabs are doing (a waiting agent, a busy
+command), even folded; a lone unnamed workspace is just a list of tabs. The app starts the server when needed, and the server exits once its
 last session ends.
 
 - Closing a window detaches it: its tabs keep running, and

@@ -16,8 +16,8 @@ use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 use window_view::{
     ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
     FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, MoveTabDown, MoveTabUp,
-    NewTab, NextPane, NextTab, Paste, PreviousPane, PreviousTab, RenameTab, ResetFontSize,
-    SplitDown, SplitRight, ToggleZoom,
+    NewTab, NewWorkspace, NextPane, NextTab, NextWorkspace, Paste, PreviousPane, PreviousTab,
+    PreviousWorkspace, RenameTab, ResetFontSize, SplitDown, SplitRight, ToggleZoom,
 };
 
 actions!(artty, [Quit, QuitAndEndSessions, NewWindow, ReopenClosedWindows, OpenSettings, RestartToUpdate, RestartServer]);
@@ -70,6 +70,7 @@ fn menus() -> Vec<Menu> {
                 MenuItem::action("New Window", NewWindow),
                 MenuItem::action("Reopen Closed Windows", ReopenClosedWindows),
                 MenuItem::action("New Tab", NewTab),
+                MenuItem::action("New Workspace", NewWorkspace),
                 MenuItem::action("Split Right", SplitRight),
                 MenuItem::action("Split Down", SplitDown),
                 MenuItem::separator(),
@@ -101,6 +102,8 @@ fn menus() -> Vec<Menu> {
             items: vec![
                 MenuItem::action("Show Next Tab", NextTab),
                 MenuItem::action("Show Previous Tab", PreviousTab),
+                MenuItem::action("Show Next Workspace", NextWorkspace),
+                MenuItem::action("Show Previous Workspace", PreviousWorkspace),
                 MenuItem::action("Jump to Tab Needing Attention", JumpToAttention),
                 MenuItem::separator(),
                 MenuItem::action("Rename Tab…", RenameTab),

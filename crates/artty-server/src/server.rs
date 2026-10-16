@@ -63,12 +63,13 @@ struct Workspace {
     name: Option<String>,
     tabs: Vec<Tab>,
     active: usize,
+    collapsed: bool,
 }
 
 impl Workspace {
     fn new(name: Option<String>, tabs: Vec<Tab>, active: usize) -> Self {
         let active = active.min(tabs.len().saturating_sub(1));
-        Self { name: name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()), tabs, active }
+        Self { name: name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()), tabs, active, collapsed: false }
     }
 
     fn active_tab(&self) -> Option<&Tab> {
@@ -85,6 +86,7 @@ impl Workspace {
                 .map(|tab| TabLayout { title: tab.title.clone(), root: tab.root.clone(), focused: tab.focused, zoomed: tab.zoomed })
                 .collect(),
             active: self.active,
+            collapsed: self.collapsed,
         }
     }
 }
@@ -257,7 +259,9 @@ impl Server {
                     tabs.push(Tab { title: tab.title, root, focused, zoomed: tab.zoomed && panes.len() > 1 });
                 }
                 if !tabs.is_empty() {
-                    workspaces.push(Workspace::new(workspace.name, tabs, workspace.active));
+                    let mut restored = Workspace::new(workspace.name, tabs, workspace.active);
+                    restored.collapsed = workspace.collapsed;
+                    workspaces.push(restored);
                 }
             }
             if !workspaces.is_empty() {
@@ -610,6 +614,59 @@ impl Server {
         self.report_focus_change(before);
     }
 
+    /// Move a workspace to index `to` among `window`'s, closing the window it
+    /// leaves if that was its last.
+    fn move_workspace(&mut self, workspace: WorkspaceId, window: WindowId, to: usize) {
+        if !self.workspaces.contains_key(&workspace) || !self.windows.contains_key(&window) {
+            return;
+        }
+        let before = self.focused_pane();
+        let source = self.window_of_workspace(workspace);
+        if let Some((from_window, index)) = source {
+            if from_window == window {
+                let state = self.windows.get_mut(&window).unwrap();
+                let active = state.active_workspace();
+                state.workspaces.remove(index);
+                state.workspaces.insert(to.min(state.workspaces.len()), workspace);
+                state.active = state.workspaces.iter().position(|&w| Some(w) == active).unwrap_or(0);
+                return;
+            }
+            // Out of its window, as if closed there, but keep it running.
+            let state = self.windows.get_mut(&from_window).unwrap();
+            state.workspaces.remove(index);
+            if state.workspaces.is_empty() {
+                let client = state.client;
+                self.windows.remove(&from_window);
+                if let Some(client) = client {
+                    self.send(client, ServerMessage::WindowClosed { window: from_window });
+                }
+            } else if index < state.active || state.active >= state.workspaces.len() {
+                state.active = state.active.saturating_sub(1);
+            }
+        }
+        let state = self.windows.get_mut(&window).unwrap();
+        let to = to.min(state.workspaces.len());
+        state.workspaces.insert(to, workspace);
+        state.active = to;
+        self.report_focus_change(before);
+    }
+
+    /// Move a tab into a new, unnamed workspace right after its own. A
+    /// workspace's only tab stays put: that would change nothing.
+    fn tab_to_new_workspace(&mut self, workspace: WorkspaceId, tab: usize) {
+        let Some((window, index)) = self.window_of_workspace(workspace) else { return };
+        if self.workspaces.get(&workspace).is_none_or(|w| w.tabs.len() < 2 || tab >= w.tabs.len()) {
+            return;
+        }
+        let before = self.focused_pane();
+        let Some(moved) = self.take_tab(workspace, tab) else { return };
+        let new = self.add_workspace(Workspace::new(None, vec![moved], 0));
+        let state = self.windows.get_mut(&window).unwrap();
+        state.workspaces.insert(index + 1, new);
+        state.active = index + 1;
+        self.report_focus_change(before);
+    }
+
     /// The workspace named `name`, preferring the frontmost window's.
     fn workspace_named(&self, name: &str) -> Option<WorkspaceId> {
         let named = |id: &WorkspaceId| self.workspaces.get(id).is_some_and(|w| w.name.as_deref() == Some(name));
@@ -840,6 +897,13 @@ impl Server {
                 }
             }
             ClientMessage::CloseWorkspace { workspace } => self.close_workspace(workspace),
+            ClientMessage::SetCollapsed { workspace, collapsed } => {
+                if let Some(state) = self.workspaces.get_mut(&workspace) {
+                    state.collapsed = collapsed;
+                }
+            }
+            ClientMessage::MoveWorkspace { workspace, window, to } => self.move_workspace(workspace, window, to),
+            ClientMessage::TabToNewWorkspace { workspace, tab } => self.tab_to_new_workspace(workspace, tab),
             ClientMessage::Split { pane, axis, spec } => {
                 if let Err(err) = self.split(pane, axis, spec, true) {
                     log::error!("{err}");
@@ -1435,6 +1499,7 @@ impl Server {
         let saved_workspace = |workspace: &Workspace| SavedWorkspace {
             name: workspace.name.clone(),
             active: workspace.active,
+            collapsed: workspace.collapsed,
             tabs: workspace
                 .tabs
                 .iter()
