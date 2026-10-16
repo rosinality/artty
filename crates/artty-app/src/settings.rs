@@ -4,7 +4,7 @@
 use artty_core::{Config, CursorStyle};
 use artty_core::config_file::{ConfigFile, THEMES, ThemePreset};
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, ElementId, FontWeight, Hsla, SharedString,
+    AnyElement, App, AppContext, Bounds, Context, ElementId, FocusHandle, FontWeight, Hsla, SharedString,
     TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, point, prelude::*,
     px, rgba, size,
 };
@@ -12,7 +12,8 @@ use gpui::{
 use crate::hooks::{self, Status};
 use crate::terminal::hsla;
 
-/// A number setting edited with `−` and `+`.
+/// A number setting edited with `−` and `+`, or typed in.
+#[derive(Clone, Copy)]
 struct Number {
     key: &'static str,
     value: f64,
@@ -21,6 +22,21 @@ struct Number {
     max: f64,
     format: fn(f64) -> String,
     integer: bool,
+    /// Typed values are shown values: 85 for 85% is 0.85 times 100.
+    scale: f64,
+}
+
+/// A number being typed into a stepper.
+struct Editing {
+    key: &'static str,
+    text: String,
+    /// Just opened: the first keystroke replaces the text, as when selected.
+    fresh: bool,
+    step: f64,
+    min: f64,
+    max: f64,
+    integer: bool,
+    scale: f64,
 }
 
 /// Font families offered in the picker: installed families whose names look
@@ -36,6 +52,8 @@ pub struct Settings {
     fonts: Vec<String>,
     font_menu: bool,
     status: Option<String>,
+    editing: Option<Editing>,
+    focus: FocusHandle,
 }
 
 /// Open the Settings window, or bring the open one forward.
@@ -58,13 +76,13 @@ pub fn open(existing: Option<WindowHandle<Settings>>, cx: &mut App) -> Option<Wi
         is_minimizable: false,
         ..Default::default()
     };
-    cx.open_window(options, |window, cx| cx.new(|_| Settings::new(window)))
+    cx.open_window(options, |window, cx| cx.new(|cx| Settings::new(window, cx)))
         .inspect_err(|err| log::error!("opening settings: {err}"))
         .ok()
 }
 
 impl Settings {
-    fn new(window: &Window) -> Self {
+    fn new(window: &Window, cx: &mut Context<Self>) -> Self {
         let (config, error) = Config::load();
         let mut fonts: Vec<String> = window
             .text_system()
@@ -76,7 +94,7 @@ impl Settings {
         fonts.extend(config.font_family.iter().cloned());
         fonts.sort_by_key(|name| name.to_lowercase());
         fonts.dedup();
-        Self { config, error, fonts, font_menu: false, status: None }
+        Self { config, error, fonts, font_menu: false, status: None, editing: None, focus: cx.focus_handle() }
     }
 
     /// Change the config file, then reload it.
@@ -118,9 +136,102 @@ impl Settings {
             .into_any_element()
     }
 
-    /// `−  value  +` for a number setting.
+    /// Start typing a number in place of its stepper's value.
+    fn start_editing(&mut self, number: &Number, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_editing(cx);
+        // Shown units, without float noise: 85, 1.2, 14.
+        let shown = (number.value * number.scale * 1000.).round() / 1000.;
+        self.editing = Some(Editing {
+            key: number.key,
+            text: shown.to_string(),
+            fresh: true,
+            step: number.step,
+            min: number.min,
+            max: number.max,
+            integer: number.integer,
+            scale: number.scale,
+        });
+        window.focus(&self.focus);
+        cx.notify();
+    }
+
+    /// Save the typed number (clamped to its range), if any.
+    fn commit_editing(&mut self, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.take() else { return };
+        let Ok(typed) = editing.text.trim().parse::<f64>() else {
+            self.status = Some(format!("“{}” isn't a number", editing.text.trim()));
+            return cx.notify();
+        };
+        let value = (typed / editing.scale).clamp(editing.min, editing.max);
+        let key = editing.key;
+        self.edit(cx, |file| {
+            if editing.integer { file.set_int(key, value.round() as i64) } else { file.set_float(key, value) }
+        });
+    }
+
+    fn key_down(&mut self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.as_mut() else { return };
+        let keystroke = &event.keystroke;
+        match keystroke.key.as_str() {
+            "enter" | "tab" => return self.commit_editing(cx),
+            "escape" => self.editing = None,
+            "backspace" => {
+                if editing.fresh {
+                    editing.text.clear();
+                } else {
+                    editing.text.pop();
+                }
+                editing.fresh = false;
+            }
+            "up" | "down" => {
+                // Step from what's typed, staying in range.
+                let shown = editing.text.trim().parse::<f64>().unwrap_or(0.);
+                let delta = editing.step * editing.scale * if keystroke.key == "up" { 1. } else { -1. };
+                let next = (shown + delta).clamp(editing.min * editing.scale, editing.max * editing.scale);
+                editing.text = ((next * 1000.).round() / 1000.).to_string();
+                editing.fresh = false;
+            }
+            _ => match keystroke.key_char.as_deref() {
+                Some(c) if !keystroke.modifiers.platform && c.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-') => {
+                    if editing.fresh {
+                        editing.text.clear();
+                        editing.fresh = false;
+                    }
+                    editing.text.push_str(c);
+                }
+                _ => return,
+            },
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// `−  value  +` for a number setting; click the value to type one.
     fn stepper(&self, number: Number, cx: &mut Context<Self>) -> AnyElement {
-        let Number { key, value, step, min, max, format, integer } = number;
+        let Number { key, value, step, min, max, format, integer, .. } = number;
+        let editing = self.editing.as_ref().filter(|e| e.key == key);
+        let field = div()
+            .id(ElementId::Name(format!("{key}-value").into()))
+            .min_w(px(64.))
+            .h(px(22.))
+            .px(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(5.))
+            .text_color(rgba(0xffffffee))
+            .map(|d| match editing {
+                Some(editing) => d.bg(rgba(0x0000004d)).border_1().border_color(rgba(0x8fb4ffcc)).child(if editing.fresh {
+                    div().px(px(1.)).rounded(px(2.)).bg(rgba(0x3478f6ff)).child(editing.text.clone())
+                } else {
+                    div().child(format!("{}▏", editing.text))
+                }),
+                None => d
+                    .cursor_text()
+                    .hover(|d| d.bg(rgba(0xffffff12)))
+                    .child(format(value))
+                    .on_click(cx.listener(move |this, _, window, cx| this.start_editing(&number, window, cx))),
+            });
         let button = |label: &'static str, next: f64, cx: &mut Context<Self>| {
             let next = next.clamp(min, max);
             let enabled = (next - value).abs() > f64::EPSILON;
@@ -135,6 +246,7 @@ impl Settings {
                 .text_color(if enabled { rgba(0xffffffdd) } else { rgba(0xffffff40) })
                 .when(enabled, |d| {
                     d.hover(|d| d.bg(rgba(0xffffff1a))).on_click(cx.listener(move |this, _, _, cx| {
+                        this.editing = None;
                         this.edit(cx, |file| {
                             if integer { file.set_int(key, next.round() as i64) } else { file.set_float(key, next) }
                         })
@@ -150,7 +262,7 @@ impl Settings {
             .rounded(px(8.))
             .bg(rgba(0xffffff12))
             .child(button("−", value - step, cx))
-            .child(div().min_w(px(64.)).flex().justify_center().text_color(rgba(0xffffffee)).child(format(value)))
+            .child(field)
             .child(button("+", value + step, cx))
             .into_any_element()
     }
@@ -448,6 +560,7 @@ impl Render for Settings {
                             max: 32.,
                             format: |v| format!("{v:.0} pt"),
                             integer: false,
+                            scale: 1.,
                         },
                         cx,
                     ),
@@ -464,6 +577,7 @@ impl Render for Settings {
                             max: 2.,
                             format: |v| format!("{v:.2}×"),
                             integer: false,
+                            scale: 1.,
                         },
                         cx,
                     ),
@@ -480,6 +594,7 @@ impl Render for Settings {
                             max: 1.,
                             format: |v| format!("{:.0}%", v * 100.),
                             integer: false,
+                            scale: 100.,
                         },
                         cx,
                     ),
@@ -517,6 +632,7 @@ impl Render for Settings {
                             max: 10_000.,
                             format: |v| format!("{v:.0} lines"),
                             integer: true,
+                            scale: 1.,
                         },
                         cx,
                     ),
@@ -552,6 +668,10 @@ impl Render for Settings {
 
         div()
             .id("settings")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::key_down))
+            // Clicking elsewhere saves a number being typed.
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| this.commit_editing(cx)))
             .size_full()
             .bg(tint)
             .font_family(".SystemUIFont")
