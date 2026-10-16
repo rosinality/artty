@@ -12,8 +12,9 @@ use crate::{ProcessInfo, SavedAgent, SavedPane, Session, ShellPhase};
 pub enum Status {
     /// At the shell prompt.
     Idle,
-    /// A command (not an agent) is running.
-    Running { command: Option<String>, since: Instant },
+    /// A command (not an agent) is running. `interactive`: one you use
+    /// rather than wait for (an editor, ssh, a full-screen program).
+    Running { command: Option<String>, since: Instant, interactive: bool },
     /// A coding agent is running.
     Agent { name: String, state: AgentState },
     /// The last command failed.
@@ -45,9 +46,10 @@ impl Status {
         }
     }
 
-    /// Whether the sidebar should animate a spinner.
+    /// Whether the sidebar should animate a spinner: something is at work
+    /// that you'd wait for.
     pub fn busy(&self) -> bool {
-        matches!(self, Status::Running { .. } | Status::Agent { state: AgentState::Working, .. })
+        matches!(self, Status::Running { interactive: false, .. } | Status::Agent { state: AgentState::Working, .. })
     }
 }
 
@@ -62,6 +64,9 @@ pub struct Pane {
     /// Something happened that the user hasn't seen: the bell, a notification,
     /// an agent waiting, a background command finishing.
     pub attention: bool,
+    /// The user has seen the pane since its agent finished, so the sidebar
+    /// stops marking it done.
+    pub done_seen: bool,
     /// Last notification or agent message.
     pub message: Option<String>,
     pub progress: Option<Progress>,
@@ -113,6 +118,7 @@ impl Pane {
             process: ProcessInfo::default(),
             status: Status::Idle,
             attention: false,
+            done_seen: false,
             message: None,
             progress: None,
             flash: None,
@@ -215,7 +221,23 @@ impl Pane {
             return;
         };
 
-        let state = if let Some(reported) = self.reported {
+        let state = self.agent_state();
+        if state != AgentState::Done {
+            self.done_seen = false;
+        }
+        self.status = Status::Agent { name: agent, state };
+    }
+
+    /// The user is looking at the pane.
+    pub fn seen(&mut self) {
+        self.attention = false;
+        if matches!(self.status, Status::Agent { state: AgentState::Done, .. }) {
+            self.done_seen = true;
+        }
+    }
+
+    fn agent_state(&self) -> AgentState {
+        if let Some(reported) = self.reported {
             reported
         } else {
             let now = Instant::now();
@@ -227,14 +249,13 @@ impl Pane {
                 Status::Agent { state, .. } => *state,
                 _ => AgentState::Idle,
             }
-        };
-        self.status = Status::Agent { name: agent, state };
+        }
     }
 
     fn shell_status(&self) -> Status {
         if let Some((command, since)) = &self.running {
             let command = command.clone().or_else(|| self.foreground_command());
-            return Status::Running { command, since: *since };
+            return Status::Running { command, since: *since, interactive: self.interactive() };
         }
         // Without shell integration, a foreground process other than the
         // shell means something is running.
@@ -243,12 +264,24 @@ impl Pane {
                 Status::Running { since, .. } => *since,
                 _ => Instant::now(),
             };
-            return Status::Running { command: self.foreground_command(), since };
+            return Status::Running { command: self.foreground_command(), since, interactive: self.interactive() };
         }
         match self.last_exit {
             Some(exit) if exit != 0 => Status::Failed { exit },
             _ => Status::Idle,
         }
+    }
+
+    /// Whether what's running is used rather than waited for: a full-screen
+    /// program (mosh, vim, htop), or one of the usual interactive ones.
+    fn interactive(&self) -> bool {
+        const INTERACTIVE: &[&str] = &[
+            "ssh", "mosh", "mosh-client", "et", "tmux", "screen", "zellij", "vim", "nvim", "vi", "emacs", "nano", "hx",
+            "helix", "kak", "micro", "less", "more", "man", "htop", "btop", "top", "python", "python3", "node", "irb",
+            "ghci", "psql", "mysql", "sqlite3", "redis-cli",
+        ];
+        self.session.mode().contains(artty_vt::term::TermMode::ALT_SCREEN)
+            || self.process.foreground.as_deref().is_some_and(|name| INTERACTIVE.contains(&name))
     }
 
     fn foreground_command(&self) -> Option<String> {
@@ -270,7 +303,7 @@ impl Pane {
                     _ => format!("{name} · {what}"),
                 })
             }
-            Status::Running { command, since } => {
+            Status::Running { command, since, .. } => {
                 let elapsed = since.elapsed().as_secs();
                 let time = if elapsed >= 60 { format!("{}m{}s", elapsed / 60, elapsed % 60) } else { format!("{elapsed}s") };
                 Some(format!("{} · {time}", command.as_deref().unwrap_or("running")))
@@ -332,5 +365,20 @@ impl Pane {
             shell_integration: self.session.shell_integration(),
             kitty_keyboard: self.session.mode().intersects(artty_vt::term::TermMode::KITTY_KEYBOARD_PROTOCOL),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interactive_programs_dont_spin() {
+        let running = |interactive| Status::Running { command: Some("x".into()), since: Instant::now(), interactive };
+        assert!(running(false).busy());
+        assert!(!running(true).busy());
+        // Still reported as running, just not something to wait for.
+        assert_eq!(running(true).label(), "running");
+        assert!(Status::Agent { name: "claude".into(), state: AgentState::Working }.busy());
     }
 }

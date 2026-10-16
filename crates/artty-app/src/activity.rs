@@ -538,7 +538,14 @@ impl WindowView {
                             .child(Self::arrow(folded))
                             .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(group, cx))),
                     )
-                    .child(self.icon(status_icon(&pane.status)))
+                    // The sidebar's icon when there is one (it knows, say, that
+                    // mosh isn't something to wait for); else from the status.
+                    .child(self.icon(
+                        &cx.global::<Shared>()
+                            .panes
+                            .get(&pane.id)
+                            .map_or_else(|| status_icon(&pane.status).to_owned(), |state| state.icon.clone()),
+                    ))
                     .child(
                         div()
                             .id(("activity-jump", pane.id as usize))

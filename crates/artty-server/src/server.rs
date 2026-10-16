@@ -1760,7 +1760,7 @@ impl Server {
         let seen: Vec<PaneId> = self.seen_windows().flat_map(|w| self.window_visible(w)).collect();
         for pane in seen {
             if let Some(pane) = self.panes.get_mut(&pane) {
-                pane.attention = false;
+                pane.seen();
             }
         }
     }
@@ -1769,7 +1769,8 @@ impl Server {
         let icon = match &pane.status {
             status if status.busy() => "busy",
             Status::Agent { state: AgentState::Waiting, .. } => "waiting",
-            Status::Agent { state: AgentState::Done, .. } => "done",
+            // Marked until the user has looked.
+            Status::Agent { state: AgentState::Done, .. } if !pane.done_seen => "done",
             Status::Failed { .. } => "failed",
             _ if pane.attention => "attention",
             _ => "",
