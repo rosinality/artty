@@ -16,6 +16,11 @@ pub fn to_esc(keystroke: &Keystroke, mode: TermMode, option_as_meta: bool) -> Op
     if m.platform {
         return None;
     }
+    if mode.intersects(TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC)
+        && let Some(bytes) = kitty(keystroke, mode, option_as_meta)
+    {
+        return Some(bytes);
+    }
     // xterm modifier parameter: 1 + shift + 2·alt + 4·ctrl.
     let param = 1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.control as u8;
     let app_cursor = mode.contains(TermMode::APP_CURSOR);
@@ -80,6 +85,48 @@ pub fn to_esc(keystroke: &Keystroke, mode: TermMode, option_as_meta: bool) -> Op
     Some(bytes)
 }
 
+/// The kitty keyboard protocol's `CSI code ; modifiers u` form, for keys the
+/// legacy encoding can't tell apart (Shift+Enter, Ctrl+I vs Tab, Escape).
+/// `None` means the legacy encoding is still right for this key.
+///
+/// <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
+fn kitty(keystroke: &Keystroke, mode: TermMode, option_as_meta: bool) -> Option<Vec<u8>> {
+    let m = &keystroke.modifiers;
+    let all_keys = mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
+    // Without Option as Meta, Option types characters (å) and isn't a modifier.
+    let alt = m.alt && option_as_meta;
+    let modifiers = 1 + m.shift as u8 + 2 * alt as u8 + 4 * m.control as u8;
+    let csi_u = |code: u32| -> Vec<u8> {
+        if modifiers == 1 { format!("\x1b[{code}u") } else { format!("\x1b[{code};{modifiers}u") }.into_bytes()
+    };
+
+    let key = keystroke.key.as_str();
+    let code = match key {
+        "escape" => return Some(csi_u(27)),
+        "enter" => 13,
+        "tab" => 9,
+        "backspace" => 127,
+        "space" => 32,
+        _ => {
+            let mut chars = key.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else { return None };
+            // Report the unshifted key; Shift is in the modifiers.
+            c.to_lowercase().next()? as u32
+        }
+    };
+    let text_key = !matches!(key, "enter" | "tab" | "backspace");
+    // Unmodified keys keep their legacy bytes, and Shift+letter stays text,
+    // unless the program asked for every key as an escape code.
+    let only_shift = !m.control && !alt;
+    if !all_keys && (modifiers == 1 || (text_key && only_shift)) {
+        return None;
+    }
+    if m.alt && !option_as_meta && text_key && !m.control {
+        return None;
+    }
+    Some(csi_u(code))
+}
+
 fn control_byte(key: &str) -> Option<u8> {
     let &[c] = key.as_bytes() else { return None };
     match c {
@@ -134,6 +181,39 @@ mod tests {
         assert_eq!(to_esc(&alt_b, TermMode::empty(), false), None);
         let alt_left = Keystroke::parse("alt-left").unwrap();
         assert_eq!(to_esc(&alt_left, TermMode::empty(), false).unwrap(), b"\x1b[1;3D");
+    }
+
+    fn kitty(key: &str, mode: TermMode) -> Option<Vec<u8>> {
+        to_esc(&Keystroke::parse(key).unwrap(), mode, true)
+    }
+
+    #[test]
+    fn kitty_disambiguates() {
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        assert_eq!(kitty("shift-enter", mode).unwrap(), b"\x1b[13;2u");
+        assert_eq!(kitty("enter", mode).unwrap(), b"\r");
+        assert_eq!(kitty("escape", mode).unwrap(), b"\x1b[27u");
+        assert_eq!(kitty("ctrl-i", mode).unwrap(), b"\x1b[105;5u");
+        assert_eq!(kitty("tab", mode).unwrap(), b"\t");
+        assert_eq!(kitty("ctrl-shift-a", mode).unwrap(), b"\x1b[97;6u");
+        assert_eq!(kitty("alt-b", mode).unwrap(), b"\x1b[98;3u");
+        assert_eq!(kitty("up", mode).unwrap(), b"\x1b[A");
+        // Plain and shifted text still goes through the input system.
+        assert_eq!(kitty("a", mode), None);
+        assert_eq!(kitty("shift-a", mode), None);
+    }
+
+    #[test]
+    fn kitty_all_keys() {
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES | TermMode::REPORT_ALL_KEYS_AS_ESC;
+        assert_eq!(kitty("a", mode).unwrap(), b"\x1b[97u");
+        assert_eq!(kitty("shift-a", mode).unwrap(), b"\x1b[97;2u");
+        assert_eq!(kitty("enter", mode).unwrap(), b"\x1b[13u");
+    }
+
+    #[test]
+    fn shift_enter_without_kitty_is_enter() {
+        assert_eq!(esc("shift-enter").unwrap(), b"\r");
     }
 
     #[test]

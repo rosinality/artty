@@ -163,6 +163,9 @@ pub struct TabInfo {
     pub detail: Option<String>,
     pub needs_attention: bool,
     pub shell_integration: bool,
+    /// The program turned on the kitty keyboard protocol.
+    #[serde(default)]
+    pub kitty_keyboard: bool,
 }
 
 #[cfg(test)]

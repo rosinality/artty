@@ -311,6 +311,7 @@ impl Pane {
             detail: self.detail(),
             needs_attention: self.attention,
             shell_integration: self.session.shell_integration(),
+            kitty_keyboard: self.session.mode().intersects(artty_core::vt::term::TermMode::KITTY_KEYBOARD_PROTOCOL),
         }
     }
 }

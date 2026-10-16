@@ -144,6 +144,8 @@ impl Session {
         let proxy = EventProxy { id, pty: Arc::new(OnceLock::new()), sink };
 
         let mut config = Config::default();
+        // Programs can opt into the kitty keyboard protocol (Shift+Enter etc.).
+        config.kitty_keyboard = true;
         if let Some(scrollback) = options.scrollback {
             config.scrolling_history = scrollback;
         }
