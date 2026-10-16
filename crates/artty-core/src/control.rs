@@ -76,6 +76,8 @@ pub enum Request {
         target: Option<SessionId>,
     },
     Focus { tab: SessionId },
+    /// Name the tab holding pane `tab`; an empty title goes back to automatic.
+    Rename { tab: Option<SessionId>, title: String },
     Close { tab: SessionId },
     /// Run a command in a tab's shell and wait for it to finish. Needs shell
     /// integration in that shell.

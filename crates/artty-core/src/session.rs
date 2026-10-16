@@ -144,9 +144,8 @@ impl Session {
     ) -> io::Result<Self> {
         let proxy = EventProxy { id, pty: Arc::new(OnceLock::new()), sink };
 
-        let mut config = Config::default();
         // Programs can opt into the kitty keyboard protocol (Shift+Enter etc.).
-        config.kitty_keyboard = true;
+        let mut config = Config { kitty_keyboard: true, ..Config::default() };
         if let Some(scrollback) = options.scrollback {
             config.scrolling_history = scrollback;
         }
@@ -350,6 +349,14 @@ impl Session {
         term.selection = Some(selection);
         term.scroll_to_point(start);
         Ok(true)
+    }
+
+    /// Drop the scrollback and ask the program to redraw (Clear Buffer).
+    pub fn clear_buffer(&self) {
+        use artty_vt::ansi::{ClearMode, Handler};
+        self.term.lock().clear_screen(ClearMode::Saved);
+        // Ctrl-L: shells clear the screen and redraw their prompt.
+        self.write(&b"\x0c"[..]);
     }
 
     pub fn end_search(&mut self) {

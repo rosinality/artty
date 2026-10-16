@@ -12,8 +12,9 @@ use artty_core::control::{
 };
 use serde_json::{Value, json};
 
-pub const COMMANDS: &[&str] =
-    &["list", "read", "send", "new", "run", "notify", "status", "focus", "close", "hooks", "shell-integration"];
+pub const COMMANDS: &[&str] = &[
+    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "hooks", "shell-integration",
+];
 
 const HELP: &str = "\
 artty — a terminal for working with AI agents
@@ -38,6 +39,8 @@ artty, your own pane is found automatically:
                                          your own, or the focused one); prints
                                          the new pane's id
   artty focus N | artty close N
+  artty rename [--tab N] TITLE           name the tab holding pane N (empty
+                                         title: back to automatic)
   artty notify [--tab N] [--title T] BODY
   artty status [--tab N] working|waiting|done|idle [--message M | --hook]
                                          report an agent's state (for hooks);
@@ -174,6 +177,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             let id = rest.first().and_then(|id| id.parse().ok()).or(tab).ok_or(format!("{command}: which tab?"))?;
             if command == "focus" { Request::Focus { tab: id } } else { Request::Close { tab: id } }
         }
+        "rename" => Request::Rename { tab: tab.or_else(own_tab), title: rest.join(" ") },
         "notify" => {
             if rest.is_empty() {
                 return Err("notify: missing message".into());

@@ -37,6 +37,8 @@ pub struct SavedWindow {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(from = "TabRepr")]
 pub struct SavedTab {
+    /// Name given by the user, if any.
+    pub title: Option<String>,
     pub layout: SavedLayout,
     /// The focused pane, as an index into the layout's panes in reading order.
     pub focused: usize,
@@ -63,6 +65,8 @@ enum TabRepr {
     Split {
         layout: SavedLayout,
         #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
         focused: usize,
         #[serde(default)]
         zoomed: bool,
@@ -73,8 +77,8 @@ enum TabRepr {
 impl From<TabRepr> for SavedTab {
     fn from(repr: TabRepr) -> Self {
         match repr {
-            TabRepr::Split { layout, focused, zoomed } => Self { layout, focused, zoomed },
-            TabRepr::Single(pane) => Self { layout: SavedLayout::Pane(pane), focused: 0, zoomed: false },
+            TabRepr::Split { layout, title, focused, zoomed } => Self { title, layout, focused, zoomed },
+            TabRepr::Single(pane) => Self { title: None, layout: SavedLayout::Pane(pane), focused: 0, zoomed: false },
         }
     }
 }
@@ -319,6 +323,7 @@ mod tests {
             ..pane("/tmp")
         };
         let tab = SavedTab {
+            title: Some("work".into()),
             layout: SavedLayout::Split {
                 vertical: false,
                 ratio: 0.6,

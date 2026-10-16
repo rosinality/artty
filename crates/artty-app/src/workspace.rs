@@ -44,6 +44,9 @@ actions!(
         ClosePane,
         NextTab,
         PreviousTab,
+        RenameTab,
+        MoveTabUp,
+        MoveTabDown,
         SplitRight,
         SplitDown,
         FocusLeft,
@@ -107,10 +110,62 @@ pub struct TabSpec {
 }
 
 struct Tab {
+    /// Name given by the user; otherwise the focused pane's title.
+    title: Option<String>,
     root: Node,
     focused: PaneId,
     /// Show only the focused pane.
     zoomed: bool,
+}
+
+/// Right-click menu commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuCommand {
+    Copy,
+    Paste,
+    OpenLink,
+    CopyLink,
+    SplitRight,
+    SplitDown,
+    RenameTab,
+    ClearBuffer,
+    ClosePane,
+}
+
+struct ContextMenu {
+    position: Point<Pixels>,
+    pane: PaneId,
+    link: Option<String>,
+    has_selection: bool,
+}
+
+/// A tab title being edited in the sidebar.
+struct Renaming {
+    tab: usize,
+    text: String,
+}
+
+/// A tab being dragged in the sidebar; also its drag preview.
+#[derive(Clone)]
+struct DraggedTab {
+    index: usize,
+    title: SharedString,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded(px(7.))
+            .bg(rgba(0x2a3140f0))
+            .border_1()
+            .border_color(rgba(0xffffff30))
+            .text_size(px(12.5))
+            .text_color(rgba(0xffffffee))
+            .font_family(".SystemUIFont")
+            .child(self.title.clone())
+    }
 }
 
 impl Tab {
@@ -187,6 +242,8 @@ pub struct Workspace {
     mouse_position: Option<Point<Pixels>>,
     /// The link under the pointer while ⌘ is held: pane, line, columns.
     hover_link: Option<(PaneId, usize, Range<usize>)>,
+    context_menu: Option<ContextMenu>,
+    renaming: Option<Renaming>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -341,6 +398,8 @@ impl Workspace {
             scroll_remainder: 0.,
             mouse_position: None,
             hover_link: None,
+            context_menu: None,
+            renaming: None,
             _tasks: vec![events, requests, blink, poll, spinner],
             _subscriptions: vec![activation, quit],
         };
@@ -364,7 +423,8 @@ impl Workspace {
             let Some(root) = self.restore_layout(saved.layout) else { continue };
             let panes = root.panes();
             let focused = panes[saved.focused.min(panes.len() - 1)];
-            self.tabs.push(Tab { root, focused, zoomed: saved.zoomed && panes.len() > 1 });
+            let zoomed = saved.zoomed && panes.len() > 1;
+            self.tabs.push(Tab { title: saved.title, root, focused, zoomed });
         }
         if self.tabs.is_empty() {
             let _ = self.open_tab(TabSpec::default(), true, cx);
@@ -423,6 +483,7 @@ impl Workspace {
             .tabs
             .iter()
             .map(|tab| SavedTab {
+                title: tab.title.clone(),
                 layout: self.saved_layout(&tab.root),
                 focused: tab.root.panes().iter().position(|&id| id == tab.focused).unwrap_or(0),
                 zoomed: tab.zoomed,
@@ -546,7 +607,7 @@ impl Workspace {
     /// Open a tab with one pane as described by `spec`.
     fn open_tab(&mut self, spec: TabSpec, focus: bool, cx: &mut Context<Self>) -> Result<PaneId, String> {
         let id = self.spawn_pane(spec)?;
-        self.tabs.push(Tab { root: Node::Pane(id), focused: id, zoomed: false });
+        self.tabs.push(Tab { title: None, root: Node::Pane(id), focused: id, zoomed: false });
         if focus {
             self.select(self.tabs.len() - 1, cx);
         }
@@ -721,6 +782,115 @@ impl Workspace {
         for run in self.runs.extract_if(.., |run| run.pane == id) {
             let _ = run.reply.send(Response::error(message));
         }
+    }
+
+    /// A tab's name: what the user called it, or its focused pane's title.
+    fn tab_title(&self, tab: &Tab) -> SharedString {
+        match &tab.title {
+            Some(title) => title.clone().into(),
+            None => self.panes.get(&tab.focused).map(Pane::title).unwrap_or_default(),
+        }
+    }
+
+    fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let active = self.focused_id();
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        // The active tab stays active wherever it moved.
+        if let Some(index) = active.and_then(|id| self.tab_of(id)) {
+            self.active = index;
+        }
+        self.renaming = None;
+        cx.notify();
+    }
+
+    fn start_rename(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(index) else { return };
+        let text = self.tab_title(tab).to_string();
+        self.close_search();
+        self.marked_text = None;
+        self.renaming = Some(Renaming { tab: index, text });
+        cx.notify();
+    }
+
+    fn finish_rename(&mut self, commit: bool, cx: &mut Context<Self>) {
+        if let Some(Renaming { tab, text }) = self.renaming.take()
+            && commit
+            && let Some(tab) = self.tabs.get_mut(tab)
+        {
+            let text = text.trim();
+            tab.title = (!text.is_empty()).then(|| text.to_owned());
+        }
+        self.marked_text = None;
+        cx.notify();
+    }
+
+    fn rename_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => self.finish_rename(false, cx),
+            "enter" => self.finish_rename(true, cx),
+            "backspace" => {
+                if let Some(renaming) = self.renaming.as_mut() {
+                    renaming.text.pop();
+                }
+                cx.notify();
+            }
+            // Text arrives through the input handler.
+            _ => return,
+        }
+        cx.stop_propagation();
+    }
+
+    fn open_context_menu(&mut self, id: PaneId, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(pane) = self.panes.get(&id) else { return };
+        let (line, column, _) = self.cell_at(id, position);
+        self.context_menu = Some(ContextMenu {
+            position,
+            pane: id,
+            link: pane.session.link_at(line, column),
+            has_selection: pane.session.selection_text().is_some(),
+        });
+        cx.notify();
+    }
+
+    fn run_menu_command(&mut self, command: MenuCommand, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.context_menu.take() else { return };
+        let id = menu.pane;
+        match command {
+            MenuCommand::Copy => self.copy(&Copy, window, cx),
+            MenuCommand::Paste => self.paste(&Paste, window, cx),
+            MenuCommand::OpenLink => {
+                if let Some(link) = &menu.link {
+                    let _ = std::process::Command::new("open").arg(link).spawn();
+                }
+            }
+            MenuCommand::CopyLink => {
+                if let Some(link) = menu.link {
+                    cx.write_to_clipboard(ClipboardItem::new_string(link));
+                }
+            }
+            MenuCommand::SplitRight | MenuCommand::SplitDown => {
+                let axis = if command == MenuCommand::SplitRight { Axis::Horizontal } else { Axis::Vertical };
+                if let Err(err) = self.split(TabSpec::default(), Some(id), axis, true, cx) {
+                    log::error!("{err}");
+                }
+            }
+            MenuCommand::RenameTab => {
+                if let Some(index) = self.tab_of(id) {
+                    self.start_rename(index, cx);
+                }
+            }
+            MenuCommand::ClearBuffer => {
+                if let Some(pane) = self.panes.get(&id) {
+                    pane.session.clear_buffer();
+                }
+            }
+            MenuCommand::ClosePane => self.close_pane(id, cx),
+        }
+        cx.notify();
     }
 
     // Events from sessions.
@@ -912,6 +1082,13 @@ impl Workspace {
                 self.focus_pane(id, cx);
                 Response::Ok
             }
+            Request::Rename { tab, title } => {
+                let id = self.resolve(tab)?;
+                let index = self.tab_of(id).ok_or("the pane closed")?;
+                let title = title.trim();
+                self.tabs[index].title = (!title.is_empty()).then(|| title.to_owned());
+                Response::Ok
+            }
             Request::Close { tab } => {
                 let id = self.resolve(Some(tab))?;
                 self.close_pane(id, cx);
@@ -1080,6 +1257,17 @@ impl Workspace {
             }
             return;
         }
+        if self.context_menu.take().is_some() {
+            cx.notify();
+            if keystroke.key == "escape" {
+                cx.stop_propagation();
+                return;
+            }
+        }
+        if self.renaming.is_some() {
+            self.rename_key(event, cx);
+            return;
+        }
         if self.search.is_some() {
             self.search_key(event, cx);
             return;
@@ -1184,6 +1372,9 @@ impl Workspace {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window);
+        if self.renaming.is_some() {
+            self.finish_rename(true, cx);
+        }
         let Some((id, _)) = self.pane_at(event.position) else { return };
         if self.focused_id() != Some(id) {
             self.focus_pane(id, cx);
@@ -1196,6 +1387,12 @@ impl Workspace {
             if let Some(link) = session.link_at(line, column) {
                 let _ = std::process::Command::new("open").arg(&link).spawn();
             }
+            return;
+        }
+        let menu_click = event.button == MouseButton::Right
+            || (event.button == MouseButton::Left && event.modifiers.control);
+        if menu_click && (self.mouse_reporting(id, &event.modifiers).is_none() || event.modifiers.control) {
+            self.open_context_menu(id, event.position, cx);
             return;
         }
         if self.mouse_reporting(id, &event.modifiers).is_some() {
@@ -1422,11 +1619,22 @@ impl Workspace {
                     .min_w_0()
                     .flex()
                     .flex_col()
-                    .child(
-                        Self::one_line(focused.title())
+                    .child(match self.renaming.as_ref().filter(|r| r.tab == index) {
+                        Some(renaming) => {
+                            let marked = self.marked_text.as_deref().unwrap_or_default();
+                            div()
+                                .px_1()
+                                .rounded(px(4.))
+                                .bg(rgba(0x0000004d))
+                                .border_1()
+                                .border_color(rgba(0x8fb4ff99))
+                                .text_color(rgba(0xffffffee))
+                                .child(format!("{}{marked}▏", renaming.text))
+                        }
+                        None => Self::one_line(self.tab_title(tab))
                             .text_color(text_color)
                             .when(attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
-                    )
+                    })
                     .when_some(detail, |d, detail| {
                         d.child(Self::one_line(detail).text_size(px(11.)).text_color(rgba(0xffffff70)))
                     }),
@@ -1484,7 +1692,18 @@ impl Workspace {
             .when(selected, |d| d.bg(rgba(0xffffff1c)))
             .when(attention && !selected, |d| d.bg(rgba(0xe0af6814)))
             .hover(|d| d.bg(rgba(0xffffff10)))
-            .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+            .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                if event.click_count() >= 2 {
+                    this.start_rename(index, cx);
+                } else {
+                    this.select(index, cx);
+                }
+            }))
+            .on_drag(DraggedTab { index, title: self.tab_title(tab) }, |dragged, _, _, cx| {
+                cx.new(|_| dragged.clone())
+            })
+            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.move_tab(dragged.index, index, cx)))
             .child(header)
             .children(pane_rows.into_iter().flatten())
     }
@@ -1538,6 +1757,94 @@ impl Workspace {
                         .child(format!("Config error — using previous settings. {error}")),
                 )
             })
+    }
+
+    /// The right-click menu, over a backdrop that dismisses it.
+    fn context_menu_overlay(&self, viewport: gpui::Size<Pixels>, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        const WIDTH: f32 = 220.;
+        const ITEM: f32 = 24.;
+        const SEPARATOR: f32 = 9.;
+        let menu = self.context_menu.as_ref()?;
+        let item = |label: &'static str, keys: &'static str, enabled: bool, command: MenuCommand| {
+            Some((label, keys, enabled, command))
+        };
+        let mut items = vec![
+            item("Copy", "⌘C", menu.has_selection, MenuCommand::Copy),
+            item("Paste", "⌘V", true, MenuCommand::Paste),
+            None,
+        ];
+        if menu.link.is_some() {
+            items.extend([item("Open Link", "", true, MenuCommand::OpenLink), item("Copy Link", "", true, MenuCommand::CopyLink), None]);
+        }
+        items.extend([
+            item("Split Right", "⌘D", true, MenuCommand::SplitRight),
+            item("Split Down", "⇧⌘D", true, MenuCommand::SplitDown),
+            None,
+            item("Rename Tab…", "", true, MenuCommand::RenameTab),
+            item("Clear Buffer", "", true, MenuCommand::ClearBuffer),
+            None,
+            item("Close Pane", "⌘W", true, MenuCommand::ClosePane),
+        ]);
+
+        // Keep the menu on screen.
+        let height = 10. + items.iter().map(|i| if i.is_some() { ITEM } else { SEPARATOR }).sum::<f32>();
+        let (mut x, mut y) = (f32::from(menu.position.x), f32::from(menu.position.y));
+        if x + WIDTH > f32::from(viewport.width) - 4. {
+            x = (x - WIDTH).max(4.);
+        }
+        if y + height > f32::from(viewport.height) - 4. {
+            y = (f32::from(viewport.height) - height - 4.).max(4.);
+        }
+
+        let rows = items.into_iter().enumerate().map(|(i, item)| match item {
+            None => div().h(px(1.)).mx(px(9.)).my(px(4.)).bg(rgba(0xffffff1a)).into_any_element(),
+            Some((label, keys, enabled, command)) => div()
+                .id(("menu-item", i))
+                .flex()
+                .items_center()
+                .justify_between()
+                .h(px(ITEM))
+                .px(px(9.))
+                .rounded(px(5.))
+                .text_color(if enabled { rgba(0xffffffee) } else { rgba(0xffffff4d) })
+                .when(enabled, |d| {
+                    d.hover(|d| d.bg(rgba(0x3478f6ff)))
+                        .on_click(cx.listener(move |this, _, window, cx| this.run_menu_command(command, window, cx)))
+                })
+                .child(label)
+                .child(div().text_color(rgba(0xffffff66)).child(keys))
+                .into_any_element(),
+        });
+
+        let backdrop = div()
+            .id("menu-backdrop")
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .occlude()
+            .on_any_mouse_down(cx.listener(|this, _, _, cx| {
+                this.context_menu = None;
+                cx.notify();
+            }));
+        let panel = div()
+            .id("context-menu")
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(WIDTH))
+            .occlude()
+            .flex()
+            .flex_col()
+            .p(px(5.))
+            .rounded(px(8.))
+            .bg(rgba(0x262a33f5))
+            .border_1()
+            .border_color(rgba(0xffffff26))
+            .shadow_lg()
+            .text_size(px(13.))
+            .children(rows);
+        Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
     }
 
     /// The find bar, at the top right of the focused pane. Positions are
@@ -1706,16 +2013,16 @@ impl Render for Workspace {
         self.cursor = views.iter().find(|view| view.focused).and_then(|view| view.frame.cursor);
 
         let window_focused = self.focus.is_focused(window) && self.window_active;
-        let typing = window_focused && self.search.is_none();
+        let typing = window_focused && self.search.is_none() && self.renaming.is_none();
         self.blink_enabled = typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
-        let title = self.focused_pane().map(Pane::title).unwrap_or_default();
+        let title = self.tabs.get(self.active).map(|tab| self.tab_title(tab)).unwrap_or_default();
         window.set_window_title(&title);
 
         let tint = Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
         let divider_color: Hsla = rgba(0xffffff1c).into();
         let metrics = self.metrics.clone();
-        let marked_text = self.marked_text.clone().filter(|_| self.search.is_none());
+        let marked_text = self.marked_text.clone().filter(|_| self.search.is_none() && self.renaming.is_none());
         let cursor_visible = self.cursor_visible;
         let focused_rect = focused_id.and_then(|id| self.rect_of(id));
         let divider_lines: Vec<Bounds<Pixels>> = self
@@ -1775,6 +2082,17 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &PreviousPane, _, cx| this.cycle_pane(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| this.toggle_zoom(cx)))
             .on_action(cx.listener(|this, _: &JumpToAttention, _, cx| this.jump_to_attention(cx)))
+            .on_action(cx.listener(|this, _: &RenameTab, _, cx| this.start_rename(this.active, cx)))
+            .on_action(cx.listener(|this, _: &MoveTabUp, _, cx| {
+                let active = this.active;
+                if active > 0 {
+                    this.move_tab(active, active - 1, cx);
+                }
+            }))
+            .on_action(cx.listener(|this, _: &MoveTabDown, _, cx| {
+                let active = this.active;
+                this.move_tab(active, active + 1, cx);
+            }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(|this, _: &Find, _, cx| this.open_search(cx)))
@@ -1802,6 +2120,7 @@ impl Render for Workspace {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
+            .relative()
             .flex()
             .size_full()
             .bg(tint)
@@ -1865,6 +2184,7 @@ impl Render for Workspace {
                             .children(self.search_bar(container)),
                     ),
             )
+            .children(self.context_menu_overlay(window.viewport_size(), cx))
     }
 }
 
@@ -1912,6 +2232,11 @@ impl EntityInputHandler for Workspace {
         cx: &mut Context<Self>,
     ) {
         self.marked_text = None;
+        if let Some(renaming) = self.renaming.as_mut() {
+            renaming.text.push_str(text);
+            cx.notify();
+            return;
+        }
         if let Some(search) = self.search.as_mut() {
             search.query.push_str(text);
             self.run_search(true, true, cx);

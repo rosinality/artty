@@ -17,8 +17,9 @@ use gpui::{
 
 use workspace::{
     ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
-    FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, NewTab, NextPane, NextTab,
-    Paste, PreviousPane, PreviousTab, ResetFontSize, SplitDown, SplitRight, ToggleZoom, Workspace,
+    FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, MoveTabDown, MoveTabUp,
+    NewTab, NextPane, NextTab, Paste, PreviousPane, PreviousTab, RenameTab, ResetFontSize,
+    SplitDown, SplitRight, ToggleZoom, Workspace,
 };
 
 actions!(artty, [Quit]);
@@ -102,6 +103,10 @@ fn main() {
                     MenuItem::action("Show Next Tab", NextTab),
                     MenuItem::action("Show Previous Tab", PreviousTab),
                     MenuItem::action("Jump to Tab Needing Attention", JumpToAttention),
+                    MenuItem::separator(),
+                    MenuItem::action("Rename Tab…", RenameTab),
+                    MenuItem::action("Move Tab Up", MoveTabUp),
+                    MenuItem::action("Move Tab Down", MoveTabDown),
                     MenuItem::separator(),
                     MenuItem::action("Next Pane", NextPane),
                     MenuItem::action("Previous Pane", PreviousPane),
