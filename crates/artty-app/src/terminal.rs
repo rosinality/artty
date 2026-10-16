@@ -79,6 +79,8 @@ pub struct CursorState<'a> {
     pub visible: bool,
     /// IME composition text, drawn at the cursor instead of it.
     pub marked_text: Option<&'a str>,
+    /// How much to fade the pane's content (0 = none), for unfocused splits.
+    pub fade: f32,
 }
 
 pub fn paint(
@@ -90,18 +92,19 @@ pub fn paint(
     cx: &mut App,
 ) {
     let origin = bounds.origin;
-    let CursorState { focused, visible: cursor_visible, marked_text } = cursor_state;
+    let CursorState { focused, visible: cursor_visible, marked_text, fade } = cursor_state;
+    let faded = |color: Hsla| Hsla { a: color.a * (1. - fade), ..color };
 
     for (index, line) in frame.lines.iter().enumerate() {
         for rect in line.backgrounds.iter().chain(&line.selection) {
-            window.paint_quad(fill(metrics.cell_bounds(origin, index, rect.column, rect.width), hsla(rect.color)));
+            window.paint_quad(fill(metrics.cell_bounds(origin, index, rect.column, rect.width), faded(hsla(rect.color))));
         }
     }
 
     for (index, line) in frame.lines.iter().enumerate() {
         for run in &line.runs {
             let cell = metrics.cell_bounds(origin, index, run.column, run.cells);
-            paint_text(cell, &run.text, run, hsla(run.fg), metrics, window, cx);
+            paint_text(cell, &run.text, run, faded(hsla(run.fg)), metrics, window, cx);
         }
     }
 

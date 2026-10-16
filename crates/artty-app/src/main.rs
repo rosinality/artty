@@ -2,8 +2,9 @@ mod boxdraw;
 mod cli;
 mod control;
 mod keys;
+mod layout;
 mod mouse;
-mod tab;
+mod pane;
 mod terminal;
 mod workspace;
 
@@ -15,8 +16,9 @@ use gpui::{
 };
 
 use workspace::{
-    CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, IncreaseFontSize,
-    JumpToAttention, NewTab, NextTab, Paste, PreviousTab, ResetFontSize, Workspace,
+    ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
+    FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, NewTab, NextPane, NextTab,
+    Paste, PreviousPane, PreviousTab, ResetFontSize, SplitDown, SplitRight, ToggleZoom, Workspace,
 };
 
 actions!(artty, [Quit]);
@@ -68,6 +70,10 @@ fn main() {
                 name: "Shell".into(),
                 items: vec![
                     MenuItem::action("New Tab", NewTab),
+                    MenuItem::action("Split Right", SplitRight),
+                    MenuItem::action("Split Down", SplitDown),
+                    MenuItem::separator(),
+                    MenuItem::action("Close Pane", ClosePane),
                     MenuItem::action("Close Tab", CloseTab),
                 ],
             },
@@ -96,6 +102,14 @@ fn main() {
                     MenuItem::action("Show Next Tab", NextTab),
                     MenuItem::action("Show Previous Tab", PreviousTab),
                     MenuItem::action("Jump to Tab Needing Attention", JumpToAttention),
+                    MenuItem::separator(),
+                    MenuItem::action("Next Pane", NextPane),
+                    MenuItem::action("Previous Pane", PreviousPane),
+                    MenuItem::action("Select Pane Left", FocusLeft),
+                    MenuItem::action("Select Pane Right", FocusRight),
+                    MenuItem::action("Select Pane Above", FocusUp),
+                    MenuItem::action("Select Pane Below", FocusDown),
+                    MenuItem::action("Zoom Pane", ToggleZoom),
                 ],
             },
         ]);

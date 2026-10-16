@@ -7,7 +7,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use artty_core::SessionId;
-use artty_core::control::{AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV, live_sockets};
+use artty_core::control::{
+    AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV, SplitDirection, live_sockets,
+};
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &["list", "read", "send", "new", "run", "notify", "status", "focus", "close", "hooks"];
@@ -18,8 +20,9 @@ artty — a terminal for working with AI agents
 usage:
   artty [-e command [args...]]           open the app (optionally running a command)
 
-control a running artty (inside a tab, the current one is found automatically):
-  artty list [--json]                    list tabs: id, status, title
+control a running artty. Ids name panes (a tab has one or more); inside
+artty, your own pane is found automatically:
+  artty list [--json]                    list panes: id, tab, status, title
   artty read [--tab N] [--lines N | --screen | --last]
                                          print a tab's text: the last N lines
                                          (default 100), the screen, or the last
@@ -28,8 +31,11 @@ control a running artty (inside a tab, the current one is found automatically):
   artty run [--tab N] [--timeout S] -- COMMAND
                                          run COMMAND in a tab's shell, print its
                                          output, and exit with its exit code
-  artty new [--cwd DIR] [--title T] [--background] [-- COMMAND...]
-                                         open a tab; prints its id
+  artty new [--split right|down] [--tab N] [--cwd DIR] [--title T]
+            [--background] [-- COMMAND...]
+                                         open a tab, or split pane N (default:
+                                         your own, or the focused one); prints
+                                         the new pane's id
   artty focus N | artty close N
   artty notify [--tab N] [--title T] BODY
   artty status [--tab N] working|waiting|done|idle [--message M | --hook]
@@ -91,6 +97,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--cwd" => _ = flags.insert("cwd", args.value("--cwd")?),
             "--title" => _ = flags.insert("title", args.value("--title")?),
             "--message" => _ = flags.insert("message", args.value("--message")?),
+            "--split" => _ = flags.insert("split", args.value("--split")?),
             "--screen" | "--last" | "--no-enter" | "--background" | "--json" | "--hook" => {
                 switches.insert(match arg.as_str() {
                     "--screen" => "screen",
@@ -143,12 +150,22 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             let timeout_secs = flags.get("timeout").map(|t| t.parse().map_err(|_| "--timeout: not a number")).transpose()?;
             Request::Run { tab, command: rest.join(" "), timeout_secs }
         }
-        "new" => Request::New {
-            cwd: flags.get("cwd").map(PathBuf::from),
-            command: rest,
-            title: flags.get("title").cloned(),
-            focus: !switches.contains("background"),
-        },
+        "new" => {
+            let split = match flags.get("split").map(String::as_str) {
+                None => None,
+                Some("right") => Some(SplitDirection::Right),
+                Some("down") => Some(SplitDirection::Down),
+                Some(other) => return Err(format!("--split: expected right or down, not {other}")),
+            };
+            Request::New {
+                cwd: flags.get("cwd").map(PathBuf::from),
+                command: rest,
+                title: flags.get("title").cloned(),
+                focus: !switches.contains("background"),
+                split,
+                target: split.and(tab.or_else(own_tab)),
+            }
+        }
         "focus" | "close" => {
             let id = rest.first().and_then(|id| id.parse().ok()).or(tab).ok_or(format!("{command}: which tab?"))?;
             if command == "focus" { Request::Focus { tab: id } } else { Request::Close { tab: id } }
@@ -215,10 +232,11 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             Ok(0)
         }
         Response::Tabs { tabs } => {
-            for tab in tabs {
-                let marker = if tab.active { "*" } else if tab.needs_attention { "!" } else { " " };
-                let detail = tab.detail.map(|d| format!("  ({d})")).unwrap_or_default();
-                println!("{marker}{:>3}  {:<8} {}{detail}", tab.id, tab.status, tab.title);
+            println!("    ID  TAB  STATUS   TITLE");
+            for pane in tabs {
+                let marker = if pane.active { "*" } else if pane.needs_attention { "!" } else { " " };
+                let detail = pane.detail.map(|d| format!("  ({d})")).unwrap_or_default();
+                println!("{marker} {:>4}  {:>3}  {:<8} {}{detail}", pane.id, pane.tab, pane.status, pane.title);
             }
             Ok(0)
         }

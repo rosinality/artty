@@ -1,35 +1,39 @@
-//! The main window: a sidebar of tabs, each running a terminal session.
+//! The main window: a sidebar of tabs, each a layout of split panes running
+//! terminal sessions.
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use artty_core::control::{AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV};
+use artty_core::control::{
+    AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV, SplitDirection,
+};
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
 use artty_core::vt::index::Side;
 use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
 use artty_core::{
-    Config, FrameCursor, Notice, SavedState, SavedWindow, Session, SessionId, SessionOptions,
-    ShellPhase, TerminalSize, Theme,
+    Config, FrameCursor, Notice, SavedLayout, SavedState, SavedTab, SavedWindow, Session,
+    SessionId, SessionOptions, ShellPhase, TerminalSize, Theme,
 };
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
 use gpui::{
     App, Bounds, ClipboardItem, Context, ElementInputHandler, EntityInputHandler, FocusHandle,
-    WindowBounds,
     FontWeight, Hsla, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Subscription, Task,
-    UTF16Selection, Window, WindowBackgroundAppearance, actions, canvas, div, point, prelude::*,
-    px, rgba,
+    UTF16Selection, Window, WindowBackgroundAppearance, WindowBounds, actions, canvas, div, fill,
+    point, prelude::*, px, rgba, size,
 };
 
 use crate::control::{ControlServer, Pending, cli_dir};
 use crate::keys;
+use crate::layout::{self, Axis, Direction, Divider, Node, PaneId, Rect};
 use crate::mouse::{self, Action, Button};
-use crate::tab::{Status, Tab};
+use crate::pane::{Pane, Status};
 use crate::terminal::{self, Metrics, hsla};
 
 actions!(
@@ -37,8 +41,18 @@ actions!(
     [
         NewTab,
         CloseTab,
+        ClosePane,
         NextTab,
         PreviousTab,
+        SplitRight,
+        SplitDown,
+        FocusLeft,
+        FocusRight,
+        FocusUp,
+        FocusDown,
+        NextPane,
+        PreviousPane,
+        ToggleZoom,
         JumpToAttention,
         Copy,
         Paste,
@@ -55,13 +69,17 @@ pub const SIDEBAR_WIDTH: f32 = 232.;
 const TAB_LABEL_WIDTH: f32 = 28.;
 const TITLEBAR_HEIGHT: f32 = 32.;
 const PADDING: f32 = 12.;
+/// Space between split panes; a 1px divider line is drawn in its middle.
+const SPLIT_GAP: f32 = 13.;
+/// How much unfocused panes in a split fade, so the focused one stands out.
+const UNFOCUSED_FADE: f32 = 0.4;
 const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 /// How often tabs are saved for the next launch.
 const SAVE_EVERY_POLLS: u32 = 5;
-/// Shown under a restored tab's old output.
+/// Shown under a restored pane's old output.
 const RESTORED_BANNER: &str = "\r\n\x1b[2m── restored ──\x1b[0m\r\n";
 /// Background commands running at least this long notify when they finish.
 const LONG_COMMAND: Duration = Duration::from_secs(10);
@@ -70,13 +88,13 @@ const MAX_FONT_SIZE: f32 = 72.;
 
 /// `artty run` waiting for its command to finish.
 struct PendingRun {
-    tab: SessionId,
+    pane: PaneId,
     reply: oneshot::Sender<Response>,
     deadline: Option<Instant>,
 }
 
-/// What to open in a new tab; everything defaults to a shell in the active
-/// tab's directory.
+/// What to open in a new pane; everything defaults to a shell in the focused
+/// pane's directory.
 #[derive(Default)]
 pub struct TabSpec {
     pub command: Option<Vec<String>>,
@@ -84,6 +102,23 @@ pub struct TabSpec {
     pub title: Option<String>,
     /// Output to show before the program starts.
     pub initial_output: Option<Vec<u8>>,
+}
+
+struct Tab {
+    root: Node,
+    focused: PaneId,
+    /// Show only the focused pane.
+    zoomed: bool,
+}
+
+impl Tab {
+    fn layout(&self, area: Rect) -> (Vec<(PaneId, Rect)>, Vec<Divider>) {
+        if self.zoomed {
+            (vec![(self.focused, area)], Vec::new())
+        } else {
+            self.root.layout(area, SPLIT_GAP)
+        }
+    }
 }
 
 struct Search {
@@ -103,11 +138,17 @@ pub struct Workspace {
     agents: Arc<[String]>,
     font_size: f32,
     metrics: Metrics,
+    panes: HashMap<PaneId, Pane>,
     tabs: Vec<Tab>,
     active: usize,
     next_id: SessionId,
-    /// Terminal size from the last layout, for tabs opened between renders.
-    size: TerminalSize,
+    /// Area the active tab's panes fill, from the last render.
+    area: Rect,
+    /// Pane rectangles and dividers of the active tab, from the last render.
+    pane_rects: Vec<(PaneId, Rect)>,
+    dividers: Vec<Divider>,
+    /// A divider being dragged.
+    drag: Option<Divider>,
     sink: Arc<dyn Fn(SessionId, Event) + Send + Sync>,
     control: Option<ControlServer>,
     cli_dir: Option<PathBuf>,
@@ -120,7 +161,7 @@ pub struct Workspace {
     window_bounds: Option<SavedWindow>,
     /// IME composition in progress, shown at the cursor until committed.
     marked_text: Option<String>,
-    /// Cursor position from the last render, for placing the IME window.
+    /// Focused pane's cursor from the last render, for placing the IME window.
     cursor: Option<FrameCursor>,
     cursor_visible: bool,
     /// Whether the cursor should blink, as of the last render.
@@ -129,6 +170,8 @@ pub struct Workspace {
     blink_hold: bool,
     spinner_frame: usize,
     window_active: bool,
+    /// Pane where the current mouse press started.
+    mouse_pane: Option<PaneId>,
     /// A mouse drag is extending the selection.
     selecting: bool,
     /// Button held down while the program receives mouse reports.
@@ -147,6 +190,10 @@ fn config_modified() -> Option<SystemTime> {
 
 fn agents_of(config: &Config) -> Arc<[String]> {
     config.agents.clone().into()
+}
+
+fn bounds(rect: Rect) -> Bounds<Pixels> {
+    Bounds::new(point(px(rect.x), px(rect.y)), size(px(rect.width), px(rect.height)))
 }
 
 /// Post a macOS notification.
@@ -222,7 +269,7 @@ impl Workspace {
         });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
-            this.report_focus(this.window_active);
+            this.report_focus(this.focused_id(), this.window_active);
             cx.notify();
         });
 
@@ -244,10 +291,14 @@ impl Workspace {
             config_error,
             config_modified: config_modified(),
             reload_config: false,
+            panes: HashMap::new(),
             tabs: Vec::new(),
             active: 0,
             next_id: 1,
-            size: TerminalSize { columns: 80, lines: 24, cell_width: 8, cell_height: 16 },
+            area: Rect::default(),
+            pane_rects: Vec::new(),
+            dividers: Vec::new(),
+            drag: None,
             sink,
             control,
             cli_dir: cli_dir(),
@@ -264,6 +315,7 @@ impl Workspace {
             blink_hold: false,
             spinner_frame: 0,
             window_active: true,
+            mouse_pane: None,
             selecting: false,
             reporting_button: None,
             last_mouse_cell: None,
@@ -271,7 +323,7 @@ impl Workspace {
             _tasks: vec![events, requests, blink, poll, spinner],
             _subscriptions: vec![activation, quit],
         };
-        this.size = this.terminal_size(window);
+        this.area = Self::area_rect(window);
         match restore.filter(|state| !state.tabs.is_empty() && command.is_none()) {
             Some(state) => this.restore(state, cx),
             None => {
@@ -283,22 +335,15 @@ impl Workspace {
         this
     }
 
-    /// Reopen saved tabs: their directories and output, and their agents.
+    // Saving and restoring.
+
+    /// Reopen saved tabs: their layouts, directories and output, and agents.
     fn restore(&mut self, state: SavedState, cx: &mut Context<Self>) {
         for saved in state.tabs {
-            let initial_output = (!saved.scrollback.is_empty())
-                .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
-            let spec = TabSpec { command: saved.command, cwd: saved.cwd, title: saved.title, initial_output };
-            if let Err(err) = self.open_tab(spec, false, cx) {
-                log::error!("restoring a tab: {err}");
-                continue;
-            }
-            let resume = saved.agent.filter(|_| self.config.resume_agents).and_then(|agent| {
-                self.config.resume.get(&agent.name)?.command(agent.session.as_deref())
-            });
-            if let (Some(resume), Some(tab)) = (resume, self.tabs.last_mut()) {
-                tab.type_when_ready(resume);
-            }
+            let Some(root) = self.restore_layout(saved.layout) else { continue };
+            let panes = root.panes();
+            let focused = panes[saved.focused.min(panes.len() - 1)];
+            self.tabs.push(Tab { root, focused, zoomed: saved.zoomed && panes.len() > 1 });
         }
         if self.tabs.is_empty() {
             let _ = self.open_tab(TabSpec::default(), true, cx);
@@ -306,12 +351,62 @@ impl Workspace {
         self.select(state.active.min(self.tabs.len().saturating_sub(1)), cx);
     }
 
+    fn restore_layout(&mut self, layout: SavedLayout) -> Option<Node> {
+        match layout {
+            SavedLayout::Pane(saved) => {
+                let initial_output = (!saved.scrollback.is_empty())
+                    .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
+                let spec = TabSpec { command: saved.command, cwd: saved.cwd, title: saved.title, initial_output };
+                let id = self.spawn_pane(spec).inspect_err(|err| log::error!("restoring a pane: {err}")).ok()?;
+                let resume = saved.agent.filter(|_| self.config.resume_agents).and_then(|agent| {
+                    self.config.resume.get(&agent.name)?.command(agent.session.as_deref())
+                });
+                if let (Some(resume), Some(pane)) = (resume, self.panes.get_mut(&id)) {
+                    pane.type_when_ready(resume);
+                }
+                Some(Node::Pane(id))
+            }
+            SavedLayout::Split { vertical, ratio, first, second } => {
+                match (self.restore_layout(*first), self.restore_layout(*second)) {
+                    (Some(first), Some(second)) => Some(Node::Split {
+                        axis: if vertical { Axis::Vertical } else { Axis::Horizontal },
+                        ratio,
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    }),
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+
+    fn saved_layout(&self, node: &Node) -> SavedLayout {
+        match node {
+            Node::Pane(id) => SavedLayout::Pane(self.panes[id].saved(self.config.restore_scrollback)),
+            Node::Split { axis, ratio, first, second } => SavedLayout::Split {
+                vertical: *axis == Axis::Vertical,
+                ratio: *ratio,
+                first: Box::new(self.saved_layout(first)),
+                second: Box::new(self.saved_layout(second)),
+            },
+        }
+    }
+
     /// Save the tabs for the next launch, if anything changed.
     fn save(&mut self) {
         if !self.save_enabled {
             return;
         }
-        let tabs = self.tabs.iter().map(|tab| tab.saved(self.config.restore_scrollback)).collect();
+        let tabs = self
+            .tabs
+            .iter()
+            .map(|tab| SavedTab {
+                layout: self.saved_layout(&tab.root),
+                focused: tab.root.panes().iter().position(|&id| id == tab.focused).unwrap_or(0),
+                zoomed: tab.zoomed,
+            })
+            .collect();
         let state = SavedState::new(self.window_bounds, self.active, tabs);
         let Ok(json) = serde_json::to_string(&state) else { return };
         if self.last_saved.as_ref() == Some(&json) {
@@ -323,45 +418,82 @@ impl Workspace {
         }
     }
 
-    fn terminal_size(&self, window: &Window) -> TerminalSize {
+    // Geometry.
+
+    /// The area panes fill, in window coordinates; matches `render`.
+    fn area_rect(window: &Window) -> Rect {
         let viewport = window.viewport_size();
-        let width = viewport.width - px(SIDEBAR_WIDTH + 2. * PADDING);
-        let height = viewport.height - px(TITLEBAR_HEIGHT + PADDING);
+        Rect {
+            x: SIDEBAR_WIDTH + PADDING,
+            y: TITLEBAR_HEIGHT,
+            width: (f32::from(viewport.width) - SIDEBAR_WIDTH - 2. * PADDING).max(1.),
+            height: (f32::from(viewport.height) - TITLEBAR_HEIGHT - PADDING).max(1.),
+        }
+    }
+
+    fn size_for(&self, rect: Rect) -> TerminalSize {
         TerminalSize {
-            columns: (width / self.metrics.cell_width).floor().max(2.) as u16,
-            lines: (height / self.metrics.line_height).floor().max(1.) as u16,
+            columns: (px(rect.width) / self.metrics.cell_width).floor().max(2.) as u16,
+            lines: (px(rect.height) / self.metrics.line_height).floor().max(1.) as u16,
             cell_width: f32::from(self.metrics.cell_width).round() as u16,
             cell_height: f32::from(self.metrics.line_height).round() as u16,
         }
     }
 
-    /// Top-left of the cell grid in window coordinates; matches the layout in
-    /// `render`.
-    fn grid_origin() -> Point<Pixels> {
-        point(px(SIDEBAR_WIDTH + PADDING), px(TITLEBAR_HEIGHT))
+    fn pane_at(&self, position: Point<Pixels>) -> Option<(PaneId, Rect)> {
+        let (x, y) = (f32::from(position.x), f32::from(position.y));
+        self.pane_rects.iter().copied().find(|(_, rect)| rect.contains(x, y))
     }
 
-    /// The viewport cell under a window position, and which half of it.
-    fn cell_at(&self, position: Point<Pixels>) -> (usize, usize, Side) {
-        let size = self.active_session().map(Session::size);
+    fn rect_of(&self, id: PaneId) -> Option<Rect> {
+        self.pane_rects.iter().find(|(pane, _)| *pane == id).map(|(_, rect)| *rect)
+    }
+
+    /// The cell of pane `id` under a window position, and which half of it.
+    fn cell_at(&self, id: PaneId, position: Point<Pixels>) -> (usize, usize, Side) {
+        let rect = self.rect_of(id).unwrap_or(self.area);
+        let size = self.panes.get(&id).map(|pane| pane.session.size());
         let (columns, lines) = size.map_or((1, 1), |s| (s.columns as usize, s.lines as usize));
-        let offset = position - Self::grid_origin();
-        let x = (offset.x / self.metrics.cell_width).max(0.);
-        let y = (offset.y / self.metrics.line_height).max(0.);
+        let x = ((position.x - px(rect.x)) / self.metrics.cell_width).max(0.);
+        let y = ((position.y - px(rect.y)) / self.metrics.line_height).max(0.);
         let column = (x as usize).min(columns - 1);
         let side = if x.fract() < 0.5 || x as usize >= columns { Side::Left } else { Side::Right };
         ((y as usize).min(lines - 1), column, side)
     }
 
-    /// Open a tab as described by `spec`.
-    fn open_tab(&mut self, spec: TabSpec, focus: bool, cx: &mut Context<Self>) -> Result<SessionId, String> {
+    // Tabs and panes.
+
+    fn focused_id(&self) -> Option<PaneId> {
+        self.tabs.get(self.active).map(|tab| tab.focused)
+    }
+
+    fn focused_pane(&self) -> Option<&Pane> {
+        self.panes.get(&self.focused_id()?)
+    }
+
+    fn focused_session(&self) -> Option<&Session> {
+        self.focused_pane().map(|pane| &pane.session)
+    }
+
+    fn tab_of(&self, id: PaneId) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.root.contains(id))
+    }
+
+    /// Whether the user can see pane `id` right now.
+    fn visible(&self, id: PaneId) -> bool {
+        let Some(tab) = self.tabs.get(self.active) else { return false };
+        self.window_active && tab.root.contains(id) && (!tab.zoomed || tab.focused == id)
+    }
+
+    /// Start a session for a new pane (not yet placed in a tab).
+    fn spawn_pane(&mut self, spec: TabSpec) -> Result<PaneId, String> {
         let id = self.next_id;
         self.next_id += 1;
         let explicit = spec.command.clone().filter(|c| !c.is_empty());
         let command = explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
-        let cwd = spec.cwd.or_else(|| self.active_session().and_then(Session::cwd));
+        let cwd = spec.cwd.or_else(|| self.focused_session().and_then(Session::cwd));
 
-        let mut env = std::collections::HashMap::new();
+        let mut env = HashMap::new();
         env.insert(SESSION_ENV.to_owned(), id.to_string());
         if let Some(control) = &self.control {
             env.insert(SOCKET_ENV.to_owned(), control.path().display().to_string());
@@ -377,9 +509,16 @@ impl Workspace {
             scrollback: Some(self.config.scrollback),
             initial_output: spec.initial_output,
         };
-        let session = Session::spawn(id, options, self.size, self.theme.clone(), self.sink.clone())
+        let session = Session::spawn(id, options, self.size_for(self.area), self.theme.clone(), self.sink.clone())
             .map_err(|err| format!("failed to start: {err}"))?;
-        self.tabs.push(Tab::new(session, spec.title, explicit, self.agents.clone()));
+        self.panes.insert(id, Pane::new(session, spec.title, explicit, self.agents.clone()));
+        Ok(id)
+    }
+
+    /// Open a tab with one pane as described by `spec`.
+    fn open_tab(&mut self, spec: TabSpec, focus: bool, cx: &mut Context<Self>) -> Result<PaneId, String> {
+        let id = self.spawn_pane(spec)?;
+        self.tabs.push(Tab { root: Node::Pane(id), focused: id, zoomed: false });
         if focus {
             self.select(self.tabs.len() - 1, cx);
         }
@@ -387,27 +526,158 @@ impl Workspace {
         Ok(id)
     }
 
+    /// Split `target` (default: the focused pane), opening a pane right of or
+    /// below it in the same directory.
+    fn split(
+        &mut self,
+        mut spec: TabSpec,
+        target: Option<PaneId>,
+        axis: Axis,
+        focus: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<PaneId, String> {
+        let target = target.or(self.focused_id()).ok_or("no pane to split")?;
+        let index = self.tab_of(target).ok_or_else(|| format!("no pane {target}"))?;
+        if spec.cwd.is_none() {
+            spec.cwd = self.panes.get(&target).and_then(|pane| pane.session.cwd());
+        }
+        let id = self.spawn_pane(spec)?;
+        let tab = &mut self.tabs[index];
+        tab.root.split(target, id, axis);
+        tab.zoomed = false;
+        if focus {
+            self.focus_pane(id, cx);
+        }
+        cx.notify();
+        Ok(id)
+    }
+
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.tabs.len() {
-            self.active = index;
-            self.marked_text = None;
-            self.selecting = false;
-            self.reporting_button = None;
+            let before = self.focused_id();
             self.close_search();
+            self.active = index;
+            self.reset_input_state();
+            self.move_focus_report(before);
             cx.notify();
         }
     }
 
-    fn index_of(&self, id: SessionId) -> Option<usize> {
-        self.tabs.iter().position(|tab| tab.session.id() == id)
+    /// Focus pane `id`, switching to its tab.
+    fn focus_pane(&mut self, id: PaneId, cx: &mut Context<Self>) {
+        let Some(index) = self.tab_of(id) else { return };
+        let before = self.focused_id();
+        if before != Some(id) {
+            self.close_search();
+        }
+        self.active = index;
+        let tab = &mut self.tabs[index];
+        if tab.zoomed && tab.focused != id {
+            tab.zoomed = false;
+        }
+        tab.focused = id;
+        self.reset_input_state();
+        self.move_focus_report(before);
+        cx.notify();
     }
 
-    fn close(&mut self, id: SessionId, cx: &mut Context<Self>) {
-        let Some(index) = self.index_of(id) else { return };
-        self.tabs.remove(index);
-        for run in self.runs.extract_if(.., |run| run.tab == id) {
-            let _ = run.reply.send(Response::error("the tab closed"));
+    fn reset_input_state(&mut self) {
+        self.marked_text = None;
+        self.selecting = false;
+        self.reporting_button = None;
+        self.mouse_pane = None;
+        self.cursor_visible = true;
+    }
+
+    /// Tell programs that track focus (vim, etc.) that it moved.
+    fn move_focus_report(&self, before: Option<PaneId>) {
+        let after = self.focused_id();
+        if before != after && self.window_active {
+            self.report_focus(before, false);
+            self.report_focus(after, true);
         }
+    }
+
+    fn report_focus(&self, id: Option<PaneId>, focused: bool) {
+        if let Some(pane) = id.and_then(|id| self.panes.get(&id))
+            && pane.session.mode().contains(TermMode::FOCUS_IN_OUT)
+        {
+            pane.session.write(if focused { &b"\x1b[I"[..] } else { &b"\x1b[O"[..] });
+        }
+    }
+
+    fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
+        let Some(from) = self.focused_id() else { return };
+        if let Some(to) = layout::neighbor(&self.pane_rects, from, direction) {
+            self.focus_pane(to, cx);
+        }
+    }
+
+    fn cycle_pane(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(self.active) else { return };
+        let panes = tab.root.panes();
+        let Some(index) = panes.iter().position(|&id| id == tab.focused) else { return };
+        let next = if forward { (index + 1) % panes.len() } else { (index + panes.len() - 1) % panes.len() };
+        self.focus_pane(panes[next], cx);
+    }
+
+    fn toggle_zoom(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(self.active)
+            && matches!(tab.root, Node::Split { .. })
+        {
+            tab.zoomed = !tab.zoomed;
+            cx.notify();
+        }
+    }
+
+    /// Close pane `id`; its tab closes with its last pane, and the app with
+    /// its last tab.
+    fn close_pane(&mut self, id: PaneId, cx: &mut Context<Self>) {
+        let Some(index) = self.tab_of(id) else { return };
+        let was_focused = self.focused_id() == Some(id);
+        if was_focused {
+            self.close_search();
+        }
+        self.panes.remove(&id);
+        self.fail_runs(id, "the pane closed");
+
+        let tab = &mut self.tabs[index];
+        let order = tab.root.panes();
+        let root = std::mem::replace(&mut tab.root, Node::Pane(id));
+        match root.without(id) {
+            Some(root) => {
+                let remaining = root.panes();
+                if tab.focused == id {
+                    let position = order.iter().position(|&pane| pane == id).unwrap_or(0);
+                    tab.focused = remaining[position.min(remaining.len() - 1)];
+                }
+                if remaining.len() == 1 {
+                    tab.zoomed = false;
+                }
+                tab.root = root;
+                if was_focused {
+                    self.reset_input_state();
+                }
+            }
+            None => self.remove_tab(index, cx),
+        }
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(ids) = self.tabs.get(index).map(|tab| tab.root.panes()) else { return };
+        if index == self.active {
+            self.close_search();
+        }
+        for id in ids {
+            self.panes.remove(&id);
+            self.fail_runs(id, "the pane closed");
+        }
+        self.remove_tab(index, cx);
+    }
+
+    fn remove_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.tabs.remove(index);
         if self.tabs.is_empty() {
             cx.quit();
             return;
@@ -415,85 +685,102 @@ impl Workspace {
         if index < self.active || self.active >= self.tabs.len() {
             self.active = self.active.saturating_sub(1);
         }
+        self.reset_input_state();
         cx.notify();
     }
 
-    /// Tell the user about a tab that needs them, unless they're looking at it.
-    fn notify_user(&self, index: usize, title: Option<&str>, body: &str) {
-        if !self.config.notifications || (self.window_active && index == self.active) {
+    fn fail_runs(&mut self, id: PaneId, message: &str) {
+        for run in self.runs.extract_if(.., |run| run.pane == id) {
+            let _ = run.reply.send(Response::error(message));
+        }
+    }
+
+    // Events from sessions.
+
+    /// Tell the user about a pane that needs them, unless they're looking at it.
+    fn notify_user(&self, id: PaneId, title: Option<&str>, body: &str) {
+        if !self.config.notifications || self.visible(id) {
             return;
         }
-        let tab_title = self.tabs[index].title();
-        let title = title.map_or_else(|| tab_title.to_string(), |t| format!("{t} — {tab_title}"));
+        let Some(pane) = self.panes.get(&id) else { return };
+        let pane_title = pane.title();
+        let title = title.map_or_else(|| pane_title.to_string(), |t| format!("{t} — {pane_title}"));
         notify_desktop(&title, if body.is_empty() { "Needs your attention" } else { body });
     }
 
     fn handle_events(&mut self, events: Vec<(SessionId, Event)>, cx: &mut Context<Self>) {
         for (id, event) in events {
-            let Some(index) = self.index_of(id) else { continue };
-            let Some(notice) = self.tabs[index].session.handle(event) else { continue };
-            let tab = &mut self.tabs[index];
+            let visible = self.visible(id);
+            let Some(pane) = self.panes.get_mut(&id) else { continue };
+            let Some(notice) = pane.session.handle(event) else { continue };
             match notice {
                 Notice::Redraw => {}
-                Notice::Title(title) => tab.set_title(Some(title)),
-                Notice::ResetTitle => tab.set_title(None),
+                Notice::Title(title) => pane.set_title(Some(title)),
+                Notice::ResetTitle => pane.set_title(None),
                 Notice::Bell => {
-                    if index != self.active || !self.window_active {
-                        tab.alert(None);
-                        self.notify_user(index, None, "Bell");
+                    if !visible {
+                        pane.alert(None);
+                        self.notify_user(id, None, "Bell");
                     }
                 }
                 Notice::Notification { title, body } => {
-                    tab.alert(Some(body.clone()).filter(|b| !b.is_empty()).or(title.clone()));
-                    self.notify_user(index, title.as_deref(), &body);
+                    pane.alert(Some(body.clone()).filter(|b| !b.is_empty()).or(title.clone()));
+                    self.notify_user(id, title.as_deref(), &body);
                 }
                 Notice::Progress(progress) => {
-                    tab.progress = (progress != Progress::Remove).then_some(progress);
+                    pane.progress = (progress != Progress::Remove).then_some(progress);
                 }
-                Notice::CommandStarted(command) => tab.command_started(command),
+                Notice::CommandStarted(command) => pane.command_started(command),
                 Notice::CommandFinished(record) => {
-                    tab.command_finished(record.exit);
+                    pane.command_finished(record.exit);
                     let long = record.finished.is_some_and(|end| end - record.started >= LONG_COMMAND);
+                    let agent = pane.agent_name().is_some();
                     let response = Response::Command {
                         command: record.command.clone(),
                         output: record.output.clone(),
                         exit: record.exit,
                         truncated: record.truncated,
                     };
-                    for run in self.runs.extract_if(.., |run| run.tab == id) {
+                    for run in self.runs.extract_if(.., |run| run.pane == id) {
                         let _ = run.reply.send(response.clone());
                     }
-                    if long && (index != self.active || !self.window_active) && tab.agent_name().is_none() {
+                    if long && !visible && !agent {
                         let what = record.command.clone().unwrap_or_else(|| "Command".to_owned());
                         let result = match record.exit {
                             Some(0) | None => "finished".to_owned(),
                             Some(code) => format!("failed (exit {code})"),
                         };
                         let message = format!("{what} {result}");
-                        self.tabs[index].alert(Some(message.clone()));
-                        self.notify_user(index, None, &message);
+                        if let Some(pane) = self.panes.get_mut(&id) {
+                            pane.alert(Some(message.clone()));
+                        }
+                        self.notify_user(id, None, &message);
                     }
                 }
                 Notice::ClipboardStore(_, text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
                 Notice::ClipboardLoad(_, format) => {
                     let text = cx.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
-                    tab.session.reply_clipboard(&format, &text);
+                    pane.session.reply_clipboard(&format, &text);
                 }
                 Notice::Exited => {
-                    self.close(id, cx);
+                    self.close_pane(id, cx);
                     continue;
                 }
             }
-            self.tabs[index].refresh();
+            if let Some(pane) = self.panes.get_mut(&id) {
+                pane.refresh();
+            }
             cx.notify();
         }
     }
 
-    fn resolve(&self, tab: Option<SessionId>) -> Result<usize, String> {
-        match tab {
-            Some(id) => self.index_of(id).ok_or_else(|| format!("no tab {id}")),
-            None if self.tabs.is_empty() => Err("no tabs".to_owned()),
-            None => Ok(self.active),
+    // Control requests.
+
+    fn resolve(&self, pane: Option<PaneId>) -> Result<PaneId, String> {
+        match pane {
+            Some(id) if self.panes.contains_key(&id) => Ok(id),
+            Some(id) => Err(format!("no pane {id}")),
+            None => self.focused_id().ok_or_else(|| "no tabs".to_owned()),
         }
     }
 
@@ -501,9 +788,9 @@ impl Workspace {
         let response = match request {
             // Answered when the command finishes.
             Request::Run { tab, command, timeout_secs } => match self.start_run(tab, &command) {
-                Ok(tab) => {
+                Ok(pane) => {
                     let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
-                    self.runs.push(PendingRun { tab, reply, deadline });
+                    self.runs.push(PendingRun { pane, reply, deadline });
                     return;
                 }
                 Err(message) => Response::error(message),
@@ -514,15 +801,15 @@ impl Workspace {
         cx.notify();
     }
 
-    /// Type `command` into a tab's shell; returns the tab to wait on.
-    fn start_run(&mut self, tab: Option<SessionId>, command: &str) -> Result<SessionId, String> {
-        let session = &self.tabs[self.resolve(tab)?].session;
+    /// Type `command` into a pane's shell; returns the pane to wait on.
+    fn start_run(&mut self, pane: Option<PaneId>, command: &str) -> Result<PaneId, String> {
+        let id = self.resolve(pane)?;
+        let session = &self.panes[&id].session;
         if !session.shell_integration() {
-            return Err("this tab's shell doesn't report commands (no shell integration)".into());
+            return Err("this pane's shell doesn't report commands (no shell integration)".into());
         }
-        let id = session.id();
-        if session.shell_phase() != ShellPhase::Prompt || self.runs.iter().any(|run| run.tab == id) {
-            return Err("the tab is busy".into());
+        if session.shell_phase() != ShellPhase::Prompt || self.runs.iter().any(|run| run.pane == id) {
+            return Err("the pane is busy".into());
         }
         session.write(format!("{command}\r").into_bytes());
         Ok(id)
@@ -530,17 +817,24 @@ impl Workspace {
 
     fn respond(&mut self, request: Request, cx: &mut Context<Self>) -> Result<Response, String> {
         Ok(match request {
-            Request::List => Response::Tabs {
-                tabs: self.tabs.iter().enumerate().map(|(i, tab)| tab.info(i == self.active)).collect(),
-            },
+            Request::List => {
+                let mut tabs = Vec::new();
+                for (index, tab) in self.tabs.iter().enumerate() {
+                    for id in tab.root.panes() {
+                        let focused = tab.focused == id;
+                        tabs.push(self.panes[&id].info(index + 1, focused && index == self.active, focused));
+                    }
+                }
+                Response::Tabs { tabs }
+            }
             Request::Read { tab, source } => {
-                let session = &self.tabs[self.resolve(tab)?].session;
+                let session = &self.panes[&self.resolve(tab)?].session;
                 let text = match source {
                     ReadSource::Screen => session.screen_text(),
                     ReadSource::Scrollback { lines } => session.scrollback_text(lines),
                     ReadSource::LastCommand => {
                         if !session.shell_integration() {
-                            return Err("this tab's shell doesn't report commands (no shell integration)".into());
+                            return Err("this pane's shell doesn't report commands (no shell integration)".into());
                         }
                         let last = session.last_command().ok_or("no command has finished yet")?;
                         return Ok(Response::Command {
@@ -554,7 +848,7 @@ impl Workspace {
                 Response::Text { text }
             }
             Request::Send { tab, text, enter } => {
-                let session = &self.tabs[self.resolve(tab)?].session;
+                let session = &self.panes[&self.resolve(tab)?].session;
                 let mut bytes = text.into_bytes();
                 if enter {
                     bytes.push(b'\r');
@@ -562,37 +856,51 @@ impl Workspace {
                 session.write(bytes);
                 Response::Ok
             }
-            Request::New { cwd, command, title, focus } => {
+            Request::New { cwd, command, title, focus, split, target } => {
                 let command = (!command.is_empty()).then_some(command);
-                let id = self.open_tab(TabSpec { command, cwd, title, initial_output: None }, focus, cx)?;
+                let spec = TabSpec { command, cwd, title, initial_output: None };
+                let id = match split {
+                    None => self.open_tab(spec, focus, cx)?,
+                    Some(direction) => {
+                        let target = target.map(|t| self.resolve(Some(t))).transpose()?;
+                        let axis = match direction {
+                            SplitDirection::Right => Axis::Horizontal,
+                            SplitDirection::Down => Axis::Vertical,
+                        };
+                        self.split(spec, target, axis, focus, cx)?
+                    }
+                };
                 Response::Tab { id }
             }
             Request::Focus { tab } => {
-                let index = self.resolve(Some(tab))?;
-                self.select(index, cx);
+                let id = self.resolve(Some(tab))?;
+                self.focus_pane(id, cx);
                 Response::Ok
             }
             Request::Close { tab } => {
-                self.resolve(Some(tab))?;
-                self.close(tab, cx);
+                let id = self.resolve(Some(tab))?;
+                self.close_pane(id, cx);
                 Response::Ok
             }
             Request::Run { .. } => unreachable!("handled in handle_request"),
             Request::Notify { tab, title, body } => {
-                let index = self.resolve(tab)?;
-                self.tabs[index].alert(Some(body.clone()));
-                self.notify_user(index, title.as_deref(), &body);
+                let id = self.resolve(tab)?;
+                if let Some(pane) = self.panes.get_mut(&id) {
+                    pane.alert(Some(body.clone()));
+                }
+                self.notify_user(id, title.as_deref(), &body);
                 Response::Ok
             }
             Request::Status { tab, state, message, agent_session } => {
-                let index = self.resolve(tab)?;
-                let was_waiting = matches!(self.tabs[index].status, Status::Agent { state: AgentState::Waiting, .. });
-                self.tabs[index].report(state, message.clone(), agent_session);
+                let id = self.resolve(tab)?;
+                let pane = self.panes.get_mut(&id).ok_or("the pane closed")?;
+                let was_waiting = matches!(pane.status, Status::Agent { state: AgentState::Waiting, .. });
+                pane.report(state, message.clone(), agent_session);
                 match state {
                     AgentState::Waiting if !was_waiting => {
-                        self.notify_user(index, Some("Needs input"), message.as_deref().unwrap_or(""));
+                        self.notify_user(id, Some("Needs input"), message.as_deref().unwrap_or(""));
                     }
-                    AgentState::Done => self.notify_user(index, Some("Done"), message.as_deref().unwrap_or("")),
+                    AgentState::Done => self.notify_user(id, Some("Done"), message.as_deref().unwrap_or("")),
                     _ => {}
                 }
                 Response::Ok
@@ -600,13 +908,11 @@ impl Workspace {
         })
     }
 
-    fn active_session(&self) -> Option<&Session> {
-        self.tabs.get(self.active).map(|tab| &tab.session)
-    }
+    // Timers.
 
-    /// Send user input to the active session, keeping the cursor solid.
+    /// Send user input to the focused pane, keeping the cursor solid.
     fn input(&mut self, bytes: Vec<u8>) {
-        if let Some(session) = self.active_session() {
+        if let Some(session) = self.focused_session() {
             session.write(bytes);
         }
         self.cursor_visible = true;
@@ -626,22 +932,22 @@ impl Workspace {
     }
 
     fn spin(&mut self, cx: &mut Context<Self>) {
-        if self.tabs.iter().any(|tab| tab.status.busy()) {
+        if self.panes.values().any(|pane| pane.status.busy()) {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER.len();
             cx.notify();
         }
     }
 
-    /// Once a second: what's running in each tab, config changes, timeouts.
+    /// Once a second: what's running in each pane, config changes, timeouts.
     fn poll(&mut self, cx: &mut Context<Self>) {
         let mut changed = false;
-        for tab in &mut self.tabs {
-            let process = tab.session.process();
-            let before = (tab.status.clone(), tab.process.clone());
-            tab.process = process;
-            tab.refresh();
-            tab.flush_pending_input();
-            changed |= before != (tab.status.clone(), tab.process.clone()) || tab.status.busy();
+        for pane in self.panes.values_mut() {
+            let process = pane.session.process();
+            let before = (pane.status.clone(), pane.process.clone());
+            pane.process = process;
+            pane.refresh();
+            pane.flush_pending_input();
+            changed |= before != (pane.status.clone(), pane.process.clone()) || pane.status.busy();
         }
         self.polls += 1;
         if self.polls.is_multiple_of(SAVE_EVERY_POLLS) {
@@ -673,9 +979,9 @@ impl Workspace {
         }
         self.theme = Arc::new(config.theme());
         self.agents = agents_of(&config);
-        for tab in &mut self.tabs {
-            tab.session.set_theme(self.theme.clone());
-            tab.set_agents(self.agents.clone());
+        for pane in self.panes.values_mut() {
+            pane.session.set_theme(self.theme.clone());
+            pane.set_agents(self.agents.clone());
         }
         if config.font_size != self.config.font_size {
             self.font_size = config.font_size;
@@ -685,28 +991,26 @@ impl Workspace {
         self.config = Arc::new(config);
     }
 
-    fn report_focus(&self, focused: bool) {
-        if let Some(session) = self.active_session()
-            && session.mode().contains(TermMode::FOCUS_IN_OUT)
-        {
-            session.write(if focused { &b"\x1b[I"[..] } else { &b"\x1b[O"[..] });
+    fn jump_to_attention(&mut self, cx: &mut Context<Self>) {
+        // Every pane in tab order, starting after the focused one.
+        let all: Vec<PaneId> = self.tabs.iter().flat_map(|tab| tab.root.panes()).collect();
+        let start = self.focused_id().and_then(|id| all.iter().position(|&p| p == id)).map_or(0, |i| i + 1);
+        let order: Vec<PaneId> = all.iter().cycle().skip(start).take(all.len()).copied().collect();
+        let waiting = |id: &PaneId| matches!(self.panes[id].status, Status::Agent { state: AgentState::Waiting, .. });
+        let target = order.iter().find(|id| waiting(id)).or_else(|| order.iter().find(|id| self.panes[*id].attention));
+        if let Some(&id) = target {
+            self.focus_pane(id, cx);
         }
     }
 
-    fn jump_to_attention(&mut self, cx: &mut Context<Self>) {
-        let count = self.tabs.len();
-        let order = (1..=count).map(|offset| (self.active + offset) % count);
-        let waiting = |tab: &Tab| matches!(tab.status, Status::Agent { state: AgentState::Waiting, .. });
-        let target = order.clone().find(|&i| waiting(&self.tabs[i])).or_else(|| order.clone().find(|&i| self.tabs[i].attention));
-        if let Some(index) = target {
-            self.select(index, cx);
-        }
-    }
+    // Keyboard.
 
     fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform {
-            if let Some(digit) = keystroke.key.parse::<usize>().ok().filter(|d| (1..=9).contains(d)) {
+            if let Some(digit) = keystroke.key.parse::<usize>().ok().filter(|d| (1..=9).contains(d))
+                && !keystroke.modifiers.alt
+            {
                 self.select(digit - 1, cx);
                 cx.stop_propagation();
             }
@@ -716,14 +1020,14 @@ impl Workspace {
             self.search_key(event, cx);
             return;
         }
-        let Some(session) = self.active_session() else { return };
+        let Some(session) = self.focused_session() else { return };
         if let Some(bytes) = keys::to_esc(keystroke, session.mode(), self.config.option_as_meta) {
             self.input(bytes);
             cx.stop_propagation();
         }
     }
 
-    // Search (⌘F).
+    // Search (⌘F), in the focused pane.
 
     fn open_search(&mut self, cx: &mut Context<Self>) {
         if self.search.is_none() {
@@ -734,23 +1038,25 @@ impl Workspace {
 
     fn close_search(&mut self) {
         if self.search.take().is_some()
-            && let Some(tab) = self.tabs.get_mut(self.active)
+            && let Some(id) = self.focused_id()
+            && let Some(pane) = self.panes.get_mut(&id)
         {
-            tab.session.end_search();
+            pane.session.end_search();
         }
     }
 
     fn run_search(&mut self, older: bool, restart: bool, cx: &mut Context<Self>) {
+        let Some(id) = self.focused_id() else { return };
         let Some(search) = self.search.as_mut() else { return };
-        let Some(tab) = self.tabs.get_mut(self.active) else { return };
+        let Some(pane) = self.panes.get_mut(&id) else { return };
         if restart {
-            tab.session.clear_selection();
+            pane.session.clear_selection();
         }
         if search.query.is_empty() {
             search.found = None;
             search.error = None;
         } else {
-            match tab.session.search(&search.query, older) {
+            match pane.session.search(&search.query, older) {
                 Ok(found) => {
                     search.found = Some(found);
                     search.error = None;
@@ -782,47 +1088,65 @@ impl Workspace {
         cx.stop_propagation();
     }
 
-    /// Whether mouse events go to the program instead of selecting text.
-    /// Holding Shift always selects, as in other terminals.
-    fn mouse_reporting(&self, modifiers: &Modifiers) -> Option<TermMode> {
-        let mode = self.active_session()?.mode();
+    // Mouse.
+
+    /// Whether mouse events in pane `id` go to its program instead of
+    /// selecting text. Holding Shift always selects, as in other terminals.
+    fn mouse_reporting(&self, id: PaneId, modifiers: &Modifiers) -> Option<TermMode> {
+        let mode = self.panes.get(&id)?.session.mode();
         (mode.intersects(TermMode::MOUSE_MODE) && !modifiers.shift).then_some(mode)
     }
 
-    fn report_mouse(&mut self, button: Button, action: Action, position: Point<Pixels>, modifiers: &Modifiers) {
-        let Some(mode) = self.mouse_reporting(modifiers) else { return };
-        let (line, column, _) = self.cell_at(position);
+    fn report_mouse(
+        &mut self,
+        id: PaneId,
+        button: Button,
+        action: Action,
+        position: Point<Pixels>,
+        modifiers: &Modifiers,
+    ) {
+        let Some(mode) = self.mouse_reporting(id, modifiers) else { return };
+        let (line, column, _) = self.cell_at(id, position);
         if action == Action::Motion && self.last_mouse_cell == Some((line, column)) {
             return;
         }
         self.last_mouse_cell = Some((line, column));
-        if let Some(bytes) = mouse::report(button, action, line, column, modifiers, mode) {
-            self.input(bytes);
+        if let Some(bytes) = mouse::report(button, action, line, column, modifiers, mode)
+            && let Some(pane) = self.panes.get(&id)
+        {
+            pane.session.write(bytes);
         }
     }
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window);
+        let Some((id, _)) = self.pane_at(event.position) else { return };
+        if self.focused_id() != Some(id) {
+            self.focus_pane(id, cx);
+        }
+        self.mouse_pane = Some(id);
+        let Some(session) = self.panes.get(&id).map(|pane| &pane.session) else { return };
+
         if event.button == MouseButton::Left && event.modifiers.platform {
-            let (line, column, _) = self.cell_at(event.position);
-            if let Some(link) = self.active_session().and_then(|s| s.link_at(line, column)) {
+            let (line, column, _) = self.cell_at(id, event.position);
+            if let Some(link) = session.link_at(line, column) {
                 let _ = std::process::Command::new("open").arg(&link).spawn();
             }
             return;
         }
-        if self.mouse_reporting(&event.modifiers).is_some() {
+        if self.mouse_reporting(id, &event.modifiers).is_some() {
             if let Some(button) = Button::from_gpui(event.button) {
                 self.reporting_button = Some(button);
                 self.last_mouse_cell = None;
-                self.report_mouse(button, Action::Press, event.position, &event.modifiers);
+                self.report_mouse(id, button, Action::Press, event.position, &event.modifiers);
             }
             return;
         }
         if event.button != MouseButton::Left {
             return;
         }
-        let (line, column, side) = self.cell_at(event.position);
-        let Some(session) = self.active_session() else { return };
+        let (line, column, side) = self.cell_at(id, event.position);
+        let session = &self.panes[&id].session;
         if event.modifiers.shift && session.selection_text().is_some() {
             session.update_selection(line, column, side);
         } else {
@@ -838,33 +1162,52 @@ impl Workspace {
     }
 
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(button) = self.reporting_button {
-            self.report_mouse(button, Action::Motion, event.position, &event.modifiers);
+        if let Some(divider) = &self.drag {
+            let ratio = layout::drag_ratio(divider, event.position.x.into(), event.position.y.into(), SPLIT_GAP);
+            let path = divider.path.clone();
+            if let Some(tab) = self.tabs.get_mut(self.active) {
+                tab.root.set_ratio(&path, ratio);
+            }
+            cx.notify();
+            return;
+        }
+        if let (Some(button), Some(id)) = (self.reporting_button, self.mouse_pane) {
+            self.report_mouse(id, button, Action::Motion, event.position, &event.modifiers);
             return;
         }
         if self.selecting && event.pressed_button == Some(MouseButton::Left) {
-            let (line, column, side) = self.cell_at(event.position);
-            if let Some(session) = self.active_session() {
-                session.update_selection(line, column, side);
+            if let Some(id) = self.mouse_pane {
+                let (line, column, side) = self.cell_at(id, event.position);
+                if let Some(pane) = self.panes.get(&id) {
+                    pane.session.update_selection(line, column, side);
+                }
             }
             cx.notify();
-        } else if event.pressed_button.is_none() && event.position.x > Self::grid_origin().x {
-            self.report_mouse(Button::None, Action::Motion, event.position, &event.modifiers);
+        } else if event.pressed_button.is_none()
+            && let Some((id, _)) = self.pane_at(event.position)
+            && Some(id) == self.focused_id()
+        {
+            self.report_mouse(id, Button::None, Action::Motion, event.position, &event.modifiers);
         }
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(button) = self.reporting_button.take() {
-            self.report_mouse(button, Action::Release, event.position, &event.modifiers);
+        if self.drag.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let id = self.mouse_pane.take();
+        if let (Some(button), Some(id)) = (self.reporting_button.take(), id) {
+            self.report_mouse(id, button, Action::Release, event.position, &event.modifiers);
             return;
         }
         if self.selecting {
             self.selecting = false;
             // A plain click selects nothing; drop the empty selection.
-            if let Some(session) = self.active_session()
-                && session.selection_text().is_none()
+            if let Some(pane) = id.and_then(|id| self.panes.get(&id))
+                && pane.session.selection_text().is_none()
             {
-                session.clear_selection();
+                pane.session.clear_selection();
             }
             cx.notify();
         }
@@ -880,15 +1223,17 @@ impl Workspace {
                 whole
             }
         } as i32;
+        // Scroll the pane under the pointer, focused or not.
+        let Some((id, _)) = self.pane_at(event.position) else { return };
         if lines == 0 {
             return;
         }
-        let Some(session) = self.active_session() else { return };
-        let mode = session.mode();
-        if self.mouse_reporting(&event.modifiers).is_some() {
+        let Some(pane) = self.panes.get(&id) else { return };
+        let mode = pane.session.mode();
+        if self.mouse_reporting(id, &event.modifiers).is_some() {
             let button = if lines > 0 { Button::WheelUp } else { Button::WheelDown };
             for _ in 0..lines.unsigned_abs() {
-                self.report_mouse(button, Action::Press, event.position, &event.modifiers);
+                self.report_mouse(id, button, Action::Press, event.position, &event.modifiers);
             }
         } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
             // Full-screen programs (less, vim) get arrow keys instead.
@@ -898,15 +1243,15 @@ impl Workspace {
                 (false, true) => b"\x1bOB",
                 (false, false) => b"\x1b[B",
             };
-            self.input(key.repeat(lines.unsigned_abs() as usize));
+            pane.session.write(key.repeat(lines.unsigned_abs() as usize));
         } else {
-            session.scroll(lines);
+            pane.session.scroll(lines);
         }
         cx.notify();
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = self.active_session().and_then(Session::selection_text) {
+        if let Some(text) = self.focused_session().and_then(Session::selection_text) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -918,7 +1263,7 @@ impl Workspace {
             self.run_search(true, true, cx);
             return;
         }
-        let Some(session) = self.active_session() else { return };
+        let Some(session) = self.focused_session() else { return };
         let bytes = if session.mode().contains(TermMode::BRACKETED_PASTE) {
             // Strip any embedded end marker so pasted text can't escape the bracket.
             format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", ""))
@@ -934,95 +1279,148 @@ impl Workspace {
         cx.notify();
     }
 
-    fn status_icon(&self, tab: &Tab) -> Option<(SharedString, Hsla)> {
+    // Sidebar.
+
+    fn status_icon(&self, pane: &Pane) -> Option<(SharedString, Hsla, f32)> {
         let color = |hex: u32| -> Hsla { rgba(hex).into() };
-        Some(match &tab.status {
-            status if status.busy() => (SPINNER[self.spinner_frame].into(), color(0x8fb4ffff)),
-            Status::Agent { state: AgentState::Waiting, .. } => ("●".into(), color(0xe0af68ff)),
-            Status::Agent { state: AgentState::Done, .. } => ("✓".into(), color(0x9ece6aff)),
-            Status::Failed { .. } => ("✕".into(), color(0xf7768eff)),
-            _ if tab.attention => ("●".into(), color(0xe0af68ff)),
+        // Braille spinner frames are tiny at text size.
+        Some(match &pane.status {
+            status if status.busy() => (SPINNER[self.spinner_frame].into(), color(0x8fb4ffff), 16.),
+            Status::Agent { state: AgentState::Waiting, .. } => ("●".into(), color(0xe0af68ff), 12.),
+            Status::Agent { state: AgentState::Done, .. } => ("✓".into(), color(0x9ece6aff), 12.),
+            Status::Failed { .. } => ("✕".into(), color(0xf7768eff), 12.),
+            _ if pane.attention => ("●".into(), color(0xe0af68ff), 12.),
             _ => return None,
         })
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let rows = self.tabs.iter().enumerate().map(|(i, tab)| {
-            let selected = i == self.active;
-            let label: SharedString = if i < 9 { format!("⌘{}", i + 1).into() } else { "".into() };
-            let mut detail = tab.detail();
-            if let Some(Progress::Normal(percent) | Progress::Paused(Some(percent)) | Progress::Error(Some(percent))) = tab.progress {
-                detail = Some(format!("{} · {percent}%", detail.unwrap_or_default()).trim_start_matches(" · ").to_owned());
+    fn icon_cell(&self, pane: &Pane) -> gpui::Div {
+        let icon = self.status_icon(pane);
+        div()
+            .w(px(12.))
+            .flex_none()
+            .flex()
+            .justify_center()
+            .when_some(icon, |d, (icon, color, size)| d.text_color(color).text_size(px(size)).child(icon))
+    }
+
+    fn pane_detail(pane: &Pane) -> Option<String> {
+        let detail = pane.detail();
+        match pane.progress {
+            Some(Progress::Normal(percent) | Progress::Paused(Some(percent)) | Progress::Error(Some(percent))) => {
+                Some(match detail {
+                    Some(detail) => format!("{detail} · {percent}%"),
+                    None => format!("{percent}%"),
+                })
             }
-            let icon = self.status_icon(tab);
-            let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
-            div()
-                .id(i)
-                .flex()
-                .items_center()
-                .gap(px(6.))
-                .min_h(px(30.))
-                .py(px(4.))
-                .px_2()
-                .rounded(px(7.))
-                .when(selected, |d| d.bg(rgba(0xffffff1c)))
-                .when(tab.attention && !selected, |d| d.bg(rgba(0xe0af6814)))
-                .hover(|d| d.bg(rgba(0xffffff10)))
-                .on_click(cx.listener(move |this, _, _, cx| this.select(i, cx)))
-                .child(
-                    div()
-                        .w(px(12.))
-                        .flex_none()
-                        .flex()
-                        .justify_center()
-                        .when_some(icon, |d, (icon, color)| {
-                            // Braille spinner frames are tiny at text size.
-                            let size = if tab.status.busy() { 16. } else { 12. };
-                            d.text_color(color).text_size(px(size)).child(icon)
-                        }),
-                )
-                .child(
-                    // GPUI 0.2 caches the first measurement of `nowrap` text, which
-                    // happens before the width is known, so `.truncate()` only clips.
-                    // A one-line clamp re-measures at the real width and ellipsizes.
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .overflow_hidden()
-                                .line_clamp(1)
-                                .text_ellipsis()
-                                .text_color(text_color)
-                                .when(tab.attention, |d| d.font_weight(FontWeight::SEMIBOLD))
-                                .child(tab.title()),
-                        )
-                        .when_some(detail, |d, detail| {
-                            d.child(
-                                div()
-                                    .overflow_hidden()
-                                    .line_clamp(1)
-                                    .text_ellipsis()
-                                    .text_size(px(11.))
-                                    .text_color(rgba(0xffffff70))
-                                    .child(detail),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .w(px(TAB_LABEL_WIDTH))
-                        .flex_none()
-                        .flex()
-                        .justify_end()
-                        .text_xs()
-                        .text_color(rgba(0xffffff66))
-                        .child(label),
-                )
+            _ => detail,
+        }
+    }
+
+    fn one_line(text: impl Into<SharedString>) -> gpui::Div {
+        // GPUI 0.2 caches the first measurement of `nowrap` text, which happens
+        // before the width is known, so `.truncate()` only clips. A one-line
+        // clamp re-measures at the real width and ellipsizes.
+        div().overflow_hidden().line_clamp(1).text_ellipsis().child(text.into())
+    }
+
+    fn tab_row(&self, index: usize, tab: &Tab, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let selected = index == self.active;
+        let ids = tab.root.panes();
+        let split = ids.len() > 1;
+        let panes: Vec<&Pane> = ids.iter().map(|id| &self.panes[id]).collect();
+        let focused = &self.panes[&tab.focused];
+        // The row shows the most urgent pane, preferring the focused one.
+        let summary = panes
+            .iter()
+            .copied()
+            .max_by_key(|pane| (pane.status.urgency(), std::ptr::eq(*pane, focused)))
+            .unwrap_or(focused);
+        let attention = panes.iter().any(|pane| pane.attention);
+        let label: SharedString = if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
+        let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
+        let detail = if split { None } else { Self::pane_detail(focused) };
+
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(self.icon_cell(summary))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        Self::one_line(focused.title())
+                            .text_color(text_color)
+                            .when(attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
+                    )
+                    .when_some(detail, |d, detail| {
+                        d.child(Self::one_line(detail).text_size(px(11.)).text_color(rgba(0xffffff70)))
+                    }),
+            )
+            .child(
+                div()
+                    .w(px(TAB_LABEL_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .justify_end()
+                    .text_xs()
+                    .text_color(rgba(0xffffff66))
+                    .child(label),
+            );
+
+        // Split tabs list their panes, so every agent's state is visible.
+        let pane_rows = split.then(|| {
+            ids.iter().map(|&id| {
+                let pane = &self.panes[&id];
+                let is_focused = id == tab.focused;
+                let line = match Self::pane_detail(pane) {
+                    Some(detail) => format!("{} · {detail}", pane.title()),
+                    None => pane.title().to_string(),
+                };
+                div()
+                    .id(("pane", id as usize))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .pl(px(14.))
+                    .text_size(px(11.5))
+                    .rounded(px(5.))
+                    .hover(|d| d.bg(rgba(0xffffff0c)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.focus_pane(id, cx)))
+                    .child(self.icon_cell(pane))
+                    .child(
+                        Self::one_line(line)
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(if is_focused && selected { rgba(0xffffffd0) } else { rgba(0xffffff80) })
+                            .when(pane.attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
+                    )
+            })
         });
 
+        div()
+            .id(("tab", index))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .min_h(px(30.))
+            .py(px(4.))
+            .px_2()
+            .rounded(px(7.))
+            .when(selected, |d| d.bg(rgba(0xffffff1c)))
+            .when(attention && !selected, |d| d.bg(rgba(0xe0af6814)))
+            .hover(|d| d.bg(rgba(0xffffff10)))
+            .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+            .child(header)
+            .children(pane_rows.into_iter().flatten())
+    }
+
+    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let rows: Vec<_> = self.tabs.iter().enumerate().map(|(i, tab)| self.tab_row(i, tab, cx)).collect();
         div()
             .flex()
             .flex_col()
@@ -1072,8 +1470,11 @@ impl Workspace {
             })
     }
 
-    fn search_bar(&self) -> Option<impl IntoElement> {
+    /// The find bar, at the top right of the focused pane. Positions are
+    /// relative to the terminal area's container.
+    fn search_bar(&self, origin: Point<Pixels>) -> Option<impl IntoElement> {
         let search = self.search.as_ref()?;
+        let rect = self.rect_of(self.focused_id()?)?;
         let mut query = search.query.clone();
         if let Some(marked) = &self.marked_text {
             query.push_str(marked);
@@ -1083,11 +1484,13 @@ impl Workspace {
             (None, Some(false)) => ("no match".to_owned(), rgba(0xf7768eff)),
             _ => ("⏎ older · ⇧⏎ newer · esc".to_owned(), rgba(0xffffff60)),
         };
+        // The container's right edge is the area's plus its padding.
+        let container_right = self.area.x + self.area.width + PADDING;
         Some(
             div()
                 .absolute()
-                .top(px(6.))
-                .right(px(PADDING + 4.))
+                .top(px(rect.y) - origin.y + px(6.))
+                .right(px(container_right - (rect.x + rect.width) + 4.))
                 .flex()
                 .items_center()
                 .gap_2()
@@ -1110,6 +1513,37 @@ impl Workspace {
                 .child(div().text_color(status_color).child(status)),
         )
     }
+
+    /// Hit areas for dragging dividers. Positions are relative to the
+    /// terminal area's container at `origin`.
+    fn divider_handles(&self, origin: Point<Pixels>, cx: &mut Context<Self>) -> Vec<impl IntoElement> {
+        self.dividers
+            .iter()
+            .enumerate()
+            .map(|(i, divider)| {
+                let rect = divider.rect;
+                let handle = divider.clone();
+                div()
+                    .id(("divider", i))
+                    .absolute()
+                    .left(px(rect.x) - origin.x)
+                    .top(px(rect.y) - origin.y)
+                    .w(px(rect.width))
+                    .h(px(rect.height))
+                    .map(|d| match divider.axis {
+                        Axis::Horizontal => d.cursor_col_resize(),
+                        Axis::Vertical => d.cursor_row_resize(),
+                    })
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                            this.drag = Some(handle.clone());
+                            cx.stop_propagation();
+                        }),
+                    )
+            })
+            .collect()
+    }
 }
 
 fn saved_window(bounds: WindowBounds) -> SavedWindow {
@@ -1130,7 +1564,7 @@ fn saved_window(bounds: WindowBounds) -> SavedWindow {
 
 /// Window bounds to open with, from a saved window.
 pub fn window_bounds(saved: &SavedWindow) -> WindowBounds {
-    let rect = Bounds::new(point(px(saved.x), px(saved.y)), gpui::size(px(saved.width), px(saved.height)));
+    let rect = Bounds::new(point(px(saved.x), px(saved.y)), size(px(saved.width), px(saved.height)));
     if saved.fullscreen {
         WindowBounds::Fullscreen(rect)
     } else if saved.maximized {
@@ -1150,38 +1584,84 @@ pub fn background_appearance(config: &Config) -> WindowBackgroundAppearance {
     }
 }
 
+/// What to paint for one pane.
+struct PaneView {
+    rect: Rect,
+    frame: artty_core::Frame,
+    focused: bool,
+}
+
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.reload_config {
             self.apply_config(window);
         }
-        self.size = self.terminal_size(window);
-        for tab in &mut self.tabs {
-            tab.session.resize(self.size);
-        }
+        self.area = Self::area_rect(window);
         self.window_bounds = Some(saved_window(window.window_bounds()));
         self.window_active = window.is_window_active();
-        if self.window_active
-            && let Some(tab) = self.tabs.get_mut(self.active)
-        {
-            tab.attention = false;
+
+        // Size every pane of every tab to its place in the layout.
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let (rects, dividers) = tab.layout(self.area);
+            for (id, rect) in &rects {
+                let size = self.size_for(*rect);
+                if let Some(pane) = self.panes.get_mut(id) {
+                    pane.session.resize(size);
+                }
+            }
+            if index == self.active {
+                self.pane_rects = rects;
+                self.dividers = dividers;
+            }
         }
-        let frame = self.active_session().map(Session::frame);
-        self.cursor = frame.as_ref().and_then(|frame| frame.cursor);
+        if self.window_active {
+            for (id, _) in &self.pane_rects {
+                if let Some(pane) = self.panes.get_mut(id) {
+                    pane.attention = false;
+                }
+            }
+        }
 
-        let focused = self.focus.is_focused(window) && self.window_active && self.search.is_none();
-        self.blink_enabled =
-            focused && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
+        let focused_id = self.focused_id();
+        let split = self.pane_rects.len() > 1;
+        let views: Vec<PaneView> = self
+            .pane_rects
+            .iter()
+            .filter_map(|(id, rect)| {
+                let frame = self.panes.get(id)?.session.frame();
+                Some(PaneView { rect: *rect, frame, focused: Some(*id) == focused_id })
+            })
+            .collect();
+        self.cursor = views.iter().find(|view| view.focused).and_then(|view| view.frame.cursor);
 
-        let title = self.tabs.get(self.active).map(Tab::title).unwrap_or_default();
+        let window_focused = self.focus.is_focused(window) && self.window_active;
+        let typing = window_focused && self.search.is_none();
+        self.blink_enabled = typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
+
+        let title = self.focused_pane().map(Pane::title).unwrap_or_default();
         window.set_window_title(&title);
 
         let tint = Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
+        let divider_color: Hsla = rgba(0xffffff1c).into();
         let metrics = self.metrics.clone();
         let marked_text = self.marked_text.clone().filter(|_| self.search.is_none());
         let cursor_visible = self.cursor_visible;
+        let focused_rect = focused_id.and_then(|id| self.rect_of(id));
+        let divider_lines: Vec<Bounds<Pixels>> = self
+            .dividers
+            .iter()
+            .map(|divider| {
+                let r = divider.rect;
+                match divider.axis {
+                    Axis::Horizontal => bounds(Rect { x: r.x + (r.width / 2.).floor(), width: 1., ..r }),
+                    Axis::Vertical => bounds(Rect { y: r.y + (r.height / 2.).floor(), height: 1., ..r }),
+                }
+            })
+            .collect();
         let focus = self.focus.clone();
         let entity = cx.entity();
+        // The terminal container starts right of the sidebar, below the title bar.
+        let container = point(px(SIDEBAR_WIDTH), px(TITLEBAR_HEIGHT));
 
         div()
             .track_focus(&self.focus)
@@ -1192,11 +1672,12 @@ impl Render for Workspace {
                     log::error!("{err}");
                 }
             }))
-            .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
-                if let Some(id) = this.active_session().map(Session::id) {
-                    this.close(id, cx);
+            .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
+                if let Some(id) = this.focused_id() {
+                    this.close_pane(id, cx);
                 }
             }))
+            .on_action(cx.listener(|this, _: &CloseTab, _, cx| this.close_tab(this.active, cx)))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| {
                 let next = (this.active + 1) % this.tabs.len().max(1);
                 this.select(next, cx);
@@ -1205,6 +1686,23 @@ impl Render for Workspace {
                 let count = this.tabs.len().max(1);
                 this.select((this.active + count - 1) % count, cx);
             }))
+            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
+                if let Err(err) = this.split(TabSpec::default(), None, Axis::Horizontal, true, cx) {
+                    log::error!("{err}");
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
+                if let Err(err) = this.split(TabSpec::default(), None, Axis::Vertical, true, cx) {
+                    log::error!("{err}");
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FocusLeft, _, cx| this.focus_direction(Direction::Left, cx)))
+            .on_action(cx.listener(|this, _: &FocusRight, _, cx| this.focus_direction(Direction::Right, cx)))
+            .on_action(cx.listener(|this, _: &FocusUp, _, cx| this.focus_direction(Direction::Up, cx)))
+            .on_action(cx.listener(|this, _: &FocusDown, _, cx| this.focus_direction(Direction::Down, cx)))
+            .on_action(cx.listener(|this, _: &NextPane, _, cx| this.cycle_pane(true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousPane, _, cx| this.cycle_pane(false, cx)))
+            .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| this.toggle_zoom(cx)))
             .on_action(cx.listener(|this, _: &JumpToAttention, _, cx| this.jump_to_attention(cx)))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
@@ -1251,7 +1749,7 @@ impl Render for Workspace {
                             .justify_center()
                             .text_size(px(13.))
                             .text_color(rgba(0xffffffb8))
-                            .child(div().min_w_0().overflow_hidden().line_clamp(1).text_ellipsis().child(title)),
+                            .child(Self::one_line(title).min_w_0()),
                     )
                     .child(
                         div()
@@ -1259,7 +1757,6 @@ impl Render for Workspace {
                             .relative()
                             .flex_1()
                             .min_h_0()
-                            .px(px(PADDING))
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
                             .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
                             .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
@@ -1267,21 +1764,28 @@ impl Render for Workspace {
                             .child(
                                 canvas(
                                     |_, _, _| {},
-                                    move |bounds, _, window, cx| {
-                                        window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx);
-                                        if let Some(frame) = frame {
+                                    move |_, _, window, cx| {
+                                        if let Some(rect) = focused_rect {
+                                            window.handle_input(&focus, ElementInputHandler::new(bounds(rect), entity), cx);
+                                        }
+                                        for view in &views {
                                             let cursor = terminal::CursorState {
-                                                focused,
+                                                focused: view.focused && typing,
                                                 visible: cursor_visible,
-                                                marked_text: marked_text.as_deref(),
+                                                marked_text: marked_text.as_deref().filter(|_| view.focused),
+                                                fade: if split && !view.focused { UNFOCUSED_FADE } else { 0. },
                                             };
-                                            terminal::paint(bounds, &frame, &metrics, cursor, window, cx);
+                                            terminal::paint(bounds(view.rect), &view.frame, &metrics, cursor, window, cx);
+                                        }
+                                        for line in &divider_lines {
+                                            window.paint_quad(fill(*line, divider_color));
                                         }
                                     },
                                 )
                                 .size_full(),
                             )
-                            .children(self.search_bar()),
+                            .children(self.divider_handles(container, cx))
+                            .children(self.search_bar(container)),
                     ),
             )
     }
@@ -1377,9 +1881,19 @@ pub fn bind_keys(cx: &mut App) {
     use gpui::KeyBinding;
     cx.bind_keys([
         KeyBinding::new("cmd-t", NewTab, None),
-        KeyBinding::new("cmd-w", CloseTab, None),
+        KeyBinding::new("cmd-w", ClosePane, None),
+        KeyBinding::new("cmd-shift-w", CloseTab, None),
         KeyBinding::new("cmd-shift-]", NextTab, None),
         KeyBinding::new("cmd-shift-[", PreviousTab, None),
+        KeyBinding::new("cmd-d", SplitRight, None),
+        KeyBinding::new("cmd-shift-d", SplitDown, None),
+        KeyBinding::new("cmd-alt-left", FocusLeft, None),
+        KeyBinding::new("cmd-alt-right", FocusRight, None),
+        KeyBinding::new("cmd-alt-up", FocusUp, None),
+        KeyBinding::new("cmd-alt-down", FocusDown, None),
+        KeyBinding::new("cmd-]", NextPane, None),
+        KeyBinding::new("cmd-[", PreviousPane, None),
+        KeyBinding::new("cmd-shift-enter", ToggleZoom, None),
         KeyBinding::new("cmd-j", JumpToAttention, None),
         KeyBinding::new("cmd-c", Copy, None),
         KeyBinding::new("cmd-v", Paste, None),

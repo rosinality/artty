@@ -11,7 +11,8 @@ use artty_vt::term::Term;
 use artty_vt::term::cell::{Cell, Flags};
 use serde::{Deserialize, Serialize};
 
-const VERSION: u32 = 1;
+/// Version 2 added split layouts; version 1 files (one pane per tab) still load.
+const VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -33,9 +34,54 @@ pub struct SavedWindow {
     pub fullscreen: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(from = "TabRepr")]
+pub struct SavedTab {
+    pub layout: SavedLayout,
+    /// The focused pane, as an index into the layout's panes in reading order.
+    pub focused: usize,
+    pub zoomed: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SavedLayout {
+    Pane(SavedPane),
+    Split {
+        /// Stacked (`true`) or side by side.
+        vertical: bool,
+        ratio: f32,
+        first: Box<SavedLayout>,
+        second: Box<SavedLayout>,
+    },
+}
+
+/// How tabs were stored: version 2 has a layout, version 1 was a single pane.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TabRepr {
+    Split {
+        layout: SavedLayout,
+        #[serde(default)]
+        focused: usize,
+        #[serde(default)]
+        zoomed: bool,
+    },
+    Single(SavedPane),
+}
+
+impl From<TabRepr> for SavedTab {
+    fn from(repr: TabRepr) -> Self {
+        match repr {
+            TabRepr::Split { layout, focused, zoomed } => Self { layout, focused, zoomed },
+            TabRepr::Single(pane) => Self { layout: SavedLayout::Pane(pane), focused: 0, zoomed: false },
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct SavedTab {
+pub struct SavedPane {
     /// Title given with `artty new --title`.
     pub title: Option<String>,
     pub cwd: Option<PathBuf>,
@@ -80,7 +126,7 @@ impl SavedState {
         let state: Self = serde_json::from_str(&text)
             .inspect_err(|err| log::warn!("ignoring saved state: {err}"))
             .ok()?;
-        (state.version == VERSION).then_some(state)
+        (1..=VERSION).contains(&state.version).then_some(state)
     }
 
     /// Write atomically, so a crash mid-write keeps the previous state.
@@ -267,20 +313,35 @@ mod tests {
 
     #[test]
     fn state_file_format() {
-        let state = SavedState::new(
-            None,
-            1,
-            vec![SavedTab {
-                cwd: Some("/tmp".into()),
-                agent: Some(SavedAgent { name: "claude".into(), session: Some("abc".into()) }),
-                ..Default::default()
-            }],
-        );
+        let pane = |cwd: &str| SavedPane { cwd: Some(cwd.into()), ..Default::default() };
+        let agent = SavedPane {
+            agent: Some(SavedAgent { name: "claude".into(), session: Some("abc".into()) }),
+            ..pane("/tmp")
+        };
+        let tab = SavedTab {
+            layout: SavedLayout::Split {
+                vertical: false,
+                ratio: 0.6,
+                first: Box::new(SavedLayout::Pane(agent)),
+                second: Box::new(SavedLayout::Pane(pane("/src"))),
+            },
+            focused: 1,
+            zoomed: false,
+        };
+        let state = SavedState::new(None, 0, vec![tab]);
         let json = serde_json::to_string(&state).unwrap();
         let back: SavedState = serde_json::from_str(&json).unwrap();
         assert_eq!(back.tabs, state.tabs);
-        // Unknown and missing fields are tolerated.
-        let old: SavedState = serde_json::from_str(r#"{"version":1,"tabs":[{"cwd":"/x","future":1}]}"#).unwrap();
-        assert_eq!(old.tabs[0].cwd.as_deref(), Some(std::path::Path::new("/x")));
+    }
+
+    #[test]
+    fn version_1_files_load() {
+        // One pane per tab; unknown fields are tolerated.
+        let old: SavedState =
+            serde_json::from_str(r#"{"version":1,"active":0,"tabs":[{"cwd":"/x","title":"t","future":1}]}"#).unwrap();
+        let SavedLayout::Pane(pane) = &old.tabs[0].layout else { panic!("expected a single pane") };
+        assert_eq!(pane.cwd.as_deref(), Some(std::path::Path::new("/x")));
+        assert_eq!(pane.title.as_deref(), Some("t"));
+        assert_eq!(old.tabs[0].focused, 0);
     }
 }

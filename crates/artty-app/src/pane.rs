@@ -1,14 +1,14 @@
-//! A tab: one session plus what the sidebar shows about it.
+//! A pane: one session plus what the sidebar shows about it.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use artty_core::control::{AgentState, TabInfo};
 use artty_core::vt::ansi::Progress;
-use artty_core::{ProcessInfo, SavedAgent, SavedTab, Session, ShellPhase};
+use artty_core::{ProcessInfo, SavedAgent, SavedPane, Session, ShellPhase};
 use gpui::SharedString;
 
-/// What a tab is doing, as shown in the sidebar.
+/// What a pane is doing, as shown in the sidebar.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
     /// At the shell prompt.
@@ -34,13 +34,25 @@ impl Status {
         }
     }
 
+    /// How much this status matters when summarizing a tab's panes.
+    pub fn urgency(&self) -> u8 {
+        match self {
+            Status::Agent { state: AgentState::Waiting, .. } => 5,
+            status if status.busy() => 4,
+            Status::Failed { .. } => 3,
+            Status::Agent { state: AgentState::Done, .. } => 2,
+            Status::Agent { .. } => 1,
+            _ => 0,
+        }
+    }
+
     /// Whether the sidebar should animate a spinner.
     pub fn busy(&self) -> bool {
         matches!(self, Status::Running { .. } | Status::Agent { state: AgentState::Working, .. })
     }
 }
 
-pub struct Tab {
+pub struct Pane {
     pub session: Session,
     /// Title set by the program.
     pub title: Option<String>,
@@ -84,7 +96,7 @@ fn is_shell(name: &str) -> bool {
     SHELLS.contains(&name.trim_start_matches('-'))
 }
 
-impl Tab {
+impl Pane {
     pub fn new(
         session: Session,
         fixed_title: Option<String>,
@@ -267,8 +279,8 @@ impl Tab {
         }
     }
 
-    /// What to save so the tab can be reopened.
-    pub fn saved(&self, scrollback_lines: usize) -> SavedTab {
+    /// What to save so the pane can be reopened.
+    pub fn saved(&self, scrollback_lines: usize) -> SavedPane {
         let agent = match &self.status {
             Status::Agent { name, .. } => Some(SavedAgent { name: name.clone(), session: self.agent_session.clone() }),
             _ => None,
@@ -276,7 +288,7 @@ impl Tab {
         // An agent tab reopens as a shell that resumes the agent, not as a
         // fresh copy of whatever command started it.
         let command = if agent.is_some() { None } else { self.command.clone() };
-        SavedTab {
+        SavedPane {
             title: self.fixed_title.clone(),
             cwd: self.session.cwd(),
             command,
@@ -285,11 +297,14 @@ impl Tab {
         }
     }
 
-    pub fn info(&self, active: bool) -> TabInfo {
+    /// `tab` is the 1-based tab number.
+    pub fn info(&self, tab: usize, active: bool, focused: bool) -> TabInfo {
         TabInfo {
             id: self.session.id(),
+            tab,
             title: self.title().to_string(),
             active,
+            focused,
             cwd: self.session.cwd(),
             process: self.process.foreground.clone(),
             status: self.status.label().to_owned(),

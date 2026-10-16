@@ -3,7 +3,7 @@
 A GPU-accelerated macOS terminal for working with AI coding agents, written in
 Rust with [GPUI](https://gpui.rs).
 
-- A translucent, blurred window with a sidebar of tabs.
+- A translucent, blurred window with a sidebar of tabs, each split into panes.
 - The sidebar shows what each tab is doing: a running command and how long it
   has run, a coding agent working, waiting for you, or done, a failed exit code,
   and progress.
@@ -28,7 +28,12 @@ toolchain isn't needed for development.
 
 | Keys | Action |
 |---|---|
-| ⌘T / ⌘W | New tab (in the current directory) / close tab |
+| ⌘T | New tab (in the current directory) |
+| ⌘D / ⌘⇧D | Split the pane right / down |
+| ⌘W / ⌘⇧W | Close pane (the tab closes with its last pane) / close tab |
+| ⌘⌥←↑→↓, ⌘[ / ⌘] | Move to the pane in that direction / previous, next pane |
+| ⌘⇧↩ | Zoom the pane to fill the tab, and back |
+| Drag a divider | Resize panes |
 | ⌘1…⌘9, ⌘⇧[ / ⌘⇧] | Switch tabs |
 | ⌘J | Jump to the next tab that needs attention |
 | ⌘C / ⌘V | Copy selection / paste |
@@ -69,7 +74,7 @@ versions.
 ### Restoring tabs and resuming agents
 
 artty saves your tabs every few seconds and on quit, and reopens them on the
-next launch: each tab's directory, its last 1000 lines of output (with colors),
+next launch: each tab's split layout, and each pane's directory, its last 1000 lines of output (with colors),
 and the program it was opened with. A tab where an agent was running reopens
 its shell and runs the agent's resume command — for Claude Code,
 `claude --resume <id>` with the conversation id its hooks reported (or
@@ -82,12 +87,14 @@ the config to change or turn this off.
 
 ### The `artty` command
 
-Every tab gets `artty` on its `PATH`, plus `ARTTY_SOCKET` and
-`ARTTY_SESSION_ID`, so an agent can drive other tabs:
+Every pane gets `artty` on its `PATH`, plus `ARTTY_SOCKET` and
+`ARTTY_SESSION_ID`, so an agent can drive other panes. Ids name panes; a tab
+holds one or more.
 
 ```sh
-artty list                                  # tabs with id, status, title
+artty list                                  # panes with id, tab, status, title
 artty new --title server --background -- npm run dev
+artty new --split right -- npm run dev      # a pane next to your own
 artty run --tab 3 -- cargo test             # prints output, exits with its code
 artty read --tab 3 --lines 50               # last 50 lines
 artty read --tab 3 --last                   # last command's output

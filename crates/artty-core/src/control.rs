@@ -63,8 +63,18 @@ pub enum Request {
     Read { tab: Option<SessionId>, source: ReadSource },
     /// Type text into a tab.
     Send { tab: Option<SessionId>, text: String, enter: bool },
-    /// Open a tab running the shell, or `command`.
-    New { cwd: Option<PathBuf>, command: Vec<String>, title: Option<String>, focus: bool },
+    /// Open a tab running the shell, or `command`; with `split`, open a pane
+    /// next to `target` (default: the focused pane) instead.
+    New {
+        cwd: Option<PathBuf>,
+        command: Vec<String>,
+        title: Option<String>,
+        focus: bool,
+        #[serde(default)]
+        split: Option<SplitDirection>,
+        #[serde(default)]
+        target: Option<SessionId>,
+    },
     Focus { tab: SessionId },
     Close { tab: SessionId },
     /// Run a command in a tab's shell and wait for it to finish. Needs shell
@@ -81,6 +91,13 @@ pub enum Request {
         #[serde(default)]
         agent_session: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplitDirection {
+    Right,
+    Down,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -124,11 +141,19 @@ impl Response {
     }
 }
 
+/// A pane (`id`) and the tab it's in.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TabInfo {
     pub id: SessionId,
+    /// 1-based tab number.
+    #[serde(default)]
+    pub tab: usize,
     pub title: String,
+    /// The focused pane of the active tab.
     pub active: bool,
+    /// The focused pane of its tab.
+    #[serde(default)]
+    pub focused: bool,
     pub cwd: Option<PathBuf>,
     /// Foreground process, e.g. `fish` or `claude`.
     pub process: Option<String>,
