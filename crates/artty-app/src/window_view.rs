@@ -291,6 +291,8 @@ pub struct WindowView {
     renaming: Option<Renaming>,
     /// Asked for a new workspace: name it when it shows up.
     naming_new_workspace: bool,
+    /// A workspace whose close button was clicked once; a second click closes it.
+    closing_workspace: Option<WorkspaceId>,
     picker: Option<Picker>,
     /// The Activity view, when it's shown instead of the active tab.
     activity: Option<activity::Activity>,
@@ -379,6 +381,7 @@ impl WindowView {
             context_menu: None,
             renaming: None,
             naming_new_workspace: false,
+            closing_workspace: None,
             picker: None,
             activity: None,
             _tasks: vec![blink, poll, spinner],
@@ -1425,6 +1428,7 @@ impl WindowView {
         let label: SharedString = if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
         let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
         let detail = if split { None } else { focused.and_then(Self::pane_detail) };
+        let group: SharedString = format!("tab-row-{index}").into();
 
         let header = div()
             .flex()
@@ -1457,15 +1461,42 @@ impl WindowView {
                         d.child(Self::one_line(detail).text_size(px(11.)).text_color(rgba(0xffffff70)))
                     }),
             )
+            // The shortcut, or on hover a close button in its place.
+            // (Fading, not hiding: GPUI can't change layout on hover.)
             .child(
                 div()
+                    .relative()
                     .w(px(TAB_LABEL_WIDTH))
                     .flex_none()
                     .flex()
                     .justify_end()
                     .text_xs()
                     .text_color(rgba(0xffffff66))
-                    .child(label),
+                    .child(div().group_hover(group.clone(), |s| s.opacity(0.)).child(label))
+                    .child(
+                        div()
+                            .id(("close-tab", index))
+                            .absolute()
+                            .right_0()
+                            .top(px(-2.))
+                            .opacity(0.)
+                            .group_hover(group.clone(), |s| s.opacity(1.))
+                            .flex()
+                            .size(px(18.))
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
+                            .text_size(px(13.))
+                            .text_color(rgba(0xffffffa0))
+                            .hover(|d| d.bg(rgba(0xffffff1f)).text_color(rgba(0xffffffee)))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(&(workspace, tab)) = this.places.get(index) {
+                                    this.send(ClientMessage::CloseTab { workspace, tab }, cx);
+                                }
+                                cx.stop_propagation();
+                            })),
+                    ),
             );
 
         // Split tabs list their panes, so every agent's state is visible.
@@ -1501,6 +1532,7 @@ impl WindowView {
 
         div()
             .id(("tab", index))
+            .group(group)
             .flex()
             .flex_col()
             .gap(px(2.))
@@ -1573,6 +1605,8 @@ impl WindowView {
         };
         let tabs = workspace.tabs.len();
         let color = workspace.color.as_deref().and_then(workspace_color);
+        let group: SharedString = format!("workspace-header-{id}").into();
+        let closing = self.closing_workspace == Some(id);
         // Hovering tells what it uses (and where it's rooted).
         let mut usage = format!("CPU {:.1}% · Memory {}", workspace.cpu_percent, crate::cli::bytes(workspace.memory_bytes));
         if let Some(root) = &workspace.root {
@@ -1580,6 +1614,7 @@ impl WindowView {
         }
         div()
             .id(("workspace", id as usize))
+            .group(group.clone())
             .flex()
             .items_center()
             .gap(px(4.))
@@ -1624,6 +1659,43 @@ impl WindowView {
                         cx.stop_propagation();
                     })),
             )
+            // Closing a whole workspace takes a second click.
+            .child(
+                div()
+                    .id(("workspace-close", id as usize))
+                    .flex_none()
+                    .px_1()
+                    .rounded(px(4.))
+                    .map(|d| {
+                        if closing {
+                            d.bg(rgba(0xf7768eff)).text_size(px(11.)).text_color(rgba(0xffffffff)).child("Close?")
+                        } else {
+                            d.opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .text_size(px(13.))
+                                .text_color(rgba(0xffffff70))
+                                .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffd0)))
+                                .child("×")
+                        }
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.closing_workspace == Some(id) {
+                            this.closing_workspace = None;
+                            this.send(ClientMessage::CloseWorkspace { workspace: id }, cx);
+                        } else {
+                            this.closing_workspace = Some(id);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
+            )
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                // Moving away takes back a pending close.
+                if !hovered && this.closing_workspace == Some(id) {
+                    this.closing_workspace = None;
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 if event.click_count() >= 2 {
                     this.start_workspace_rename(id, cx);
@@ -1777,7 +1849,10 @@ impl WindowView {
                             .hover(|d| d.bg(rgba(0xffffff14)))
                             .text_size(px(14.))
                             .child("+")
-                            .on_click(cx.listener(|this, _, _, cx| this.open_tab(cx))),
+                            // With sections, sections are what this adds.
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if this.sections() { this.new_workspace(cx) } else { this.open_tab(cx) }
+                            })),
                     ),
             )
             .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(3.)).overflow_y_scroll().children(rows))
