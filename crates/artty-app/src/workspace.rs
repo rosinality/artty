@@ -576,6 +576,7 @@ impl Workspace {
             env,
             scrollback: Some(self.config.scrollback),
             initial_output: spec.initial_output,
+            cursor_shape: self.config.cursor_style.shape(),
         };
         let session = Session::spawn(id, options, self.size_for(self.area), self.theme.clone(), self.sink.clone())
             .map_err(|err| format!("failed to start: {err}"))?;
@@ -1191,6 +1192,7 @@ impl Workspace {
         self.agents = agents_of(&config);
         for pane in self.panes.values_mut() {
             pane.session.set_theme(self.theme.clone());
+            pane.session.set_cursor_shape(config.cursor_style.shape());
             pane.set_agents(self.agents.clone());
         }
         if config.font_size != self.config.font_size {

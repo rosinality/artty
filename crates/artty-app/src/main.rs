@@ -2,6 +2,7 @@ mod app_state;
 mod boxdraw;
 mod cli;
 mod control;
+mod hooks;
 mod keys;
 mod layout;
 mod mouse;

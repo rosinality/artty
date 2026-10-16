@@ -69,6 +69,8 @@ pub struct SessionOptions {
     pub scrollback: Option<usize>,
     /// Output shown before the program starts, e.g. a restored tab's history.
     pub initial_output: Option<Vec<u8>>,
+    /// Cursor shape when the program doesn't choose one.
+    pub cursor_shape: artty_vt::ansi::CursorShape,
 }
 
 /// Something the UI should react to, produced by [`Session::handle`].
@@ -128,6 +130,7 @@ pub struct Session {
     /// Directory reported by the shell (OSC 7).
     reported_cwd: Option<PathBuf>,
     search: Option<(String, RegexSearch)>,
+    term_config: Config,
 }
 
 impl Session {
@@ -149,6 +152,8 @@ impl Session {
         if let Some(scrollback) = options.scrollback {
             config.scrolling_history = scrollback;
         }
+        config.default_cursor_style.shape = options.cursor_shape;
+        let term_config = config.clone();
         let mut term = Term::new(config, &size, proxy.clone());
         if let Some(output) = &options.initial_output {
             artty_vt::ansi::Processor::<artty_vt::ansi::StdSyncHandler>::new().advance(&mut term, output);
@@ -186,7 +191,16 @@ impl Session {
             shell: ShellTracker::default(),
             reported_cwd: None,
             search: None,
+            term_config,
         })
+    }
+
+    /// Change the cursor shape used when the program doesn't choose one.
+    pub fn set_cursor_shape(&mut self, shape: artty_vt::ansi::CursorShape) {
+        if self.term_config.default_cursor_style.shape != shape {
+            self.term_config.default_cursor_style.shape = shape;
+            self.term.lock().set_options(self.term_config.clone());
+        }
     }
 
     pub fn id(&self) -> SessionId {

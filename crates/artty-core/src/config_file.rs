@@ -39,6 +39,10 @@ impl ConfigFile {
         self.doc[key] = value((v * 100.).round() / 100.);
     }
 
+    pub fn set_string(&mut self, key: &str, v: &str) {
+        self.doc[key] = value(v);
+    }
+
     pub fn set_int(&mut self, key: &str, v: i64) {
         self.doc[key] = value(v);
     }

@@ -30,6 +30,8 @@ pub struct Config {
     /// like `å` with Option.
     pub option_as_meta: bool,
     pub cursor_blink: bool,
+    /// Cursor shape; programs can still change it while they run (vim).
+    pub cursor_style: CursorStyle,
     /// Foreground process names treated as coding agents in the sidebar.
     pub agents: Vec<String>,
     /// macOS notifications when a tab needs attention while you're elsewhere.
@@ -75,6 +77,42 @@ impl ResumeCommand {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CursorStyle {
+    #[default]
+    Block,
+    /// A thin vertical line.
+    Bar,
+    Underline,
+    /// An outlined block.
+    Hollow,
+}
+
+impl CursorStyle {
+    pub const ALL: [CursorStyle; 4] = [CursorStyle::Block, CursorStyle::Bar, CursorStyle::Underline, CursorStyle::Hollow];
+
+    /// The name used in the config file.
+    pub fn name(self) -> &'static str {
+        match self {
+            CursorStyle::Block => "block",
+            CursorStyle::Bar => "bar",
+            CursorStyle::Underline => "underline",
+            CursorStyle::Hollow => "hollow",
+        }
+    }
+
+    pub fn shape(self) -> artty_vt::ansi::CursorShape {
+        use artty_vt::ansi::CursorShape;
+        match self {
+            CursorStyle::Block => CursorShape::Block,
+            CursorStyle::Bar => CursorShape::Beam,
+            CursorStyle::Underline => CursorShape::Underline,
+            CursorStyle::Hollow => CursorShape::HollowBlock,
+        }
+    }
+}
+
 /// Coding agents recognized by default.
 pub const DEFAULT_AGENTS: &[&str] =
     &["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"];
@@ -91,6 +129,7 @@ impl Default for Config {
             scrollback: 10_000,
             option_as_meta: true,
             cursor_blink: true,
+            cursor_style: CursorStyle::Block,
             agents: DEFAULT_AGENTS.iter().map(|&s| s.to_owned()).collect(),
             notifications: true,
             shell_integration: true,
@@ -247,6 +286,16 @@ mod tests {
         let custom = Config::parse("[resume.codex]\nlatest = \"codex resume --last\"").unwrap();
         assert_eq!(custom.resume["codex"].command(Some("abc")).as_deref(), Some("codex resume --last"));
         assert!(custom.resume.contains_key("claude"));
+    }
+
+    #[test]
+    fn cursor_styles() {
+        assert_eq!(Config::parse("").unwrap().cursor_style, CursorStyle::Block);
+        for style in CursorStyle::ALL {
+            let config = Config::parse(&format!("cursor-style = \"{}\"", style.name())).unwrap();
+            assert_eq!(config.cursor_style, style);
+        }
+        assert!(Config::parse("cursor-style = \"beam\"").is_err());
     }
 
     #[test]

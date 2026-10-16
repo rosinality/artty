@@ -199,19 +199,25 @@ fn paint_cursor(
     cx: &mut App,
 ) {
     let cell = metrics.cell_bounds(origin, cursor.line, cursor.column, if cursor.wide { 2 } else { 1 });
-    let color = hsla(cursor.color);
+    let mut color = hsla(cursor.color);
+    // Bars and underlines stay thin but readable at any font size.
+    let thickness = px((f32::from(metrics.cell_width) * 0.14).round().max(2.));
 
+    // Unfocused: blocks become outlines; thin shapes are drawn dimmed.
+    let shape = match cursor.shape {
+        CursorShape::Block if !focused => CursorShape::HollowBlock,
+        shape => shape,
+    };
     if !focused {
-        window.paint_quad(outline(cell, color, BorderStyle::Solid));
-        return;
+        color.a *= 0.5;
     }
-    match cursor.shape {
+    match shape {
         CursorShape::Beam => {
-            window.paint_quad(fill(Bounds::new(cell.origin, size(px(2.), cell.size.height)), color));
+            window.paint_quad(fill(Bounds::new(cell.origin, size(thickness, cell.size.height)), color));
         }
         CursorShape::Underline => {
-            let y = cell.origin.y + cell.size.height - px(2.);
-            window.paint_quad(fill(Bounds::new(point(cell.origin.x, y), size(cell.size.width, px(2.))), color));
+            let y = cell.origin.y + cell.size.height - thickness;
+            window.paint_quad(fill(Bounds::new(point(cell.origin.x, y), size(cell.size.width, thickness)), color));
         }
         CursorShape::HollowBlock => window.paint_quad(outline(cell, color, BorderStyle::Solid)),
         CursorShape::Block => {

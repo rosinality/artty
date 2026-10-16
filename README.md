@@ -61,7 +61,7 @@ fish, neovim) can tell Shift+Enter, Ctrl+I and Escape apart.
 
 ## Configuration
 
-⌘, opens Settings for the common options (themes, font, opacity and blur,
+⌘, opens Settings for the common options (themes, font, cursor style, opacity and blur,
 keyboard, bell, notifications, sessions). Everything lives in
 `~/.config/artty/config.toml`, which Settings edits in place and every window
 reloads when it changes; see [`config.example.toml`](config.example.toml).
@@ -77,9 +77,13 @@ bell or sends a notification. For exact working / needs-input / done status,
 let the agent report it through its hooks:
 
 ```sh
-artty hooks install             # every installed agent (Settings has a button)
-artty hooks install codex       # or just one; `artty hooks codex` prints them
+artty hooks status              # which agents have them
+artty hooks install             # every installed agent, or name some: codex
+artty hooks uninstall gemini    # remove artty's hooks (yours stay)
 ```
+
+Settings › Agents shows the same per agent (installed, outdated, not
+installed) with Install / Update / Uninstall buttons.
 
 | Agent | Hooks file | Notes |
 |---|---|---|

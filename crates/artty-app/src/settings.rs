@@ -1,7 +1,7 @@
 //! The Settings window: common options, written to the config file (which
 //! every window reloads when it changes).
 
-use artty_core::Config;
+use artty_core::{Config, CursorStyle};
 use artty_core::config_file::{ConfigFile, THEMES, ThemePreset};
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, ElementId, FontWeight, Hsla, SharedString,
@@ -9,6 +9,7 @@ use gpui::{
     px, rgba, size,
 };
 
+use crate::hooks::{self, Status};
 use crate::terminal::hsla;
 
 /// A number setting edited with `−` and `+`.
@@ -154,7 +155,13 @@ impl Settings {
             .into_any_element()
     }
 
-    fn button(&self, id: &'static str, label: &'static str, cx: &mut Context<Self>, action: fn(&mut Self, &mut Context<Self>)) -> AnyElement {
+    fn button(
+        &self,
+        id: impl Into<ElementId>,
+        label: &'static str,
+        cx: &mut Context<Self>,
+        action: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> AnyElement {
         div()
             .id(id)
             .px_3()
@@ -166,6 +173,98 @@ impl Settings {
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
             .into_any_element()
+    }
+
+    /// Block | Bar | Underline | Hollow, with a preview of each.
+    fn cursor_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.config.cursor_style;
+        let options = CursorStyle::ALL.map(|style| {
+            let selected = style == current;
+            let glyph = div().w(px(9.)).h(px(15.)).map(|d| match style {
+                CursorStyle::Block => d.bg(rgba(0xffffffdd)),
+                CursorStyle::Bar => d.child(div().w(px(2.)).h_full().bg(rgba(0xffffffdd))),
+                CursorStyle::Underline => d.flex().items_end().child(div().w_full().h(px(2.)).bg(rgba(0xffffffdd))),
+                CursorStyle::Hollow => d.border_1().border_color(rgba(0xffffffdd)),
+            });
+            let label = match style {
+                CursorStyle::Block => "Block",
+                CursorStyle::Bar => "Bar",
+                CursorStyle::Underline => "Underline",
+                CursorStyle::Hollow => "Hollow",
+            };
+            div()
+                .id(ElementId::Name(format!("cursor-{}", style.name()).into()))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .px_2()
+                .py(px(4.))
+                .rounded(px(6.))
+                .when(selected, |d| d.bg(rgba(0x3478f6ff)))
+                .when(!selected, |d| d.hover(|d| d.bg(rgba(0xffffff1a))))
+                .text_color(rgba(0xffffffee))
+                .child(glyph)
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |file| file.set_string("cursor-style", style.name()))
+                }))
+        });
+        div().flex().gap(px(2.)).p(px(2.)).rounded(px(8.)).bg(rgba(0xffffff12)).children(options).into_any_element()
+    }
+
+    /// One row per agent: whether artty's hooks are installed, and buttons
+    /// to install, update or remove them.
+    fn agent_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        hooks::AGENTS
+            .iter()
+            .map(|agent| {
+                let status = agent.status();
+                let (label, color) = match &status {
+                    Status::Installed => ("Installed", rgba(0x9ece6aff)),
+                    Status::Outdated => ("Outdated", rgba(0xe0af68ff)),
+                    Status::NotInstalled => ("Not installed", rgba(0xffffff80)),
+                    Status::AgentNotFound => ("Agent not found", rgba(0xffffff50)),
+                    Status::Error(_) => ("Can't read settings", rgba(0xf7768eff)),
+                };
+                let id = agent.id;
+                let install = |label: &'static str, cx: &mut Context<Self>| {
+                    self.button(ElementId::Name(format!("install-{id}").into()), label, cx, move |this, cx| {
+                        let report = hooks::agent(id).and_then(|agent| agent.install());
+                        this.status = Some(report.unwrap_or_else(|err| err));
+                        cx.notify();
+                    })
+                };
+                let uninstall = |cx: &mut Context<Self>| {
+                    self.button(ElementId::Name(format!("uninstall-{id}").into()), "Uninstall", cx, move |this, cx| {
+                        let report = hooks::agent(id).and_then(|agent| agent.uninstall());
+                        this.status = Some(report.unwrap_or_else(|err| err));
+                        cx.notify();
+                    })
+                };
+                let buttons: Vec<AnyElement> = match status {
+                    Status::Installed => vec![uninstall(cx)],
+                    Status::Outdated => vec![install("Update", cx), uninstall(cx)],
+                    Status::NotInstalled => vec![install("Install", cx)],
+                    Status::AgentNotFound | Status::Error(_) => vec![],
+                };
+                let hint: &'static str = match agent.id {
+                    "claude" => "~/.claude/settings.json",
+                    "codex" => "~/.codex/hooks.json · approve with /hooks",
+                    _ => "~/.gemini/settings.json",
+                };
+                Self::row(
+                    agent.name,
+                    Some(hint),
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().text_size(px(12.)).text_color(color).child(label))
+                        .children(buttons)
+                        .into_any_element(),
+                )
+            })
+            .collect()
     }
 
     fn font_picker(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -386,6 +485,7 @@ impl Render for Settings {
                     ),
                 ),
                 Self::row("Blur behind the window", None, self.toggle("blur", c.background_blur, "background-blur", cx)),
+                Self::row("Cursor", None, self.cursor_picker(cx)),
                 Self::row("Blinking cursor", None, self.toggle("blink", c.cursor_blink, "cursor-blink", cx)),
             ],
         );
@@ -423,17 +523,18 @@ impl Render for Settings {
                 ),
             ],
         );
-        let agents = Self::section(
-            "Agents",
-            vec![
-                Self::row(
-                    "Agent hooks",
-                    Some("Claude Code, Codex, Gemini CLI: exact status, resuming"),
-                    self.button("hooks", "Install", cx, |this, cx| {
-                        this.status = Some(crate::cli::install_agent_hooks(&[]).unwrap_or_else(|err| err));
-                        cx.notify();
-                    }),
-                ),
+        let mut agent_rows = vec![
+            div()
+                .px_3()
+                .pt_2()
+                .pb_1()
+                .text_size(px(11.5))
+                .text_color(rgba(0xffffff80))
+                .child("Status hooks let agents tell artty when they're working, need you, or are done, and which conversation to resume.")
+                .into_any_element(),
+        ];
+        agent_rows.extend(self.agent_rows(cx));
+        agent_rows.push(
                 Self::row(
                     "Configuration file",
                     Some("Every setting, including colors and agents"),
@@ -446,8 +547,8 @@ impl Render for Settings {
                         }
                     }),
                 ),
-            ],
         );
+        let agents = Self::section("Agents", agent_rows);
 
         div()
             .id("settings")

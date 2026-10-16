@@ -23,6 +23,9 @@ scrollback = 10000
 option-as-meta = true
 
 cursor-blink = true
+# block, bar, underline or hollow. Programs can still change it while they run
+# (vim's insert mode, for example).
+cursor-style = "block"
 
 # The bell flashes the pane; it can also play the system alert sound. A bell
 # in a pane you can't see marks it in the sidebar and notifies instead.
