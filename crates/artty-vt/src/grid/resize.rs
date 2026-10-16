@@ -63,6 +63,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Move cursor down for every line pulled from history.
         self.saved_cursor.point.line += from_history;
         self.cursor.point.line += from_history;
+        self.lines_scrolled = self.lines_scrolled.saturating_sub(from_history as u64);
 
         self.display_offset = self.display_offset.saturating_sub(lines_added);
         self.decrease_scroll_limit(lines_added);

@@ -233,6 +233,11 @@ fn parse_number(input: &[u8]) -> Option<u8> {
     Some(num)
 }
 
+/// Parse a decimal `i32`, allowing a leading minus sign (artty).
+fn parse_number_i32(input: &[u8]) -> Option<i32> {
+    str::from_utf8(input).ok()?.parse().ok()
+}
+
 /// Internal state for VTE processor.
 #[derive(Debug, Default)]
 struct ProcessorState<T: Timeout> {
@@ -476,6 +481,18 @@ pub trait Timeout: Default {
 pub trait Handler {
     /// OSC to set window title.
     fn set_title(&mut self, _: Option<String>) {}
+
+    /// OSC 133 shell-integration mark (artty).
+    fn shell_mark(&mut self, _: ShellMark) {}
+
+    /// OSC 9 / OSC 777 / OSC 99 desktop notification (artty).
+    fn desktop_notification(&mut self, _title: Option<String>, _body: String) {}
+
+    /// OSC 7 working directory, as the raw `file://` URL (artty).
+    fn set_working_directory(&mut self, _: String) {}
+
+    /// OSC 9;4 progress report (artty).
+    fn set_progress(&mut self, _: Progress) {}
 
     /// Set the cursor style.
     fn set_cursor_style(&mut self, _: Option<CursorStyle>) {}
@@ -802,6 +819,30 @@ pub enum KeyboardModesApplyBehavior {
 pub struct CursorStyle {
     pub shape: CursorShape,
     pub blinking: bool,
+}
+
+/// OSC 133 shell-integration marks (the FinalTerm protocol).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShellMark {
+    /// `A`: the prompt starts.
+    PromptStart,
+    /// `B`: the prompt ends and the user types a command.
+    CommandStart,
+    /// `C`: the command was submitted and its output starts.
+    CommandExecuted,
+    /// `D[;exit]`: the command finished.
+    CommandFinished(Option<i32>),
+}
+
+/// OSC 9;4 progress (ConEmu, Windows Terminal, Ghostty).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Progress {
+    Remove,
+    /// Percent complete, 0–100.
+    Normal(u8),
+    Error(Option<u8>),
+    Indeterminate,
+    Paused(Option<u8>),
 }
 
 /// Terminal cursor shape.
@@ -1497,6 +1538,68 @@ where
 
             // Reset background color.
             b"111" => self.handler.reset_color(NamedColor::Background as usize),
+
+            // Shell integration marks (artty).
+            b"133" if params.len() >= 2 => {
+                let mark = match params[1] {
+                    b"A" => ShellMark::PromptStart,
+                    b"B" => ShellMark::CommandStart,
+                    b"C" => ShellMark::CommandExecuted,
+                    b"D" => {
+                        let exit = params.get(2).and_then(|code| parse_number_i32(code));
+                        ShellMark::CommandFinished(exit)
+                    },
+                    // `A;key=value` style options follow the letter in some shells.
+                    other if other.first() == Some(&b'A') => ShellMark::PromptStart,
+                    _ => return unhandled(params),
+                };
+                self.handler.shell_mark(mark);
+            },
+
+            // Working directory (artty).
+            b"7" if params.len() >= 2 => {
+                if let Ok(url) = str::from_utf8(&params[1..].join(&b';')) {
+                    self.handler.set_working_directory(url.to_owned());
+                }
+            },
+
+            // Progress (`9;4;state;percent`) or a notification (`9;body`) (artty).
+            b"9" if params.len() >= 2 => {
+                if params[1] == b"4" {
+                    let percent = params.get(3).and_then(|p| parse_number(p)).map(|p| p.min(100));
+                    let progress = match params.get(2).and_then(|s| parse_number(s)) {
+                        Some(0) | None => Progress::Remove,
+                        Some(1) => Progress::Normal(percent.unwrap_or(0)),
+                        Some(2) => Progress::Error(percent),
+                        Some(3) => Progress::Indeterminate,
+                        Some(4) => Progress::Paused(percent),
+                        Some(_) => return unhandled(params),
+                    };
+                    self.handler.set_progress(progress);
+                } else {
+                    let body = String::from_utf8_lossy(&params[1..].join(&b';')).into_owned();
+                    self.handler.desktop_notification(None, body);
+                }
+            },
+
+            // `777;notify;title;body` (artty).
+            b"777" if params.len() >= 3 && params[1] == b"notify" => {
+                let title = String::from_utf8_lossy(params[2]).into_owned();
+                let body = String::from_utf8_lossy(&params[3..].join(&b';')).into_owned();
+                self.handler.desktop_notification(Some(title), body);
+            },
+
+            // Kitty `99;metadata;payload`: only single-part plain-text messages (artty).
+            b"99" if params.len() >= 3 => {
+                let metadata = String::from_utf8_lossy(params[1]);
+                let payload = String::from_utf8_lossy(&params[2..].join(&b';')).into_owned();
+                let is_body = metadata.split(':').any(|kv| kv == "p=body");
+                if is_body {
+                    self.handler.desktop_notification(None, payload);
+                } else {
+                    self.handler.desktop_notification(Some(payload), String::new());
+                }
+            },
 
             // Reset text cursor color.
             b"112" => self.handler.reset_color(NamedColor::Cursor as usize),

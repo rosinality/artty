@@ -24,6 +24,12 @@ option-as-meta = true
 
 cursor-blink = true
 
+# Foreground programs shown as coding agents in the sidebar.
+agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"]
+
+# macOS notifications when a tab needs you while you're in another tab or app.
+notifications = true
+
 [colors]
 # foreground = "#d8dee9"
 # background = "#161a22"

@@ -4,7 +4,7 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 
 use crate::term::ClipboardType;
-use crate::ansi::Rgb;
+use crate::ansi::{Progress, Rgb, ShellMark};
 
 /// Terminal event.
 ///
@@ -56,6 +56,19 @@ pub enum Event {
 
     /// Child process exited.
     ChildExit(ExitStatus),
+
+    /// Shell-integration mark at the cursor. `line` is stable across scrolling:
+    /// the grid line is `line - Grid::lines_scrolled()` (artty).
+    ShellMark { mark: ShellMark, line: u64, column: usize },
+
+    /// Desktop notification requested by the program (artty).
+    Notification { title: Option<String>, body: String },
+
+    /// Working directory reported by the shell, as a `file://` URL (artty).
+    WorkingDirectory(String),
+
+    /// Progress reported by the program (artty).
+    Progress(Progress),
 }
 
 impl Debug for Event {
@@ -74,6 +87,12 @@ impl Debug for Event {
             Event::Bell => write!(f, "Bell"),
             Event::Exit => write!(f, "Exit"),
             Event::ChildExit(status) => write!(f, "ChildExit({status:?})"),
+            Event::ShellMark { mark, line, column } => {
+                write!(f, "ShellMark({mark:?}, {line}, {column})")
+            },
+            Event::Notification { title, body } => write!(f, "Notification({title:?}, {body})"),
+            Event::WorkingDirectory(url) => write!(f, "WorkingDirectory({url})"),
+            Event::Progress(progress) => write!(f, "Progress({progress:?})"),
         }
     }
 }

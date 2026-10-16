@@ -20,3 +20,8 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
 - `tty/unix.rs`: children get `ARTTY_SESSION_ID` instead of `ALACRITTY_WINDOW_ID`.
 - `tty/unix.rs`: the login shell from the account database wins over `$SHELL`.
 - `lib.rs`: dropped `cfg_attr(clippy, deny(warnings))` so newer clippy lints in upstream code are warnings, not errors.
+- Shell integration and agent support: `ansi.rs` parses OSC 133 (marks), OSC 7
+  (working directory), OSC 9 (notification, `9;4` progress), OSC 777 `notify`
+  and single-part OSC 99; `Term` forwards them as new `Event` variants.
+  `Grid::lines_scrolled` counts lines scrolled into history so marks have
+  stable line numbers. Tests: `tests/artty.rs`.

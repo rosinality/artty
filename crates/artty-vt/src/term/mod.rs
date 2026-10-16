@@ -22,7 +22,7 @@ use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::ansi::{
     self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb,
+    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Progress, Rgb, ShellMark,
     StandardCharset,
 };
 
@@ -2229,6 +2229,28 @@ impl<T: EventListener> Handler for Term<T> {
         };
 
         self.event_proxy.send_event(title_event);
+    }
+
+    #[inline]
+    fn shell_mark(&mut self, mark: ShellMark) {
+        let cursor = self.grid.cursor.point;
+        let line = (self.grid.lines_scrolled() as i64 + i64::from(cursor.line.0)).max(0) as u64;
+        self.event_proxy.send_event(Event::ShellMark { mark, line, column: cursor.column.0 });
+    }
+
+    #[inline]
+    fn desktop_notification(&mut self, title: Option<String>, body: String) {
+        self.event_proxy.send_event(Event::Notification { title, body });
+    }
+
+    #[inline]
+    fn set_working_directory(&mut self, url: String) {
+        self.event_proxy.send_event(Event::WorkingDirectory(url));
+    }
+
+    #[inline]
+    fn set_progress(&mut self, progress: Progress) {
+        self.event_proxy.send_event(Event::Progress(progress));
     }
 
     #[inline]

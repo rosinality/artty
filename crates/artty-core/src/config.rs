@@ -29,8 +29,16 @@ pub struct Config {
     /// like `å` with Option.
     pub option_as_meta: bool,
     pub cursor_blink: bool,
+    /// Foreground process names treated as coding agents in the sidebar.
+    pub agents: Vec<String>,
+    /// macOS notifications when a tab needs attention while you're elsewhere.
+    pub notifications: bool,
     pub colors: Colors,
 }
+
+/// Coding agents recognized by default.
+pub const DEFAULT_AGENTS: &[&str] =
+    &["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"];
 
 impl Default for Config {
     fn default() -> Self {
@@ -44,6 +52,8 @@ impl Default for Config {
             scrollback: 10_000,
             option_as_meta: true,
             cursor_blink: true,
+            agents: DEFAULT_AGENTS.iter().map(|&s| s.to_owned()).collect(),
+            notifications: true,
             colors: Colors::default(),
         }
     }

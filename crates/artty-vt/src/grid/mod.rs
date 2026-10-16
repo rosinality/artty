@@ -135,6 +135,12 @@ pub struct Grid<T> {
 
     /// Maximum number of lines in history.
     max_scroll_limit: usize,
+
+    /// Lines that have scrolled off the top of the screen since creation
+    /// (artty). `lines_scrolled + line` names a line independently of later
+    /// scrolling, which is how shell-integration marks are kept.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    lines_scrolled: u64,
 }
 
 impl<T: GridCell + Default + PartialEq> Grid<T> {
@@ -147,7 +153,14 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             cursor: Cursor::default(),
             lines,
             columns,
+            lines_scrolled: 0,
         }
+    }
+
+    /// Lines scrolled off the top of the screen so far; see the field docs.
+    #[inline]
+    pub fn lines_scrolled(&self) -> u64 {
+        self.lines_scrolled
     }
 
     /// Update the size of the scrollback history.
@@ -270,6 +283,8 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
         // Only rotate the entire history if the active region starts at the top.
         if region.start == 0 {
+            self.lines_scrolled += positions as u64;
+
             // Create scrollback for the new lines.
             self.increase_scroll_limit(positions);
 

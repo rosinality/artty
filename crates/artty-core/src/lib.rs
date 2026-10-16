@@ -5,12 +5,17 @@
 //! a renderer-independent snapshot of the visible screen.
 
 mod config;
+pub mod control;
 mod frame;
+mod process;
 mod session;
+mod shell;
 mod theme;
 
 pub use artty_vt as vt;
 pub use config::{Colors, Config};
 pub use frame::{Frame, FrameCursor, FrameLine, FrameRect, FrameRun};
+pub use process::ProcessInfo;
 pub use session::{Notice, Session, SessionId, SessionOptions, TerminalSize};
+pub use shell::{CommandRecord, ShellPhase};
 pub use theme::Theme;

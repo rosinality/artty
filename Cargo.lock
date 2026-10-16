@@ -115,6 +115,7 @@ dependencies = [
  "futures",
  "gpui",
  "log",
+ "serde_json",
 ]
 
 [[package]]
@@ -122,8 +123,10 @@ name = "artty-core"
 version = "0.1.0"
 dependencies = [
  "artty-vt",
+ "libc",
  "log",
  "serde",
+ "serde_json",
  "toml 0.9.12+spec-1.1.0",
 ]
 

@@ -1,23 +1,26 @@
 mod boxdraw;
+mod cli;
+mod control;
 mod keys;
 mod mouse;
+mod tab;
 mod terminal;
 mod workspace;
 
 use artty_core::Config;
 use gpui::{
     App, AppContext, Application, Bounds, KeyBinding, Menu, MenuItem, TitlebarOptions,
-    WindowBackgroundAppearance, WindowBounds, WindowOptions, actions, point, px, size,
+    WindowBounds, WindowOptions, actions, point, px, size,
 };
 
 use workspace::{
-    CloseTab, Copy, DecreaseFontSize, IncreaseFontSize, NewTab, NextTab, Paste, PreviousTab,
-    ResetFontSize, Workspace,
+    CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, IncreaseFontSize,
+    JumpToAttention, NewTab, NextTab, Paste, PreviousTab, ResetFontSize, Workspace,
 };
 
 actions!(artty, [Quit]);
 
-const USAGE: &str = "usage: artty [-e command [args...]]";
+const USAGE: &str = "usage: artty [-e command [args...]]\n       artty help    (commands for controlling a running artty)";
 
 /// `artty -e command args...` runs a command in the first tab instead of the shell.
 fn parse_args() -> Option<Vec<String>> {
@@ -32,9 +35,11 @@ fn parse_args() -> Option<Vec<String>> {
             }
             Some(command)
         }
-        Some("-h" | "--help") => {
-            println!("{USAGE}");
-            std::process::exit(0);
+        Some("-h" | "--help" | "help") => {
+            std::process::exit(cli::main(vec!["help".into(), "--help".into()]));
+        }
+        Some(command) if cli::COMMANDS.contains(&command) => {
+            std::process::exit(cli::main(std::env::args().skip(1).collect()));
         }
         Some(other) => {
             eprintln!("artty: unknown argument {other:?}\n{USAGE}");
@@ -62,7 +67,14 @@ fn main() {
             },
             Menu {
                 name: "Edit".into(),
-                items: vec![MenuItem::action("Copy", Copy), MenuItem::action("Paste", Paste)],
+                items: vec![
+                    MenuItem::action("Copy", Copy),
+                    MenuItem::action("Paste", Paste),
+                    MenuItem::separator(),
+                    MenuItem::action("Find…", Find),
+                    MenuItem::action("Find Next", FindNext),
+                    MenuItem::action("Find Previous", FindPrevious),
+                ],
             },
             Menu {
                 name: "View".into(),
@@ -77,17 +89,12 @@ fn main() {
                 items: vec![
                     MenuItem::action("Show Next Tab", NextTab),
                     MenuItem::action("Show Previous Tab", PreviousTab),
+                    MenuItem::action("Jump to Tab Needing Attention", JumpToAttention),
                 ],
             },
         ]);
 
-        let window_background = if config.background_opacity >= 1. {
-            WindowBackgroundAppearance::Opaque
-        } else if config.background_blur {
-            WindowBackgroundAppearance::Blurred
-        } else {
-            WindowBackgroundAppearance::Transparent
-        };
+        let window_background = workspace::background_appearance(&config);
         let bounds = Bounds::centered(None, size(px(1100.), px(680.)), cx);
         cx.open_window(
             WindowOptions {

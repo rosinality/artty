@@ -1,20 +1,25 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+use artty_vt::ansi::Progress;
 use artty_vt::event::{Event, EventListener, WindowSize};
 use artty_vt::event_loop::{EventLoop, EventLoopSender, Msg};
 use artty_vt::grid::{Dimensions, Scroll};
-use artty_vt::index::{Column, Line, Point, Side};
+use artty_vt::index::{Boundary, Column, Direction, Line, Point, Side};
 use artty_vt::selection::{Selection, SelectionType};
 use artty_vt::sync::FairMutex;
+use artty_vt::term::search::RegexSearch;
 use artty_vt::term::{ClipboardType, Config, Term};
 use artty_vt::tty;
 use log::warn;
 
 use crate::frame::Frame;
+use crate::process::{ProcessInfo, ProcessProbe, path_from_file_url};
+use crate::shell::{CommandRecord, ShellEvent, ShellPhase, ShellTracker};
 use crate::theme::Theme;
 
 pub type SessionId = u64;
@@ -75,6 +80,13 @@ pub enum Notice {
     /// The program asked to read the clipboard (OSC 52); answer with
     /// [`Session::reply_clipboard`].
     ClipboardLoad(ClipboardType, Arc<dyn Fn(&str) -> String + Sync + Send + 'static>),
+    /// The program asked for a desktop notification (OSC 9 / 777 / 99).
+    Notification { title: Option<String>, body: String },
+    Progress(Progress),
+    /// The shell started a command (shell integration).
+    CommandStarted(Option<String>),
+    /// The shell finished a command (shell integration).
+    CommandFinished(CommandRecord),
     /// The shell exited; the session is finished.
     Exited,
 }
@@ -106,8 +118,13 @@ pub struct Session {
     id: SessionId,
     term: Arc<FairMutex<Term<EventProxy>>>,
     pty: EventLoopSender,
+    probe: Option<ProcessProbe>,
     size: TerminalSize,
     theme: Arc<Theme>,
+    shell: ShellTracker,
+    /// Directory reported by the shell (OSC 7).
+    reported_cwd: Option<PathBuf>,
+    search: Option<(String, RegexSearch)>,
 }
 
 impl Session {
@@ -144,13 +161,24 @@ impl Session {
             env,
         };
         let pty = tty::new(&pty_options, size.into(), id)?;
+        let probe = ProcessProbe::new(pty.file().as_raw_fd(), pty.child().id());
 
         let event_loop = EventLoop::new(term.clone(), proxy.clone(), pty, false, false)?;
         let sender = event_loop.channel();
         let _ = proxy.pty.set(sender.clone());
         event_loop.spawn();
 
-        Ok(Self { id, term, pty: sender, size, theme })
+        Ok(Self {
+            id,
+            term,
+            pty: sender,
+            probe,
+            size,
+            theme,
+            shell: ShellTracker::default(),
+            reported_cwd: None,
+            search: None,
+        })
     }
 
     pub fn id(&self) -> SessionId {
@@ -159,6 +187,10 @@ impl Session {
 
     pub fn size(&self) -> TerminalSize {
         self.size
+    }
+
+    pub fn set_theme(&mut self, theme: Arc<Theme>) {
+        self.theme = theme;
     }
 
     /// Send input (keystrokes, pasted text) to the program.
@@ -221,9 +253,101 @@ impl Session {
         *self.term.lock().mode()
     }
 
+    /// Foreground process, for detecting agents and running commands.
+    pub fn process(&self) -> ProcessInfo {
+        self.probe.as_ref().map(ProcessProbe::info).unwrap_or_default()
+    }
+
+    /// The shell's working directory: what it reported, or what the OS says.
+    pub fn cwd(&self) -> Option<PathBuf> {
+        self.reported_cwd.clone().or_else(|| self.probe.as_ref()?.shell_cwd())
+    }
+
+    /// Whether the shell sends shell-integration marks.
+    pub fn shell_integration(&self) -> bool {
+        self.shell.phase != ShellPhase::Unknown
+    }
+
+    pub fn shell_phase(&self) -> ShellPhase {
+        self.shell.phase
+    }
+
+    pub fn last_command(&self) -> Option<&CommandRecord> {
+        self.shell.history.back()
+    }
+
+    /// The visible screen (ignoring scrollback position) as text.
+    pub fn screen_text(&self) -> String {
+        let term = self.term.lock();
+        let start = Point::new(Line(0), Column(0));
+        let end = Point::new(term.bottommost_line(), term.last_column());
+        trim_lines(term.bounds_to_string(start, end))
+    }
+
+    /// The last `lines` lines of output, including history.
+    pub fn scrollback_text(&self, lines: usize) -> String {
+        let term = self.term.lock();
+        // Count from the last line with content, not the blank screen bottom.
+        let blank = |line: Line| (0..term.columns()).all(|c| term.grid()[line][Column(c)].c == ' ');
+        let bottom = (0..term.screen_lines() as i32)
+            .rev()
+            .map(Line)
+            .find(|&line| !blank(line))
+            .unwrap_or(Line(0));
+        let top = (bottom.0 - lines.max(1) as i32 + 1).max(term.topmost_line().0);
+        let text = term.bounds_to_string(Point::new(Line(top), Column(0)), Point::new(bottom, term.last_column()));
+        trim_lines(text)
+    }
+
+    /// Find `query` (a regex) and select the match, starting from the current
+    /// match or the bottom. `older` searches up through history. Returns
+    /// whether something matched; an invalid regex is an error.
+    pub fn search(&mut self, query: &str, older: bool) -> Result<bool, String> {
+        if self.search.as_ref().is_none_or(|(q, _)| q != query) {
+            let regex = RegexSearch::new(query).map_err(|err| err.to_string())?;
+            self.search = Some((query.to_owned(), regex));
+        }
+        let (_, regex) = self.search.as_mut().unwrap();
+        let mut term = self.term.lock();
+        let current = term.selection.as_ref().and_then(|s| s.to_range(&term));
+        let (origin, direction) = match (current, older) {
+            (Some(range), true) => (range.start.sub(&*term, Boundary::None, 1), Direction::Left),
+            (Some(range), false) => (range.end.add(&*term, Boundary::None, 1), Direction::Right),
+            (None, true) => (Point::new(term.bottommost_line(), term.last_column()), Direction::Left),
+            (None, false) => (Point::new(term.topmost_line(), Column(0)), Direction::Right),
+        };
+        let side = if older { Side::Right } else { Side::Left };
+        let Some(found) = term.search_next(regex, origin, direction, side, None) else {
+            return Ok(false);
+        };
+        let (start, end) = (*found.start(), *found.end());
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        term.selection = Some(selection);
+        term.scroll_to_point(start);
+        Ok(true)
+    }
+
+    pub fn end_search(&mut self) {
+        self.search = None;
+        self.clear_selection();
+    }
+
+    /// The link under a viewport cell: an OSC 8 hyperlink, or a URL in the text.
+    pub fn link_at(&self, line: usize, column: usize) -> Option<String> {
+        let term = self.term.lock();
+        let point = viewport_point(&term, line, column);
+        if let Some(link) = term.grid()[point].hyperlink() {
+            return Some(link.uri().to_owned());
+        }
+        let row = &term.grid()[point.line];
+        let text: Vec<char> = (0..term.columns()).map(|c| row[Column(c)].c).collect();
+        url_at(&text, point.column.0)
+    }
+
     /// Process an event forwarded from the PTY thread. Answers queries that
     /// need terminal state and returns what the UI should do, if anything.
-    pub fn handle(&self, event: Event) -> Option<Notice> {
+    pub fn handle(&mut self, event: Event) -> Option<Notice> {
         match event {
             Event::Wakeup | Event::CursorBlinkingChange | Event::MouseCursorDirty => {
                 Some(Notice::Redraw)
@@ -247,6 +371,19 @@ impl Session {
                 self.send(Msg::Input(text.into_bytes().into()));
                 None
             }
+            Event::ShellMark { mark, line, column } => {
+                let term = self.term.lock();
+                match self.shell.mark(mark, line, column, &term)? {
+                    ShellEvent::CommandStarted(command) => Some(Notice::CommandStarted(command)),
+                    ShellEvent::CommandFinished(record) => Some(Notice::CommandFinished(record)),
+                }
+            }
+            Event::Notification { title, body } => Some(Notice::Notification { title, body }),
+            Event::WorkingDirectory(url) => {
+                self.reported_cwd = path_from_file_url(&url);
+                None
+            }
+            Event::Progress(progress) => Some(Notice::Progress(progress)),
         }
     }
 
@@ -272,8 +409,101 @@ fn viewport_point<T>(term: &Term<T>, line: usize, column: usize) -> Point {
     Point::new(Line(line), Column(column.min(term.columns() - 1)))
 }
 
+/// Drop trailing blank space from each line and trailing empty lines.
+fn trim_lines(text: String) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let end = lines.iter().rposition(|line| !line.is_empty()).map_or(0, |i| i + 1);
+    lines[..end].join("\n")
+}
+
+/// A URL in `line` covering `column`.
+fn url_at(line: &[char], column: usize) -> Option<String> {
+    const SCHEMES: [&str; 4] = ["https://", "http://", "file://", "mailto:"];
+    let is_url_char = |c: char| !c.is_whitespace() && !matches!(c, '<' | '>' | '"' | '`' | '\0');
+
+    // Expand around the column to the surrounding run of URL characters.
+    if !is_url_char(*line.get(column)?) {
+        return None;
+    }
+    let start = line[..column].iter().rposition(|&c| !is_url_char(c)).map_or(0, |i| i + 1);
+    let end = line[column..].iter().position(|&c| !is_url_char(c)).map_or(line.len(), |i| column + i);
+    let word: String = line[start..end].iter().collect();
+
+    // The URL starts at a scheme inside the word (e.g. `(https://...)`).
+    let (offset, _) = SCHEMES.iter().filter_map(|s| word.find(s).map(|i| (i, s))).min()?;
+    let url = &word[offset..];
+    if start + word[..offset].chars().count() > column {
+        return None;
+    }
+    // Trailing punctuation usually belongs to the sentence, and a closing
+    // paren only to the URL if it opened one.
+    let mut url = url.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'']).to_owned();
+    while url.ends_with(')') && url.matches(')').count() > url.matches('(').count() {
+        url.pop();
+    }
+    Some(url)
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.pty.send(Msg::Shutdown);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(text: &str, column: usize) -> Option<String> {
+        url_at(&text.chars().collect::<Vec<_>>(), column)
+    }
+
+    #[test]
+    fn finds_urls() {
+        let text = "see (https://example.com/a_(b)) now.";
+        assert_eq!(url(text, 10).as_deref(), Some("https://example.com/a_(b)"));
+        assert_eq!(url(text, 1), None);
+        assert_eq!(url("go to http://x.io/y.", 8).as_deref(), Some("http://x.io/y"));
+        assert_eq!(url("no link here", 3), None);
+    }
+
+    /// A session running `printf` with `text`, once its output has arrived.
+    fn session_with(text: &str) -> Session {
+        let size = TerminalSize { columns: 40, lines: 6, cell_width: 8, cell_height: 16 };
+        let options = SessionOptions {
+            command: Some(("/usr/bin/printf".into(), vec![text.into()])),
+            ..Default::default()
+        };
+        let session = Session::spawn(1, options, size, Arc::new(Theme::default()), Arc::new(|_, _| {})).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while session.screen_text().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        session
+    }
+
+    #[test]
+    fn search_reading_and_links() {
+        let mut session = session_with("foo bar\\nsee https://example.com/x\\nbaz foo\\n");
+        assert_eq!(session.screen_text(), "foo bar\nsee https://example.com/x\nbaz foo");
+        assert_eq!(session.scrollback_text(1), "baz foo");
+
+        // Searching up from the bottom finds the last "foo", then the first.
+        assert_eq!(session.search("fo+", true), Ok(true));
+        assert_eq!(session.selection_text().as_deref(), Some("foo"));
+        let frame = session.frame();
+        assert_eq!(frame.lines[2].selection.first().map(|r| r.column), Some(4));
+        assert_eq!(session.search("fo+", true), Ok(true));
+        assert_eq!(session.frame().lines[0].selection.first().map(|r| r.column), Some(0));
+        assert_eq!(session.search("nothing", true), Ok(false));
+        assert!(session.search("(", true).is_err());
+
+        assert_eq!(session.link_at(1, 10).as_deref(), Some("https://example.com/x"));
+        assert_eq!(session.link_at(0, 1), None);
+    }
+
+    #[test]
+    fn trims_text() {
+        assert_eq!(trim_lines("a  \nb\n  \n\n".to_owned()), "a\nb");
     }
 }
