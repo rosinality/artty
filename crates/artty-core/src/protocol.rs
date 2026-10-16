@@ -19,7 +19,7 @@ use crate::vt::ansi::Rgb;
 use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes; app and server must agree.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Identifies a build: the package version and when the executable was
 /// built (rebuilds don't change the version). The server runs from a copy
@@ -35,6 +35,9 @@ pub fn build_id(executable: &std::path::Path) -> String {
 
 pub type WindowId = u64;
 pub type WorkspaceId = u64;
+
+/// Colors a workspace can have; the app picks the shades.
+pub const WORKSPACE_COLORS: [&str; 8] = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
 
 /// Largest message accepted, against corrupt length prefixes.
 const MAX_MESSAGE: usize = 64 << 20;
@@ -99,6 +102,10 @@ pub enum ClientMessage {
     /// Move a workspace into a window of its own (the server asks the app to
     /// open it with [`AppCommand::OpenWindow`]).
     WorkspaceToNewWindow { workspace: WorkspaceId },
+    /// One of [`WORKSPACE_COLORS`], or none.
+    SetWorkspaceColor { workspace: WorkspaceId, color: Option<String> },
+    /// Where its new tabs start (unless the current pane is inside it).
+    SetWorkspaceRoot { workspace: WorkspaceId, root: Option<PathBuf> },
     ToggleZoom { window: WindowId },
     SetRatio { window: WindowId, path: Vec<bool>, ratio: f32 },
 
@@ -158,6 +165,10 @@ pub struct TabLayout {
 pub struct WorkspaceLayout {
     pub id: WorkspaceId,
     pub name: Option<String>,
+    /// A name for it when it has none: its git repository or directory.
+    pub title: String,
+    pub color: Option<String>,
+    pub root: Option<PathBuf>,
     pub tabs: Vec<TabLayout>,
     /// The tab shown when this workspace is the window's active one.
     pub active: usize,
@@ -391,7 +402,16 @@ mod tests {
         };
         let state = PaneState { info, icon: String::new(), progress: None, agent: None };
         let tab = TabLayout { title: None, root: Node::Pane(3), focused: 3, zoomed: false };
-        let workspace = WorkspaceLayout { id: 2, name: None, tabs: vec![tab], active: 0, collapsed: true };
+        let workspace = WorkspaceLayout {
+            id: 2,
+            name: None,
+            title: "artty".into(),
+            color: Some("blue".into()),
+            root: None,
+            tabs: vec![tab],
+            active: 0,
+            collapsed: true,
+        };
         let layout = WindowLayout { workspaces: vec![workspace], active: 0, hidden: 2 };
         let mut buffer = Vec::new();
         write_message(&mut buffer, &ServerMessage::Panes { panes: vec![state.clone()] }).unwrap();

@@ -117,7 +117,19 @@ A section header shows what its tabs are doing (a waiting agent, a busy
 command), even folded; a lone unnamed workspace is just a list of tabs.
 A workspace's right-click menu moves it to a new window or another one, or
 hides it: it keeps running out of sight, and "N more workspaces…" at the
-bottom of the sidebar (or ⌘⇧O) brings it back. The app starts the server when needed, and the server exits once its
+bottom of the sidebar (or ⌘⇧O) brings it back.
+
+Each workspace can have defaults of its own:
+
+- **A root directory.** New tabs and splits start in the current pane's
+  directory while that's inside the root, and in the root otherwise.
+  `artty workspace new --cwd DIR` sets it; so does "Use This Directory as
+  Root" in the header's menu.
+- **A name.** Unnamed workspaces go by their git repository, or their
+  directory: the root, or else the one their tab is in.
+- **A color**, picked in the header's menu: a dot by its name and a tint on
+  its selected tab.
+- **Environment variables** for panes started in it. The app starts the server when needed, and the server exits once its
 last session ends.
 
 - Closing a window detaches it: its tabs keep running, and
@@ -137,6 +149,7 @@ artty workspace new blog --cwd ~/blog
 artty workspace hide blog   # out of its window, still running
 artty workspace open blog   # back into the frontmost window
 artty workspace rename 3 notes
+artty workspace set blog --root ~/blog --color teal --env NODE_ENV=development
 artty workspace close blog  # end its tabs
 artty server status         # pid, uptime, windows, panes, attached apps
 artty server restart        # restart on this build; tabs and agents return

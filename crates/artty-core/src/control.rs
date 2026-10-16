@@ -99,6 +99,21 @@ pub enum Request {
     OpenWorkspace { workspace: String },
     /// Take it out of its window; it keeps running, hidden.
     HideWorkspace { workspace: String },
+    /// Change a workspace's defaults: where new tabs start, its color (or
+    /// `none`), and environment variables for new panes.
+    ConfigureWorkspace {
+        workspace: String,
+        #[serde(default)]
+        root: Option<PathBuf>,
+        #[serde(default)]
+        clear_root: bool,
+        #[serde(default)]
+        color: Option<String>,
+        #[serde(default)]
+        env: Vec<(String, String)>,
+        #[serde(default)]
+        unset_env: Vec<String>,
+    },
     /// Text from a tab.
     Read { tab: Option<SessionId>, source: ReadSource },
     /// Type text into a tab.
@@ -193,8 +208,14 @@ pub enum Response {
 pub struct WorkspaceInfo {
     pub id: u64,
     pub name: Option<String>,
-    /// Its name, or else what its active tab shows.
+    /// Its name, or else its git repository or directory.
     pub title: String,
+    #[serde(default)]
+    pub root: Option<PathBuf>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
     /// The server's window holding it and that window's number, unless hidden.
     pub window: Option<u64>,
     #[serde(default)]

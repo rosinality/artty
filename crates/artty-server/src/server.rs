@@ -2,7 +2,7 @@
 //! attached to them, and everything that happens to the sessions.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
@@ -15,7 +15,7 @@ use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
     AppCommand, ClientMessage, PROTOCOL_VERSION, PaneSpec, PaneState, Query, Reply, SelectionOp,
-    ServerMessage, TabLayout, WindowId, WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
+    ServerMessage, TabLayout, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
 };
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
@@ -58,18 +58,38 @@ impl Tab {
     }
 }
 
+/// What a workspace gives the panes started in it.
+#[derive(Clone, Debug, Default)]
+struct Defaults {
+    /// New tabs start here, unless the pane they're opened from is inside it.
+    root: Option<PathBuf>,
+    env: BTreeMap<String, String>,
+}
+
 /// A named group of tabs; never empty (it closes with its last tab).
 struct Workspace {
     name: Option<String>,
     tabs: Vec<Tab>,
     active: usize,
     collapsed: bool,
+    defaults: Defaults,
+    color: Option<String>,
+    /// Its name when it has none: its git repository or directory.
+    title: String,
 }
 
 impl Workspace {
     fn new(name: Option<String>, tabs: Vec<Tab>, active: usize) -> Self {
         let active = active.min(tabs.len().saturating_sub(1));
-        Self { name: name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()), tabs, active, collapsed: false }
+        Self {
+            name: name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty()),
+            tabs,
+            active,
+            collapsed: false,
+            defaults: Defaults::default(),
+            color: None,
+            title: String::new(),
+        }
     }
 
     fn active_tab(&self) -> Option<&Tab> {
@@ -80,6 +100,9 @@ impl Workspace {
         WorkspaceLayout {
             id,
             name: self.name.clone(),
+            title: self.title.clone(),
+            color: self.color.clone(),
+            root: self.defaults.root.clone(),
             tabs: self
                 .tabs
                 .iter()
@@ -176,6 +199,28 @@ fn cli_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// A workspace's automatic name for a directory: its git repository's, else
+/// its own (`~` for home).
+fn directory_title(dir: &Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let repository = dir.ancestors().take_while(|d| Some(*d) != home.as_deref()).find(|d| d.join(".git").exists());
+    match repository.or(Some(dir)) {
+        Some(d) if Some(d) == home.as_deref() => "~".to_owned(),
+        Some(d) => d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned()),
+        None => String::new(),
+    }
+}
+
+/// A color name artty knows, or `none`/empty for none.
+fn workspace_color(color: &str) -> Result<Option<String>, String> {
+    let color = color.trim().to_lowercase();
+    match color.as_str() {
+        "" | "none" => Ok(None),
+        c if WORKSPACE_COLORS.contains(&c) => Ok(Some(color)),
+        c => Err(format!("unknown color {c} (one of {}, or none)", WORKSPACE_COLORS.join(", "))),
+    }
+}
+
 fn osascript_notify(title: &str, body: &str) {
     let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
@@ -263,9 +308,10 @@ impl Server {
     }
 
     fn restore_workspace(&mut self, saved: SavedWorkspace) -> Option<Workspace> {
+        let defaults = Defaults { root: saved.root, env: saved.env };
         let mut tabs = Vec::new();
         for tab in saved.tabs {
-            let Some(root) = self.restore_layout(tab.layout) else { continue };
+            let Some(root) = self.restore_layout(tab.layout, &defaults) else { continue };
             let panes = root.panes();
             let focused = panes[tab.focused.min(panes.len() - 1)];
             tabs.push(Tab { title: tab.title, root, focused, zoomed: tab.zoomed && panes.len() > 1 });
@@ -275,6 +321,8 @@ impl Server {
         }
         let mut workspace = Workspace::new(saved.name, tabs, saved.active);
         workspace.collapsed = saved.collapsed;
+        workspace.color = saved.color.and_then(|c| workspace_color(&c).ok().flatten());
+        workspace.defaults = defaults;
         Some(workspace)
     }
 
@@ -305,13 +353,13 @@ impl Server {
         self.add_window(vec![workspace], 0, bounds)
     }
 
-    fn restore_layout(&mut self, layout: SavedLayout) -> Option<Node> {
+    fn restore_layout(&mut self, layout: SavedLayout, defaults: &Defaults) -> Option<Node> {
         match layout {
             SavedLayout::Pane(saved) => {
                 let initial_output = (!saved.scrollback.is_empty())
                     .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
                 let spec = PaneSpec { command: saved.command, cwd: saved.cwd, title: saved.title };
-                let id = self.spawn_pane(spec, None, initial_output).inspect_err(|err| log::error!("restoring: {err}")).ok()?;
+                let id = self.spawn_pane(spec, None, initial_output, defaults).inspect_err(|err| log::error!("restoring: {err}")).ok()?;
                 let resume = saved.agent.filter(|_| self.config.resume_agents).and_then(|agent| {
                     self.config.resume.get(&agent.name)?.command(agent.session.as_deref())
                 });
@@ -321,7 +369,7 @@ impl Server {
                 Some(Node::Pane(id))
             }
             SavedLayout::Split { vertical, ratio, first, second } => {
-                match (self.restore_layout(*first), self.restore_layout(*second)) {
+                match (self.restore_layout(*first, defaults), self.restore_layout(*second, defaults)) {
                     (Some(first), Some(second)) => Some(Node::Split {
                         axis: if vertical { Axis::Vertical } else { Axis::Horizontal },
                         ratio,
@@ -337,16 +385,28 @@ impl Server {
 
     // Panes, tabs, windows.
 
-    /// Start a session for a new pane (not yet placed in a tab). `near` is a
-    /// pane whose directory to start in.
-    fn spawn_pane(&mut self, spec: PaneSpec, near: Option<PaneId>, initial_output: Option<Vec<u8>>) -> Result<PaneId, String> {
+    /// Start a session for a new pane (not yet placed in a tab), with its
+    /// workspace's defaults. It starts in `spec.cwd`, else in `near`'s
+    /// directory if that's inside the workspace's root, else in the root.
+    fn spawn_pane(
+        &mut self,
+        spec: PaneSpec,
+        near: Option<PaneId>,
+        initial_output: Option<Vec<u8>>,
+        defaults: &Defaults,
+    ) -> Result<PaneId, String> {
         let id = self.next_pane;
         self.next_pane += 1;
         let explicit = spec.command.clone().filter(|c| !c.is_empty());
         let mut command = explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
-        let cwd = spec.cwd.or_else(|| self.panes.get(&near?)?.session.cwd());
+        let near_cwd = near.and_then(|near| self.panes.get(&near)?.session.cwd());
+        let cwd = spec.cwd.or(match (&defaults.root, near_cwd) {
+            (Some(root), Some(dir)) if dir.starts_with(root) => Some(dir),
+            (Some(root), _) => Some(root.clone()),
+            (None, dir) => dir,
+        });
 
-        let mut env = HashMap::new();
+        let mut env: HashMap<String, String> = defaults.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         if self.config.shell_integration
             && let Some(dir) = &self.integration_dir
             && let Some(injection) = artty_core::integration::inject(dir, command.as_deref())
@@ -461,7 +521,8 @@ impl Server {
             return Err("no such workspace".into());
         }
         let near = self.workspaces[&workspace].active_tab().map(|t| t.focused).or_else(|| self.window_focused_pane(window));
-        let id = self.spawn_pane(spec, near, None)?;
+        let defaults = self.workspaces[&workspace].defaults.clone();
+        let id = self.spawn_pane(spec, near, None, &defaults)?;
         let state = self.workspaces.get_mut(&workspace).unwrap();
         state.tabs.push(Tab::new(id));
         let tab = state.tabs.len() - 1;
@@ -476,10 +537,7 @@ impl Server {
         if !self.windows.contains_key(&window) {
             return Err("no such window".into());
         }
-        // New workspaces start in your home directory unless told otherwise.
-        let spec = PaneSpec { cwd: spec.cwd.or_else(|| std::env::var_os("HOME").map(PathBuf::from)), ..spec };
-        let pane = self.spawn_pane(spec, None, None)?;
-        let workspace = self.add_workspace(Workspace::new(name, vec![Tab::new(pane)], 0));
+        let (workspace, pane) = self.create_workspace(name, spec)?;
         let state = self.windows.get_mut(&window).unwrap();
         state.workspaces.push(workspace);
         if focus {
@@ -488,9 +546,35 @@ impl Server {
         Ok((workspace, pane))
     }
 
+    /// A workspace (in no window yet) with one tab. A directory given for
+    /// it becomes its root; otherwise it starts in your home directory.
+    fn create_workspace(&mut self, name: Option<String>, spec: PaneSpec) -> Result<(WorkspaceId, PaneId), String> {
+        let defaults = Defaults { root: spec.cwd.clone().filter(|dir| dir.is_dir()), env: BTreeMap::new() };
+        let spec = PaneSpec { cwd: spec.cwd.or_else(|| std::env::var_os("HOME").map(PathBuf::from)), ..spec };
+        let pane = self.spawn_pane(spec, None, None, &defaults)?;
+        let mut workspace = Workspace::new(name, vec![Tab::new(pane)], 0);
+        workspace.defaults = defaults;
+        let id = self.add_workspace(workspace);
+        self.refresh_title(id);
+        Ok((id, pane))
+    }
+
+    /// Work out a workspace's automatic name from its root, or from the
+    /// directory its active tab is in.
+    fn refresh_title(&mut self, id: WorkspaceId) {
+        let Some(workspace) = self.workspaces.get(&id) else { return };
+        let dir = workspace.defaults.root.clone().or_else(|| {
+            let pane = workspace.active_tab()?.focused;
+            self.panes.get(&pane)?.session.cwd()
+        });
+        let title = dir.map(|dir| directory_title(&dir)).unwrap_or_default();
+        self.workspaces.get_mut(&id).unwrap().title = title;
+    }
+
     fn split(&mut self, target: PaneId, axis: Axis, spec: PaneSpec, focus: bool) -> Result<PaneId, String> {
         let (workspace, tab) = self.place_of(target).ok_or_else(|| format!("no pane {target}"))?;
-        let id = self.spawn_pane(spec, Some(target), None)?;
+        let defaults = self.workspaces[&workspace].defaults.clone();
+        let id = self.spawn_pane(spec, Some(target), None, &defaults)?;
         let tab_state = &mut self.workspaces.get_mut(&workspace).unwrap().tabs[tab];
         tab_state.root.split(target, id, axis);
         tab_state.zoomed = false;
@@ -754,13 +838,16 @@ impl Server {
                     .map(|p| p.status.label())
                     .min_by_key(|label| ORDER.iter().position(|o| o == label).unwrap_or(ORDER.len()))
                     .unwrap_or("idle");
-                let title = workspace.name.clone().unwrap_or_else(|| {
+                let title = workspace.name.clone().or_else(|| Some(workspace.title.clone()).filter(|t| !t.is_empty())).unwrap_or_else(|| {
                     workspace.active_tab().and_then(|t| t.title.clone().or_else(|| Some(self.panes.get(&t.focused)?.title()))).unwrap_or_default()
                 });
                 Some(WorkspaceInfo {
                     id,
                     name: workspace.name.clone(),
                     title,
+                    root: workspace.defaults.root.clone(),
+                    color: workspace.color.clone(),
+                    env: workspace.defaults.env.clone(),
                     window: place.map(|(window, _)| window),
                     window_number: place.map_or(0, |(_, number)| number),
                     attached: self.on_screen(id),
@@ -773,11 +860,15 @@ impl Server {
             .collect()
     }
 
-    /// The workspace named `name`, preferring the frontmost window's.
+    /// The workspace named `name`, preferring the frontmost window's; failing
+    /// that, an unnamed one going by that automatic name.
     fn workspace_named(&self, name: &str) -> Option<WorkspaceId> {
-        let named = |id: &WorkspaceId| self.workspaces.get(id).is_some_and(|w| w.name.as_deref() == Some(name));
         let front = self.frontmost().and_then(|w| self.windows.get(&w));
-        front.and_then(|w| w.workspaces.iter().copied().find(named)).or_else(|| self.workspaces.keys().copied().find(named))
+        let find = |matches: &dyn Fn(&Workspace) -> bool| {
+            let found = |id: &WorkspaceId| self.workspaces.get(id).is_some_and(matches);
+            front.and_then(|w| w.workspaces.iter().copied().find(found)).or_else(|| self.workspaces.keys().copied().find(found))
+        };
+        find(&|w| w.name.as_deref() == Some(name)).or_else(|| find(&|w| w.name.is_none() && w.title == name))
     }
 
     fn fail_runs(&mut self, pane: PaneId, message: &str) {
@@ -939,7 +1030,7 @@ impl Server {
                     Some(window) => window,
                     None => {
                         let near = self.focused_pane();
-                        match self.spawn_pane(spec, near, None) {
+                        match self.spawn_pane(spec, near, None, &Defaults::default()) {
                             Ok(pane) => self.add_window_with(pane, bounds),
                             Err(err) => {
                                 log::error!("{err}");
@@ -1021,6 +1112,17 @@ impl Server {
                 self.report_focus_change(before);
             }
             ClientMessage::WorkspaceToNewWindow { workspace } => self.workspace_to_new_window(workspace, client),
+            ClientMessage::SetWorkspaceColor { workspace, color } => {
+                if let (Some(state), Ok(color)) = (self.workspaces.get_mut(&workspace), workspace_color(color.as_deref().unwrap_or_default())) {
+                    state.color = color;
+                }
+            }
+            ClientMessage::SetWorkspaceRoot { workspace, root } => {
+                if let Some(state) = self.workspaces.get_mut(&workspace) {
+                    state.defaults.root = root.filter(|dir| dir.is_dir());
+                }
+                self.refresh_title(workspace);
+            }
             ClientMessage::Split { pane, axis, spec } => {
                 if let Err(err) = self.split(pane, axis, spec, true) {
                     log::error!("{err}");
@@ -1275,9 +1377,8 @@ impl Server {
                         (Some(window), None) => self.open_tab(window, None, spec, focus)?,
                         // No windows: a detached one, shown when the app attaches.
                         (None, name) => {
-                            let pane = self.spawn_pane(spec, None, None)?;
-                            let workspace = Workspace::new(name, vec![Tab::new(pane)], 0);
-                            self.add_window(vec![workspace], 0, None);
+                            let (workspace, pane) = self.create_workspace(name, spec)?;
+                            self.insert_window(vec![workspace], 0, None);
                             pane
                         }
                     },
@@ -1378,9 +1479,9 @@ impl Server {
                 let id = match self.target_window() {
                     Some(window) => self.new_workspace(window, name, spec, true)?.0,
                     None => {
-                        let pane = self.spawn_pane(spec, None, None)?;
-                        let window = self.add_window(vec![Workspace::new(name, vec![Tab::new(pane)], 0)], 0, None);
-                        self.windows[&window].workspaces[0]
+                        let (workspace, _) = self.create_workspace(name, spec)?;
+                        self.insert_window(vec![workspace], 0, None);
+                        workspace
                     }
                 };
                 Response::Workspace { id }
@@ -1405,6 +1506,30 @@ impl Server {
                         self.insert_window(vec![id], 0, None);
                     }
                 }
+                Response::Ok
+            }
+            Request::ConfigureWorkspace { workspace, root, clear_root, color, env, unset_env } => {
+                let id = self.resolve_workspace(&workspace)?;
+                let root = match root {
+                    Some(root) if !root.is_dir() => return Err(format!("{} isn't a directory", root.display())),
+                    root => root,
+                };
+                let color = color.map(|c| workspace_color(&c)).transpose()?;
+                let state = self.workspaces.get_mut(&id).unwrap();
+                if clear_root {
+                    state.defaults.root = None;
+                }
+                if let Some(root) = root {
+                    state.defaults.root = Some(root);
+                }
+                if let Some(color) = color {
+                    state.color = color;
+                }
+                for key in unset_env {
+                    state.defaults.env.remove(&key);
+                }
+                state.defaults.env.extend(env);
+                self.refresh_title(id);
                 Response::Ok
             }
             Request::HideWorkspace { workspace } => {
@@ -1531,6 +1656,10 @@ impl Server {
             pane.process = pane.session.process();
             pane.refresh();
             pane.flush_pending_input();
+        }
+        let workspaces: Vec<WorkspaceId> = self.workspaces.keys().copied().collect();
+        for workspace in workspaces {
+            self.refresh_title(workspace);
         }
         let now = Instant::now();
         for run in self.runs.extract_if(.., |run| run.deadline.is_some_and(|d| d <= now)) {
@@ -1670,6 +1799,9 @@ impl Server {
             name: workspace.name.clone(),
             active: workspace.active,
             collapsed: workspace.collapsed,
+            root: workspace.defaults.root.clone(),
+            color: workspace.color.clone(),
+            env: workspace.defaults.env.clone(),
             tabs: workspace
                 .tabs
                 .iter()

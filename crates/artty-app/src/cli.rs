@@ -61,6 +61,13 @@ artty, your own pane is found automatically:
                                          (it keeps running), or end its tabs;
                                          W is an id or a name
   artty workspace rename W NAME          an empty NAME goes back to automatic
+                                         (its git repository or directory)
+  artty workspace set W [--root DIR | --no-root] [--color C|none]
+                    [--env K=V]... [--unset-env K]...
+                                         where its new tabs start, its color
+                                         (red, orange, yellow, green, teal,
+                                         blue, purple, pink), and environment
+                                         variables for its new panes
   artty server [status|stop|restart]     the server that keeps sessions running:
                                          show it, end every session and stop it,
                                          or restart it on this build (programs
@@ -123,6 +130,9 @@ fn run(args: Vec<String>) -> Result<i32, String> {
     let mut switches = std::collections::HashSet::<&str>::new();
     // Where in `rest` the arguments after `--` start.
     let mut command_start = None;
+    // Repeatable: `--env K=V`, `--unset-env K`.
+    let mut env_vars = Vec::new();
+    let mut unset_env = Vec::new();
 
     // Shared flag parsing; `--` ends flags.
     while let Some(arg) = args.next() {
@@ -137,6 +147,17 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--split" => _ = flags.insert("split", args.value("--split")?),
             "--agent" => _ = flags.insert("agent", args.value("--agent")?),
             "--signal" => _ = flags.insert("signal", args.value("--signal")?),
+            "--root" => _ = flags.insert("root", args.value("--root")?),
+            "--color" => _ = flags.insert("color", args.value("--color")?),
+            "--env" => {
+                let pair = args.value("--env")?;
+                let (key, value) = pair.split_once('=').ok_or(format!("--env: expected KEY=VALUE, not {pair}"))?;
+                env_vars.push((key.to_owned(), value.to_owned()));
+            }
+            "--unset-env" => unset_env.push(args.value("--unset-env")?),
+            "--no-root" => {
+                switches.insert("no-root");
+            }
             "--pane" => {
                 switches.insert("pane");
             }
@@ -191,7 +212,22 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 "close" => Request::CloseWorkspace { workspace: which()? },
                 "open" => Request::OpenWorkspace { workspace: which()? },
                 "hide" => Request::HideWorkspace { workspace: which()? },
-                other => return Err(format!("workspace: unknown action {other} (list, new, rename, close, open, hide)")),
+                "set" => {
+                    // Relative to where you are, like any path you type.
+                    let root = flags
+                        .get("root")
+                        .map(|root| std::fs::canonicalize(root).map_err(|err| format!("--root {root}: {err}")))
+                        .transpose()?;
+                    Request::ConfigureWorkspace {
+                        workspace: which()?,
+                        root,
+                        clear_root: switches.contains("no-root"),
+                        color: flags.get("color").cloned(),
+                        env: env_vars,
+                        unset_env,
+                    }
+                }
+                other => return Err(format!("workspace: unknown action {other} (list, new, rename, set, close, open, hide)")),
             }
         }
         "settings" => Request::Settings,
@@ -327,8 +363,9 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
                     Some(name) => name.clone(),
                     None => format!("[{}]", workspace.title),
                 };
+                let root = workspace.root.as_ref().map(|r| format!("  {}", short_path(r))).unwrap_or_default();
                 println!(
-                    "{marker} {:>4}  {window:>3}  {:>4}  {:<8} {title}{place}",
+                    "{marker} {:>4}  {window:>3}  {:>4}  {:<8} {title}{root}{place}",
                     workspace.id, workspace.tabs, workspace.status
                 );
             }
@@ -397,6 +434,15 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             }
             Ok(0)
         }
+    }
+}
+
+/// A path with the home directory as `~`.
+fn short_path(path: &std::path::Path) -> String {
+    match std::env::var_os("HOME").and_then(|home| path.strip_prefix(home).ok().map(std::path::Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 

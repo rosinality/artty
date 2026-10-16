@@ -10,8 +10,8 @@ use std::time::{Duration, Instant, SystemTime};
 use artty_core::layout::{self, Axis, Direction, Divider, PaneId, Rect};
 use artty_core::control::{Request, Response, WorkspaceInfo};
 use artty_core::protocol::{
-    ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp, TabLayout, WindowId,
-    WindowLayout, WorkspaceId,
+    ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp, TabLayout, WORKSPACE_COLORS,
+    WindowId, WindowLayout, WorkspaceId,
 };
 use artty_core::vt::term::TermMode;
 use artty_core::{Config, FrameCursor, SavedWindow, TerminalSize, Theme};
@@ -102,6 +102,25 @@ enum MenuCommand {
     HideWorkspace,
     MoveToNewWindow,
     MoveToWindow(WindowId),
+    /// An index into `WORKSPACE_COLORS`, or none.
+    SetColor(Option<usize>),
+    RootFromCurrentDirectory,
+    ClearRoot,
+}
+
+/// The shade of a workspace color (see `WORKSPACE_COLORS`).
+fn workspace_color(name: &str) -> Option<u32> {
+    Some(match name {
+        "red" => 0xf7768e,
+        "orange" => 0xff9e64,
+        "yellow" => 0xe0af68,
+        "green" => 0x9ece6a,
+        "teal" => 0x73daca,
+        "blue" => 0x7aa2f7,
+        "purple" => 0xbb9af7,
+        "pink" => 0xff7eb6,
+        _ => return None,
+    })
 }
 
 /// What was right-clicked.
@@ -156,6 +175,15 @@ impl Render for DraggedWorkspace {
 impl Render for DraggedTab {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         drag_preview(self.title.clone())
+    }
+}
+
+/// A small hover label.
+struct Tooltip(SharedString);
+
+impl Render for Tooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        drag_preview(self.0.clone()).text_size(px(11.5))
     }
 }
 
@@ -512,16 +540,38 @@ impl WindowView {
         }
     }
 
-    /// A workspace's name: what the user called it, or its position.
+    /// A workspace's name: what the user called it, else its repository or
+    /// directory, else its position.
     fn workspace_title(&self, position: usize) -> SharedString {
         let workspace = &self.layout.workspaces[position];
-        workspace.name.clone().unwrap_or_else(|| format!("Workspace {}", position + 1)).into()
+        let automatic = Some(workspace.title.clone()).filter(|t| !t.is_empty());
+        workspace.name.clone().or(automatic).unwrap_or_else(|| format!("Workspace {}", position + 1)).into()
+    }
+
+    /// The color of the workspace holding tab `index`, as RGB.
+    fn tab_color(&self, index: usize) -> Option<u32> {
+        let (workspace, _) = *self.places.get(index)?;
+        let workspace = self.layout.workspaces.iter().find(|w| w.id == workspace)?;
+        workspace_color(workspace.color.as_deref()?)
     }
 
     /// Whether the sidebar shows workspace sections: not for one unnamed
     /// workspace, which looks like a plain list of tabs.
     fn sections(&self) -> bool {
         self.layout.workspaces.len() > 1 || self.layout.workspaces.iter().any(|w| w.name.is_some())
+    }
+
+    /// Make the directory of a workspace's current pane its root.
+    fn root_from_current_directory(&self, workspace: WorkspaceId, cx: &mut Context<Self>) {
+        let Some(state) = self.layout.workspaces.iter().find(|w| w.id == workspace) else { return };
+        let Some(pane) = state.tabs.get(state.active).map(|t| t.focused) else { return };
+        let answer = app_state::query(Query::Cwd { pane }, cx);
+        cx.spawn(async move |_, cx| {
+            if let Ok(Reply::Path(Some(root))) = answer.await {
+                let _ = cx.update(|cx| app_state::send(ClientMessage::SetWorkspaceRoot { workspace, root: Some(root) }, cx));
+            }
+        })
+        .detach();
     }
 
     /// Open the workspace picker, listing workspaces this window doesn't show.
@@ -821,6 +871,12 @@ impl WindowView {
                     MenuCommand::CloseWorkspace => self.send(ClientMessage::CloseWorkspace { workspace }, cx),
                     MenuCommand::HideWorkspace => self.send(ClientMessage::HideWorkspace { workspace }, cx),
                     MenuCommand::MoveToNewWindow => self.send(ClientMessage::WorkspaceToNewWindow { workspace }, cx),
+                    MenuCommand::SetColor(color) => {
+                        let color = color.and_then(|i| WORKSPACE_COLORS.get(i)).map(|c| (*c).to_owned());
+                        self.send(ClientMessage::SetWorkspaceColor { workspace, color }, cx);
+                    }
+                    MenuCommand::ClearRoot => self.send(ClientMessage::SetWorkspaceRoot { workspace, root: None }, cx),
+                    MenuCommand::RootFromCurrentDirectory => self.root_from_current_directory(workspace, cx),
                     MenuCommand::MoveToWindow(window) => {
                         self.send(ClientMessage::MoveWorkspace { workspace, window, to: usize::MAX }, cx);
                         app_state::activate(window, cx);
@@ -1429,7 +1485,11 @@ impl WindowView {
             .py(px(4.))
             .px_2()
             .rounded(px(7.))
-            .when(selected, |d| d.bg(rgba(0xffffff1c)))
+            .when(selected, |d| match self.tab_color(index) {
+                // A colored workspace tints its selected tab.
+                Some(color) => d.bg(rgba(color << 8 | 0x33)),
+                None => d.bg(rgba(0xffffff1c)),
+            })
             .when(attention && !selected, |d| d.bg(rgba(0xe0af6814)))
             .hover(|d| d.bg(rgba(0xffffff10)))
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
@@ -1489,6 +1549,8 @@ impl WindowView {
                 .when(attention, |d| d.text_color(rgba(0xe0af68ff))),
         };
         let tabs = workspace.tabs.len();
+        let color = workspace.color.as_deref().and_then(workspace_color);
+        let root = workspace.root.as_ref().map(|r| r.display().to_string());
         div()
             .id(("workspace", id as usize))
             .flex()
@@ -1509,6 +1571,7 @@ impl WindowView {
                     .text_color(rgba(0xffffff70))
                     .child(if workspace.collapsed { "▶" } else { "▼" }),
             )
+            .when_some(color, |d, color| d.child(div().flex_none().size(px(7.)).rounded_full().bg(rgba(color << 8 | 0xff))))
             .child(name)
             // Folded, it says how many tabs it holds.
             .when(workspace.collapsed && renaming.is_none(), |d| {
@@ -1548,6 +1611,7 @@ impl WindowView {
                     cx.stop_propagation();
                 }),
             )
+            .when_some(root, |d, root| d.tooltip(move |_, cx| cx.new(|_| Tooltip(format!("Root: {root}").into())).into()))
             .on_drag(DraggedWorkspace { workspace: id, title }, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
             .drag_over::<DraggedWorkspace>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
             .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
@@ -1749,17 +1813,58 @@ impl WindowView {
                     let label = format!("Move to “{}”", if title.is_empty() { "window" } else { &title });
                     items.push(Some((label.into(), "", true, MenuCommand::MoveToWindow(window))));
                 }
+                let has_root = self.layout.workspaces.iter().find(|w| w.id == workspace).is_some_and(|w| w.root.is_some());
                 items.extend([
                     item("Hide Workspace", "", true, MenuCommand::HideWorkspace),
                     None,
-                    item("Close Workspace", "", true, MenuCommand::CloseWorkspace),
+                    item("Use This Directory as Root", "", true, MenuCommand::RootFromCurrentDirectory),
                 ]);
+                if has_root {
+                    items.push(item("Clear Root", "", true, MenuCommand::ClearRoot));
+                }
+                items.extend([None, item("Close Workspace", "", true, MenuCommand::CloseWorkspace)]);
                 items
             }
         };
 
+        // A workspace's menu ends with its colors.
+        let color_row = match menu.target {
+            MenuTarget::Workspace(workspace) => {
+                let current = self.layout.workspaces.iter().find(|w| w.id == workspace).and_then(|w| w.color.clone());
+                let swatch = |i: usize, fill: Option<u32>, chosen: bool| {
+                    div()
+                        .id(("menu-color", i))
+                        .size(px(16.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .border_2()
+                        .border_color(if chosen { rgba(0xffffffee) } else { rgba(0x00000000) })
+                        .hover(|d| d.border_color(rgba(0xffffff90)))
+                        .map(|d| match fill {
+                            Some(color) => d.bg(rgba(color << 8 | 0xff)),
+                            None => d.text_size(px(11.)).text_color(rgba(0xffffff90)).child("⊘"),
+                        })
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let color = (i > 0).then(|| i - 1);
+                            this.run_menu_command(MenuCommand::SetColor(color), window, cx);
+                        }))
+                };
+                let mut row = div().flex().items_center().justify_between().h(px(ITEM)).px(px(9.));
+                row = row.child(swatch(0, None, current.is_none()));
+                for (i, name) in WORKSPACE_COLORS.iter().enumerate() {
+                    row = row.child(swatch(i + 1, workspace_color(name), current.as_deref() == Some(*name)));
+                }
+                Some(row)
+            }
+            _ => None,
+        };
+
         // Keep the menu on screen.
-        let height = 10. + items.iter().map(|i| if i.is_some() { ITEM } else { SEPARATOR }).sum::<f32>();
+        let height = 10.
+            + items.iter().map(|i| if i.is_some() { ITEM } else { SEPARATOR }).sum::<f32>()
+            + if color_row.is_some() { ITEM + SEPARATOR } else { 0. };
         let (mut x, mut y) = (f32::from(menu.position.x), f32::from(menu.position.y));
         if x + WIDTH > f32::from(viewport.width) - 4. {
             x = (x - WIDTH).max(4.);
@@ -1815,7 +1920,8 @@ impl WindowView {
             .border_color(rgba(0xffffff26))
             .shadow_lg()
             .text_size(px(13.))
-            .children(rows);
+            .children(rows)
+            .when_some(color_row, |d, row| d.child(div().h(px(1.)).mx(px(9.)).my(px(4.)).bg(rgba(0xffffff1a))).child(row));
         Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
     }
 
