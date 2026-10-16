@@ -5,6 +5,7 @@ mod control;
 mod keys;
 mod layout;
 mod mouse;
+mod notify;
 mod pane;
 mod terminal;
 mod workspace;
@@ -124,6 +125,7 @@ fn main() {
         workspace::bind_keys(cx);
         cx.set_menus(menus());
         app_state::init(save_enabled, cx);
+        notify::init();
 
         let windows = restore.map(SavedState::into_windows).unwrap_or_default();
         if windows.is_empty() {

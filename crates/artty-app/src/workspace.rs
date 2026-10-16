@@ -259,16 +259,6 @@ fn beep() {
         .spawn();
 }
 
-/// Post a macOS notification.
-fn notify_desktop(title: &str, body: &str) {
-    let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
-    let _ = std::process::Command::new("osascript")
-        .args(["-e", &script])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
 
 impl Workspace {
     pub fn new(
@@ -567,6 +557,12 @@ impl Workspace {
             command = injection.command.or(command);
         }
         env.insert(SESSION_ENV.to_owned(), id.to_string());
+        // Apps launched from Finder get no locale; shells need one for UTF-8.
+        if std::env::var_os("LANG").is_none()
+            && let Some(lang) = crate::notify::default_lang()
+        {
+            env.insert("LANG".to_owned(), lang);
+        }
         if let Some(path) = &shared.control_path {
             env.insert(SOCKET_ENV.to_owned(), path.display().to_string());
         }
@@ -887,7 +883,7 @@ impl Workspace {
         let Some(pane) = self.panes.get(&id) else { return };
         let pane_title = pane.title();
         let title = title.map_or_else(|| pane_title.to_string(), |t| format!("{t} — {pane_title}"));
-        notify_desktop(&title, if body.is_empty() { "Needs your attention" } else { body });
+        crate::notify::post(&title, if body.is_empty() { "Needs your attention" } else { body });
     }
 
     fn handle_events(&mut self, events: Vec<(SessionId, Event)>, cx: &mut Context<Self>) {
