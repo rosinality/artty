@@ -276,6 +276,8 @@ pub struct WindowView {
     mouse_pane: Option<PaneId>,
     /// A mouse drag is extending the selection.
     selecting: bool,
+    /// Scrolling the selection's pane while the drag is past its top or bottom.
+    autoscrolling: bool,
     /// Button held down while the program receives mouse reports.
     reporting_button: Option<Button>,
     /// Last cell reported for motion, to avoid duplicate reports.
@@ -372,6 +374,7 @@ impl WindowView {
             window_active: true,
             mouse_pane: None,
             selecting: false,
+            autoscrolling: false,
             reporting_button: None,
             last_mouse_cell: None,
             scroll_remainder: 0.,
@@ -1251,6 +1254,9 @@ impl WindowView {
             if let Some(id) = self.mouse_pane {
                 let (line, column, right) = self.cell_at(id, event.position);
                 self.send(ClientMessage::Selection { pane: id, op: SelectionOp::Update { line, column, right } }, cx);
+                if self.overflow(id, event.position) != 0 {
+                    self.start_autoscroll(cx);
+                }
             }
         } else if event.pressed_button.is_none()
             && let Some((id, _)) = self.pane_at(event.position)
@@ -1258,6 +1264,58 @@ impl WindowView {
         {
             self.report_mouse(id, Button::None, Action::Motion, event.position, &event.modifiers, cx);
         }
+    }
+
+    /// How far past the top (positive) or bottom (negative) of a pane a
+    /// point is, in lines (rounded up); 0 inside.
+    fn overflow(&self, id: PaneId, position: Point<Pixels>) -> i32 {
+        let Some(rect) = self.rect_of(id) else { return 0 };
+        let y = f32::from(position.y);
+        let line = f32::from(self.metrics.line_height);
+        if y < rect.y {
+            ((rect.y - y) / line).ceil() as i32
+        } else if y > rect.y + rect.height {
+            -((y - rect.y - rect.height) / line).ceil() as i32
+        } else {
+            0
+        }
+    }
+
+    /// While a selection drag stays past the pane's edge, scroll toward it
+    /// and extend the selection, faster the farther out it is.
+    fn start_autoscroll(&mut self, cx: &mut Context<Self>) {
+        if self.autoscrolling {
+            return;
+        }
+        self.autoscrolling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(50)).await;
+                let going = this.update(cx, |this, cx| this.autoscroll_step(cx)).unwrap_or(false);
+                if !going {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn autoscroll_step(&mut self, cx: &mut Context<Self>) -> bool {
+        let (Some(id), Some(position)) = (self.mouse_pane, self.mouse_position) else {
+            self.autoscrolling = false;
+            return false;
+        };
+        let overflow = self.overflow(id, position);
+        if !self.selecting || overflow == 0 {
+            self.autoscrolling = false;
+            return false;
+        }
+        let lines = overflow.signum() * overflow.abs().min(10);
+        self.send(ClientMessage::Scroll { pane: id, lines }, cx);
+        // The edge line, now showing what scrolled in.
+        let (line, column, right) = self.cell_at(id, position);
+        self.send(ClientMessage::Selection { pane: id, op: SelectionOp::Update { line, column, right } }, cx);
+        true
     }
 
     fn mouse_up(&mut self, event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1621,7 +1679,9 @@ impl WindowView {
             .gap(px(4.))
             .mt(px(if position == 0 { 0. } else { 8. }))
             .h(px(24.))
-            .px(px(4.))
+            // Right padding as the WORKSPACES heading's, so their + line up.
+            .pl(px(4.))
+            .pr_2()
             .rounded(px(6.))
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
@@ -1645,21 +1705,6 @@ impl WindowView {
                     d.child(div().flex_none().text_size(px(10.5)).text_color(rgba(0xffffff90)).child(count.to_string()))
                 })
             })
-            .child(
-                div()
-                    .id(("workspace-new-tab", id as usize))
-                    .flex_none()
-                    .px_1()
-                    .rounded(px(4.))
-                    .text_size(px(13.))
-                    .text_color(rgba(0xffffff70))
-                    .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffd0)))
-                    .child("+")
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_tab_in(Some(id), cx);
-                        cx.stop_propagation();
-                    })),
-            )
             // Closing a whole workspace takes a second click.
             .child(
                 div()
@@ -1694,6 +1739,21 @@ impl WindowView {
                         }
                         cx.stop_propagation();
                         cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .id(("workspace-new-tab", id as usize))
+                    .flex_none()
+                    .px_1()
+                    .rounded(px(4.))
+                    .text_size(px(14.))
+                    .text_color(rgba(0xffffff70))
+                    .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffd0)))
+                    .child("+")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_tab_in(Some(id), cx);
+                        cx.stop_propagation();
                     })),
             )
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
