@@ -300,10 +300,11 @@ impl Pane {
         }
     }
 
-    /// `tab` is the 1-based tab number.
-    pub fn info(&self, tab: usize, active: bool, focused: bool) -> TabInfo {
+    /// `window` and `tab` are 1-based numbers.
+    pub fn info(&self, window: usize, tab: usize, active: bool, focused: bool) -> TabInfo {
         TabInfo {
             id: self.session.id(),
+            window,
             tab,
             title: self.title().to_string(),
             active,

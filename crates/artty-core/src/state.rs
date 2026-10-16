@@ -11,13 +11,32 @@ use artty_vt::term::Term;
 use artty_vt::term::cell::{Cell, Flags};
 use serde::{Deserialize, Serialize};
 
-/// Version 2 added split layouts; version 1 files (one pane per tab) still load.
-const VERSION: u32 = 2;
+/// Version 3 saves several windows; version 2 added split layouts; version 1
+/// had one pane per tab. All of them load.
+const VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SavedState {
     pub version: u32,
+    pub windows: Vec<SavedWorkspace>,
+    // One-window layout of versions 1 and 2.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    window: Option<SavedWindow>,
+    #[serde(skip_serializing_if = "is_zero")]
+    active: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tabs: Vec<SavedTab>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// One window: where it was, its tabs, and the active one.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedWorkspace {
     pub window: Option<SavedWindow>,
     pub active: usize,
     pub tabs: Vec<SavedTab>,
@@ -107,8 +126,18 @@ pub struct SavedAgent {
 }
 
 impl SavedState {
-    pub fn new(window: Option<SavedWindow>, active: usize, tabs: Vec<SavedTab>) -> Self {
-        Self { version: VERSION, window, active, tabs }
+    pub fn new(windows: Vec<SavedWorkspace>) -> Self {
+        Self { version: VERSION, windows, ..Default::default() }
+    }
+
+    /// The saved windows, including a one-window file from an older version.
+    pub fn into_windows(self) -> Vec<SavedWorkspace> {
+        let mut windows = self.windows;
+        if !self.tabs.is_empty() {
+            windows.insert(0, SavedWorkspace { window: self.window, active: self.active, tabs: self.tabs });
+        }
+        windows.retain(|window| !window.tabs.is_empty());
+        windows
     }
 
     pub fn path() -> Option<PathBuf> {
@@ -333,10 +362,26 @@ mod tests {
             focused: 1,
             zoomed: false,
         };
-        let state = SavedState::new(None, 0, vec![tab]);
+        let window = SavedWorkspace { window: None, active: 0, tabs: vec![tab] };
+        let state = SavedState::new(vec![window.clone(), window]);
         let json = serde_json::to_string(&state).unwrap();
+        assert!(!json.contains("\"tabs\":[]"), "no empty legacy fields: {json}");
         let back: SavedState = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.tabs, state.tabs);
+        assert_eq!(back.into_windows(), state.windows);
+    }
+
+    #[test]
+    fn version_2_files_load_as_one_window() {
+        let old: SavedState = serde_json::from_str(
+            r#"{"version":2,"active":1,"window":{"x":1,"y":2,"width":3,"height":4},
+                "tabs":[{"layout":{"pane":{"cwd":"/a"}}},{"layout":{"pane":{"cwd":"/b"}}}]}"#,
+        )
+        .unwrap();
+        let windows = old.into_windows();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].active, 1);
+        assert_eq!(windows[0].tabs.len(), 2);
+        assert_eq!(windows[0].window.map(|w| w.width), Some(3.));
     }
 
     #[test]
@@ -344,9 +389,10 @@ mod tests {
         // One pane per tab; unknown fields are tolerated.
         let old: SavedState =
             serde_json::from_str(r#"{"version":1,"active":0,"tabs":[{"cwd":"/x","title":"t","future":1}]}"#).unwrap();
-        let SavedLayout::Pane(pane) = &old.tabs[0].layout else { panic!("expected a single pane") };
+        let windows = old.into_windows();
+        let SavedLayout::Pane(pane) = &windows[0].tabs[0].layout else { panic!("expected a single pane") };
         assert_eq!(pane.cwd.as_deref(), Some(std::path::Path::new("/x")));
         assert_eq!(pane.title.as_deref(), Some("t"));
-        assert_eq!(old.tabs[0].focused, 0);
+        assert_eq!(windows[0].tabs[0].focused, 0);
     }
 }

@@ -147,7 +147,10 @@ impl Response {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TabInfo {
     pub id: SessionId,
-    /// 1-based tab number.
+    /// 1-based window number.
+    #[serde(default)]
+    pub window: usize,
+    /// 1-based tab number within the window.
     #[serde(default)]
     pub tab: usize,
     pub title: String,

@@ -24,7 +24,7 @@ usage:
 
 control a running artty. Ids name panes (a tab has one or more); inside
 artty, your own pane is found automatically:
-  artty list [--json]                    list panes: id, tab, status, title
+  artty list [--json]                    list panes: id, window, tab, status, title
   artty read [--tab N] [--lines N | --screen | --last]
                                          print a tab's text: the last N lines
                                          (default 100), the screen, or the last
@@ -247,11 +247,14 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             Ok(0)
         }
         Response::Tabs { tabs } => {
-            println!("    ID  TAB  STATUS   TITLE");
+            println!("    ID  WIN  TAB  STATUS   TITLE");
             for pane in tabs {
                 let marker = if pane.active { "*" } else if pane.needs_attention { "!" } else { " " };
                 let detail = pane.detail.map(|d| format!("  ({d})")).unwrap_or_default();
-                println!("{marker} {:>4}  {:>3}  {:<8} {}{detail}", pane.id, pane.tab, pane.status, pane.title);
+                println!(
+                    "{marker} {:>4}  {:>3}  {:>3}  {:<8} {}{detail}",
+                    pane.id, pane.window, pane.tab, pane.status, pane.title
+                );
             }
             Ok(0)
         }

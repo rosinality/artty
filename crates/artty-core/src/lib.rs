@@ -20,5 +20,5 @@ pub use frame::{Frame, FrameCursor, FrameLine, FrameRect, FrameRun};
 pub use process::ProcessInfo;
 pub use session::{Notice, Session, SessionId, SessionOptions, TerminalSize};
 pub use shell::{CommandRecord, ShellPhase};
-pub use state::{SavedAgent, SavedLayout, SavedPane, SavedState, SavedTab, SavedWindow};
+pub use state::{SavedAgent, SavedLayout, SavedPane, SavedState, SavedTab, SavedWindow, SavedWorkspace};
 pub use theme::Theme;

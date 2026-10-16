@@ -16,7 +16,7 @@ use artty_core::vt::index::Side;
 use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
 use artty_core::{
-    Config, FrameCursor, Notice, SavedLayout, SavedState, SavedTab, SavedWindow, Session,
+    Config, FrameCursor, Notice, SavedLayout, SavedTab, SavedWindow, SavedWorkspace, Session,
     SessionId, SessionOptions, ShellPhase, TerminalSize, Theme,
 };
 use futures::StreamExt;
@@ -29,7 +29,7 @@ use gpui::{
     point, prelude::*, px, rgba, size,
 };
 
-use crate::control::{ControlServer, Pending, cli_dir};
+use crate::app_state::{self, Shared};
 use crate::keys;
 use crate::layout::{self, Axis, Direction, Divider, Node, PaneId, Rect};
 use crate::mouse::{self, Action, Button};
@@ -80,8 +80,6 @@ const BLINK_INTERVAL: Duration = Duration::from_millis(530);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-/// How often tabs are saved for the next launch.
-const SAVE_EVERY_POLLS: u32 = 5;
 /// Shown under a restored pane's old output.
 const RESTORED_BANNER: &str = "\r\n\x1b[2m── restored ──\x1b[0m\r\n";
 /// How long the visual bell flash lasts.
@@ -198,7 +196,6 @@ pub struct Workspace {
     panes: HashMap<PaneId, Pane>,
     tabs: Vec<Tab>,
     active: usize,
-    next_id: SessionId,
     /// Area the active tab's panes fill, from the last render.
     area: Rect,
     /// Pane rectangles and dividers of the active tab, from the last render.
@@ -207,17 +204,10 @@ pub struct Workspace {
     /// A divider being dragged.
     drag: Option<Divider>,
     sink: Arc<dyn Fn(SessionId, Event) + Send + Sync>,
-    control: Option<ControlServer>,
-    cli_dir: Option<PathBuf>,
-    /// Where zsh/bash integration scripts are installed.
-    integration_dir: Option<PathBuf>,
     runs: Vec<PendingRun>,
     search: Option<Search>,
-    /// Save tabs for the next launch (off when another artty owns the state).
-    save_enabled: bool,
-    last_saved: Option<String>,
-    polls: u32,
     window_bounds: Option<SavedWindow>,
+    window_handle: gpui::AnyWindowHandle,
     /// IME composition in progress, shown at the cursor until committed.
     marked_text: Option<String>,
     /// Focused pane's cursor from the last render, for placing the IME window.
@@ -284,9 +274,8 @@ impl Workspace {
     pub fn new(
         config: Config,
         config_error: Option<String>,
-        command: Option<Vec<String>>,
-        restore: Option<SavedState>,
-        save_enabled: bool,
+        spec: TabSpec,
+        restore: Option<SavedWorkspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -310,18 +299,6 @@ impl Workspace {
             }
         });
 
-        let (request_tx, mut request_rx) = mpsc::unbounded::<Pending>();
-        let control = ControlServer::start(request_tx)
-            .inspect_err(|err| log::error!("control socket: {err}"))
-            .ok();
-        let requests = cx.spawn(async move |this, cx| {
-            while let Some((request, reply)) = request_rx.next().await {
-                if this.update(cx, |this, cx| this.handle_request(request, reply, cx)).is_err() {
-                    break;
-                }
-            }
-        });
-
         let every = |interval: Duration, f: fn(&mut Self, &mut Context<Self>)| {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -336,12 +313,11 @@ impl Workspace {
         let poll = every(POLL_INTERVAL, Self::poll);
         let spinner = every(SPINNER_INTERVAL, Self::spin);
 
-        let quit = cx.on_app_quit(|this, _| {
-            this.save();
-            async {}
-        });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
+            if this.window_active {
+                app_state::set_frontmost(cx.weak_entity(), cx);
+            }
             this.report_focus(this.focused_id(), this.window_active);
             cx.notify();
         });
@@ -367,23 +343,15 @@ impl Workspace {
             panes: HashMap::new(),
             tabs: Vec::new(),
             active: 0,
-            next_id: 1,
             area: Rect::default(),
             pane_rects: Vec::new(),
             dividers: Vec::new(),
             drag: None,
             sink,
-            control,
-            cli_dir: cli_dir(),
-            integration_dir: artty_core::integration::install()
-                .inspect_err(|err| log::error!("shell integration: {err}"))
-                .ok(),
             runs: Vec::new(),
             search: None,
-            save_enabled,
-            last_saved: None,
-            polls: 0,
             window_bounds: None,
+            window_handle: window.window_handle(),
             marked_text: None,
             cursor: None,
             cursor_visible: true,
@@ -400,14 +368,14 @@ impl Workspace {
             hover_link: None,
             context_menu: None,
             renaming: None,
-            _tasks: vec![events, requests, blink, poll, spinner],
-            _subscriptions: vec![activation, quit],
+            _tasks: vec![events, blink, poll, spinner],
+            _subscriptions: vec![activation],
         };
         this.area = Self::area_rect(window);
-        match restore.filter(|state| !state.tabs.is_empty() && command.is_none()) {
+        match restore.filter(|state| !state.tabs.is_empty()) {
             Some(state) => this.restore(state, cx),
             None => {
-                if let Err(err) = this.open_tab(TabSpec { command, ..Default::default() }, true, cx) {
+                if let Err(err) = this.open_tab(spec, true, cx) {
                     log::error!("{err}");
                 }
             }
@@ -415,12 +383,38 @@ impl Workspace {
         this
     }
 
+    pub fn window_handle(&self) -> gpui::AnyWindowHandle {
+        self.window_handle
+    }
+
+    pub fn has_pane(&self, id: PaneId) -> bool {
+        self.panes.contains_key(&id)
+    }
+
+    /// The focused pane's directory, for opening windows next to it.
+    pub fn focused_cwd(&self) -> Option<PathBuf> {
+        self.focused_session().and_then(Session::cwd)
+    }
+
+    /// Every pane, for `artty list`; `window` is this window's number.
+    pub fn pane_infos(&self, window: usize, frontmost: bool) -> Vec<artty_core::control::TabInfo> {
+        let mut infos = Vec::new();
+        for (index, tab) in self.tabs.iter().enumerate() {
+            for id in tab.root.panes() {
+                let focused = tab.focused == id;
+                let active = frontmost && focused && index == self.active;
+                infos.push(self.panes[&id].info(window, index + 1, active, focused));
+            }
+        }
+        infos
+    }
+
     // Saving and restoring.
 
     /// Reopen saved tabs: their layouts, directories and output, and agents.
-    fn restore(&mut self, state: SavedState, cx: &mut Context<Self>) {
+    fn restore(&mut self, state: SavedWorkspace, cx: &mut Context<Self>) {
         for saved in state.tabs {
-            let Some(root) = self.restore_layout(saved.layout) else { continue };
+            let Some(root) = self.restore_layout(saved.layout, cx) else { continue };
             let panes = root.panes();
             let focused = panes[saved.focused.min(panes.len() - 1)];
             let zoomed = saved.zoomed && panes.len() > 1;
@@ -432,13 +426,13 @@ impl Workspace {
         self.select(state.active.min(self.tabs.len().saturating_sub(1)), cx);
     }
 
-    fn restore_layout(&mut self, layout: SavedLayout) -> Option<Node> {
+    fn restore_layout(&mut self, layout: SavedLayout, cx: &mut App) -> Option<Node> {
         match layout {
             SavedLayout::Pane(saved) => {
                 let initial_output = (!saved.scrollback.is_empty())
                     .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
                 let spec = TabSpec { command: saved.command, cwd: saved.cwd, title: saved.title, initial_output };
-                let id = self.spawn_pane(spec).inspect_err(|err| log::error!("restoring a pane: {err}")).ok()?;
+                let id = self.spawn_pane(spec, cx).inspect_err(|err| log::error!("restoring a pane: {err}")).ok()?;
                 let resume = saved.agent.filter(|_| self.config.resume_agents).and_then(|agent| {
                     self.config.resume.get(&agent.name)?.command(agent.session.as_deref())
                 });
@@ -448,7 +442,7 @@ impl Workspace {
                 Some(Node::Pane(id))
             }
             SavedLayout::Split { vertical, ratio, first, second } => {
-                match (self.restore_layout(*first), self.restore_layout(*second)) {
+                match (self.restore_layout(*first, cx), self.restore_layout(*second, cx)) {
                     (Some(first), Some(second)) => Some(Node::Split {
                         axis: if vertical { Axis::Vertical } else { Axis::Horizontal },
                         ratio,
@@ -474,11 +468,8 @@ impl Workspace {
         }
     }
 
-    /// Save the tabs for the next launch, if anything changed.
-    fn save(&mut self) {
-        if !self.save_enabled {
-            return;
-        }
+    /// This window's tabs, for saving.
+    pub fn saved(&self) -> SavedWorkspace {
         let tabs = self
             .tabs
             .iter()
@@ -489,15 +480,7 @@ impl Workspace {
                 zoomed: tab.zoomed,
             })
             .collect();
-        let state = SavedState::new(self.window_bounds, self.active, tabs);
-        let Ok(json) = serde_json::to_string(&state) else { return };
-        if self.last_saved.as_ref() == Some(&json) {
-            return;
-        }
-        match state.save() {
-            Ok(()) => self.last_saved = Some(json),
-            Err(err) => log::error!("saving tabs: {err}"),
-        }
+        SavedWorkspace { window: self.window_bounds, active: self.active, tabs }
     }
 
     // Geometry.
@@ -568,26 +551,26 @@ impl Workspace {
     }
 
     /// Start a session for a new pane (not yet placed in a tab).
-    fn spawn_pane(&mut self, spec: TabSpec) -> Result<PaneId, String> {
-        let id = self.next_id;
-        self.next_id += 1;
+    fn spawn_pane(&mut self, spec: TabSpec, cx: &mut App) -> Result<PaneId, String> {
+        let id = app_state::next_pane_id(cx);
+        let shared = cx.global::<Shared>();
         let explicit = spec.command.clone().filter(|c| !c.is_empty());
         let mut command = explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
         let cwd = spec.cwd.or_else(|| self.focused_session().and_then(Session::cwd));
 
         let mut env = HashMap::new();
         if self.config.shell_integration
-            && let Some(dir) = &self.integration_dir
+            && let Some(dir) = &shared.integration_dir
             && let Some(injection) = artty_core::integration::inject(dir, command.as_deref())
         {
             env.extend(injection.env);
             command = injection.command.or(command);
         }
         env.insert(SESSION_ENV.to_owned(), id.to_string());
-        if let Some(control) = &self.control {
-            env.insert(SOCKET_ENV.to_owned(), control.path().display().to_string());
+        if let Some(path) = &shared.control_path {
+            env.insert(SOCKET_ENV.to_owned(), path.display().to_string());
         }
-        if let Some(dir) = &self.cli_dir {
+        if let Some(dir) = &shared.cli_dir {
             let path = std::env::var("PATH").unwrap_or_default();
             env.insert("PATH".to_owned(), format!("{}:{path}", dir.display()));
         }
@@ -606,7 +589,7 @@ impl Workspace {
 
     /// Open a tab with one pane as described by `spec`.
     fn open_tab(&mut self, spec: TabSpec, focus: bool, cx: &mut Context<Self>) -> Result<PaneId, String> {
-        let id = self.spawn_pane(spec)?;
+        let id = self.spawn_pane(spec, cx)?;
         self.tabs.push(Tab { title: None, root: Node::Pane(id), focused: id, zoomed: false });
         if focus {
             self.select(self.tabs.len() - 1, cx);
@@ -630,7 +613,7 @@ impl Workspace {
         if spec.cwd.is_none() {
             spec.cwd = self.panes.get(&target).and_then(|pane| pane.session.cwd());
         }
-        let id = self.spawn_pane(spec)?;
+        let id = self.spawn_pane(spec, cx)?;
         let tab = &mut self.tabs[index];
         tab.root.split(target, id, axis);
         tab.zoomed = false;
@@ -768,7 +751,8 @@ impl Workspace {
     fn remove_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         self.tabs.remove(index);
         if self.tabs.is_empty() {
-            cx.quit();
+            // `render` closes the window.
+            cx.notify();
             return;
         }
         if index < self.active || self.active >= self.tabs.len() {
@@ -989,7 +973,7 @@ impl Workspace {
         }
     }
 
-    fn handle_request(&mut self, request: Request, reply: oneshot::Sender<Response>, cx: &mut Context<Self>) {
+    pub fn handle_request(&mut self, request: Request, reply: oneshot::Sender<Response>, cx: &mut Context<Self>) {
         let response = match request {
             // Answered when the command finishes.
             Request::Run { tab, command, timeout_secs } => match self.start_run(tab, &command) {
@@ -1022,16 +1006,8 @@ impl Workspace {
 
     fn respond(&mut self, request: Request, cx: &mut Context<Self>) -> Result<Response, String> {
         Ok(match request {
-            Request::List => {
-                let mut tabs = Vec::new();
-                for (index, tab) in self.tabs.iter().enumerate() {
-                    for id in tab.root.panes() {
-                        let focused = tab.focused == id;
-                        tabs.push(self.panes[&id].info(index + 1, focused && index == self.active, focused));
-                    }
-                }
-                Response::Tabs { tabs }
-            }
+            // Normally answered for all windows by `app_state::route`.
+            Request::List => Response::Tabs { tabs: self.pane_infos(1, true) },
             Request::Read { tab, source } => {
                 let session = &self.panes[&self.resolve(tab)?].session;
                 let text = match source {
@@ -1189,10 +1165,6 @@ impl Workspace {
             pane.refresh();
             pane.flush_pending_input();
             changed |= before != (pane.status.clone(), pane.process.clone()) || pane.status.busy();
-        }
-        self.polls += 1;
-        if self.polls.is_multiple_of(SAVE_EVERY_POLLS) {
-            self.save();
         }
 
         let now = Instant::now();
@@ -1972,6 +1944,11 @@ struct PaneView {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The last tab closed: so does the window.
+        if self.tabs.is_empty() {
+            window.remove_window();
+            return div();
+        }
         if self.reload_config {
             self.apply_config(window);
         }
