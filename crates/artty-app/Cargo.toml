@@ -10,6 +10,7 @@ publish = false
 artty-core = { path = "../artty-core" }
 artty-server = { path = "../artty-server" }
 futures = "0.3"
+libc = "0.2"
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 log = "0.4"
 serde_json = "1"

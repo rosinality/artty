@@ -39,7 +39,9 @@ impl ProcessProbe {
             return ProcessInfo::default();
         }
         let name = process_name(pgrp).map(|name| script_name(pgrp, &name).unwrap_or(name));
-        ProcessInfo { foreground: name, at_shell: pgrp == self.shell_pid, foreground_group: Some(pgrp) }
+        // The session's process is the shell, or `login` running the shell.
+        let at_shell = pgrp == self.shell_pid || parent_pid(pgrp) == Some(self.shell_pid);
+        ProcessInfo { foreground: name, at_shell, foreground_group: Some(pgrp) }
     }
 
     pub(crate) fn shell_pid(&self) -> i32 {
@@ -50,6 +52,25 @@ impl ProcessProbe {
     pub(crate) fn shell_cwd(&self) -> Option<PathBuf> {
         process_cwd(self.shell_pid)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn parent_pid(pid: i32) -> Option<i32> {
+    use std::mem::{MaybeUninit, size_of};
+    let mut bsd = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = size_of::<libc::proc_bsdinfo>() as i32;
+    // SAFETY: `bsd` is valid for `size` bytes.
+    if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, bsd.as_mut_ptr().cast(), size) } != size {
+        return None;
+    }
+    // SAFETY: filled by the kernel.
+    Some(unsafe { bsd.assume_init() }.pbi_ppid as i32)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn parent_pid(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -114,7 +135,7 @@ pub struct ProcessSample {
     /// Resident memory in bytes.
     pub memory: u64,
     /// Start time, in seconds since the Unix epoch.
-    pub started: u64,
+    pub started: f64,
 }
 
 /// This user's processes.
@@ -176,7 +197,7 @@ pub fn processes() -> Vec<ProcessSample> {
             name,
             cpu_ns,
             memory,
-            started: bsd.pbi_start_tvsec,
+            started: bsd.pbi_start_tvsec as f64 + bsd.pbi_start_tvusec as f64 / 1e6,
         });
     }
     samples

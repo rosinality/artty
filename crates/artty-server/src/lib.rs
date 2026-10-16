@@ -11,7 +11,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
@@ -45,7 +45,7 @@ pub fn run() -> io::Result<()> {
     let listener = UnixListener::bind(&path)?;
     // Only this user may drive the terminal.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-    let _socket = RemoveOnDrop(path.clone());
+    let socket = RemoveOnDrop(path.clone());
 
     let (tx, rx) = mpsc::channel::<Input>();
     let accept = tx.clone();
@@ -77,9 +77,21 @@ pub fn run() -> io::Result<()> {
             break;
         }
     }
+    // Stop taking connections first: an app reconnecting after a restart
+    // must reach the new server, not this one.
+    drop(socket);
     server.shutdown();
+    drop(server);
+    // Let apps hear why the server is going away.
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while WRITERS.load(Ordering::Relaxed) > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
     Ok(())
 }
+
+/// Connections still writing to an app.
+static WRITERS: AtomicUsize = AtomicUsize::new(0);
 
 struct RemoveOnDrop(PathBuf);
 
@@ -131,14 +143,19 @@ fn serve_app(mut reader: BufReader<UnixStream>, mut writer: UnixStream, id: Clie
     if tx.send(Input::Connected(id, outgoing)).is_err() {
         return;
     }
-    let _ = std::thread::Builder::new().name("artty-client-writer".into()).spawn(move || {
+    WRITERS.fetch_add(1, Ordering::Relaxed);
+    let spawned = std::thread::Builder::new().name("artty-client-writer".into()).spawn(move || {
         for message in messages {
             if write_message(&mut writer, &message).is_err() {
                 break;
             }
         }
         let _ = writer.shutdown(std::net::Shutdown::Both);
+        WRITERS.fetch_sub(1, Ordering::Relaxed);
     });
+    if spawned.is_err() {
+        WRITERS.fetch_sub(1, Ordering::Relaxed);
+    }
     while let Ok(message) = read_message::<ClientMessage>(&mut reader) {
         if tx.send(Input::Client(id, message)).is_err() {
             break;
@@ -152,15 +169,53 @@ pub fn running() -> bool {
     UnixStream::connect(server_socket_path()).is_ok()
 }
 
-/// Start `executable server` in the background (detached from the caller's
-/// session, so it survives the app quitting), then wait for its socket.
+/// A private copy of `executable` for the server to run from, so rebuilding
+/// (which may rewrite the build output in place) can never touch a running
+/// server, and with it every session. Older copies are removed.
+fn server_copy(executable: &Path) -> io::Result<PathBuf> {
+    let dir = server_bin_dir().ok_or_else(|| io::Error::other("no HOME"))?;
+    std::fs::create_dir_all(&dir)?;
+    let modified = std::fs::metadata(executable)?.modified()?;
+    let stamp = modified.duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let copy = dir.join(format!("artty-server-{stamp}"));
+    if !copy.exists() {
+        let temp = dir.join(format!(".artty-server-{stamp}.{}", std::process::id()));
+        std::fs::copy(executable, &temp)?;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
+        std::fs::rename(&temp, &copy)?;
+    }
+    // Keep only this copy (a running server keeps its file open anyway).
+    for entry in std::fs::read_dir(&dir)?.flatten() {
+        if entry.path() != copy {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(copy)
+}
+
+fn server_bin_dir() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let base = match std::env::var_os("XDG_STATE_HOME") {
+        Some(state) => PathBuf::from(state),
+        None if cfg!(target_os = "macos") => home.join("Library/Application Support"),
+        None => home.join(".local/state"),
+    };
+    Some(base.join("artty").join("server-bin"))
+}
+
+/// Start the server in the background (detached from the caller's session,
+/// so it survives the app quitting), then wait for its socket.
 pub fn spawn(executable: &Path, env: &[(String, String)]) -> io::Result<()> {
     use std::os::unix::process::CommandExt;
+    let executable = server_copy(executable).unwrap_or_else(|err| {
+        log::warn!("running the server from the build output: {err}");
+        executable.to_owned()
+    });
     let log = log_path().and_then(|path| {
         std::fs::create_dir_all(path.parent()?).ok()?;
         std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
     });
-    let mut command = std::process::Command::new(executable);
+    let mut command = std::process::Command::new(&executable);
     command
         .arg("server")
         .envs(env.iter().cloned())

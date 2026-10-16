@@ -47,6 +47,14 @@ pub struct Shared {
     update_ready: bool,
     /// The server runs a different build; restarting it picks up this one.
     pub server_mismatch: Option<String>,
+    /// This app's build, as of when it started.
+    build: String,
+    /// The server said it's ending every session: quit instead of
+    /// reconnecting when it goes.
+    stopped: bool,
+    /// Between losing the server and reopening windows from a new one, when
+    /// having no windows doesn't mean quitting.
+    reconnecting: bool,
 }
 
 impl Global for Shared {}
@@ -75,6 +83,9 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         }),
         update_ready: false,
         server_mismatch: None,
+        build: std::env::current_exe().map(|exe| artty_core::protocol::build_id(&exe)).unwrap_or_default(),
+        stopped: false,
+        reconnecting: false,
     });
     connect_and_open(spec, cx);
 
@@ -95,8 +106,9 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
     cx.on_window_closed(|cx| {
         // The Settings window alone doesn't keep the app open. Sessions keep
         // running in the server either way.
-        let settings = cx.global::<Shared>().settings.map(|handle| handle.window_id());
-        if cx.windows().iter().all(|window| Some(window.window_id()) == settings) {
+        let shared = cx.global::<Shared>();
+        let settings = shared.settings.map(|handle| handle.window_id());
+        if !shared.reconnecting && cx.windows().iter().all(|window| Some(window.window_id()) == settings) {
             cx.quit();
         }
     })
@@ -116,6 +128,7 @@ fn connect_and_open(spec: PaneSpec, cx: &mut App) {
             _ => Vec::new(),
         };
         let _ = cx.update(|cx| {
+            cx.global_mut::<Shared>().reconnecting = false;
             if windows.is_empty() {
                 open_window(None, None, spec, cx);
             }
@@ -192,17 +205,22 @@ fn connect(cx: &mut App) -> std::io::Result<()> {
 }
 
 /// The server went away (it crashed, or restarted). Close our windows and
-/// reconnect: a new server reopens what the old one saved.
+/// reconnect: a new server reopens what the old one saved. If it ended every
+/// session (`artty server stop`), quit.
 fn server_lost(cx: &mut App) {
     let shared = cx.global_mut::<Shared>();
+    if shared.stopped {
+        return cx.quit();
+    }
     shared.outgoing = None;
     shared.screens.clear();
     shared.panes.clear();
     shared.attaching.clear();
     let windows: Vec<WeakEntity<Workspace>> = shared.windows.drain().map(|(_, w)| w).collect();
-    if windows.is_empty() {
+    if windows.is_empty() && !shared.reconnecting {
         return cx.quit();
     }
+    shared.reconnecting = true;
     for window in windows.into_iter().filter_map(|w| w.upgrade()) {
         window.update(cx, |workspace, _| workspace.forget_server());
         let handle = window.read(cx).window_handle();
@@ -214,9 +232,9 @@ fn server_lost(cx: &mut App) {
 fn handle(message: ServerMessage, cx: &mut App) {
     match message {
         ServerMessage::Welcome { version, server_version } => {
-            if version != PROTOCOL_VERSION || server_version != env!("CARGO_PKG_VERSION") {
-                cx.global_mut::<Shared>().server_mismatch = Some(server_version);
-            }
+            let shared = cx.global_mut::<Shared>();
+            shared.server_mismatch = (version != PROTOCOL_VERSION || server_version != shared.build).then_some(server_version);
+            cx.refresh_windows();
         }
         ServerMessage::Attached { window, bounds } => {
             let shared = cx.global_mut::<Shared>();
@@ -284,6 +302,7 @@ fn handle(message: ServerMessage, cx: &mut App) {
                 let _ = waiter.send(decode_response(&response));
             }
         }
+        ServerMessage::Stopping { restart } => cx.global_mut::<Shared>().stopped = !restart,
     }
 }
 

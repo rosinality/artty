@@ -116,6 +116,7 @@ dependencies = [
  "block2",
  "futures",
  "gpui",
+ "libc",
  "log",
  "objc2",
  "objc2-foundation",

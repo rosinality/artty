@@ -21,6 +21,18 @@ use crate::{SavedWindow, TerminalSize};
 /// Bumped on incompatible changes; app and server must agree.
 pub const PROTOCOL_VERSION: u32 = 1;
 
+/// Identifies a build: the package version and when the executable was
+/// built (rebuilds don't change the version). The server runs from a copy
+/// named `artty-server-<built>`, so it reports the build it was copied from.
+pub fn build_id(executable: &std::path::Path) -> String {
+    let name = executable.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    let built = name.strip_prefix("artty-server-").map(str::to_owned).or_else(|| {
+        let modified = std::fs::metadata(executable).ok()?.modified().ok()?;
+        Some(modified.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos().to_string())
+    });
+    format!("{}+{}", env!("CARGO_PKG_VERSION"), built.unwrap_or_default())
+}
+
 pub type WindowId = u64;
 
 /// Largest message accepted, against corrupt length prefixes.
@@ -213,6 +225,9 @@ pub enum ServerMessage {
     Reply { id: u64, reply: Reply },
     /// JSON of a [`Response`].
     Control { id: u64, response: String },
+    /// The server is exiting: sessions ended (`artty server stop`), or it's
+    /// restarting and a new server will reopen them.
+    Stopping { restart: bool },
 }
 
 /// Encode a control request for [`ClientMessage::Control`].

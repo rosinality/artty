@@ -13,7 +13,7 @@ use artty_core::control::{
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "server", "hooks",
+    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "server", "ps", "top", "kill", "hooks",
     "shell-integration",
 ];
 
@@ -47,9 +47,15 @@ artty, your own pane is found automatically:
              [--message M | --hook]      report an agent's state (for hooks);
                                          --hook reads the agent's hook event
                                          from stdin (message and session id)
-  artty server [status|stop]             the server that keeps sessions running:
-                                         show it, or end every session and stop
-                                         it (`artty server` alone runs one)
+  artty ps [--tab N] [--json]            panes and their processes: status,
+                                         CPU, memory, how long they've run
+  artty top                              the same, live (Ctrl-C to quit)
+  artty kill N [--signal SIG] [--pane]   stop pane N's foreground program
+                                         (default TERM), or close the pane
+  artty server [status|stop|restart]     the server that keeps sessions running:
+                                         show it, end every session and stop it,
+                                         or restart it on this build (programs
+                                         end; tabs and agents come back)
   artty settings                         open the Settings window
   artty restart                          quit and reopen artty (e.g. to run a new
                                          build); tabs and agents are restored
@@ -118,6 +124,10 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--message" => _ = flags.insert("message", args.value("--message")?),
             "--split" => _ = flags.insert("split", args.value("--split")?),
             "--agent" => _ = flags.insert("agent", args.value("--agent")?),
+            "--signal" => _ = flags.insert("signal", args.value("--signal")?),
+            "--pane" => {
+                switches.insert("pane");
+            }
             "--screen" | "--last" | "--no-enter" | "--background" | "--json" | "--hook" => {
                 switches.insert(match arg.as_str() {
                     "--screen" => "screen",
@@ -143,6 +153,13 @@ fn run(args: Vec<String>) -> Result<i32, String> {
 
     let request = match command.as_str() {
         "list" => Request::List,
+        "ps" => Request::Processes { tab },
+        "top" => return top(),
+        "kill" => {
+            let id = rest.first().and_then(|id| id.parse().ok()).or(tab).ok_or("kill: which pane?")?;
+            let signal = flags.get("signal").map(|s| parse_signal(s)).transpose()?;
+            Request::Kill { tab: id, signal, pane: switches.contains("pane") }
+        }
         "settings" => Request::Settings,
         "restart" => Request::Restart,
         "read" => {
@@ -221,7 +238,8 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             }
             Some("status") => Request::ServerStatus,
             Some("stop") => Request::StopServer,
-            Some(other) => return Err(format!("server: unknown action {other} (run, status, stop)")),
+            Some("restart") => Request::RestartServer,
+            Some(other) => return Err(format!("server: unknown action {other} (run, status, stop, restart)")),
         },
         "shell-integration" => {
             let shell = rest.first().map(String::as_str).unwrap_or_default();
@@ -273,8 +291,12 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             }
             Ok(0)
         }
-        Response::Processes { panes } => {
+        Response::Processes { panes } if json => {
             println!("{}", serde_json::to_string_pretty(&panes).unwrap_or_default());
+            Ok(0)
+        }
+        Response::Processes { panes } => {
+            print!("{}", process_table(&panes, false));
             Ok(0)
         }
         Response::Command { output, exit, truncated, .. } => {
@@ -303,6 +325,136 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
             Ok(0)
         }
     }
+}
+
+fn parse_signal(name: &str) -> Result<i32, String> {
+    if let Ok(number) = name.parse() {
+        return Ok(number);
+    }
+    let name = name.trim_start_matches("SIG").to_uppercase();
+    Ok(match name.as_str() {
+        "TERM" => libc::SIGTERM,
+        "INT" => libc::SIGINT,
+        "KILL" => libc::SIGKILL,
+        "HUP" => libc::SIGHUP,
+        "QUIT" => libc::SIGQUIT,
+        "STOP" => libc::SIGSTOP,
+        "CONT" => libc::SIGCONT,
+        "USR1" => libc::SIGUSR1,
+        "USR2" => libc::SIGUSR2,
+        _ => return Err(format!("unknown signal {name}")),
+    })
+}
+
+/// `1536000` → `1.5M`.
+fn bytes(n: u64) -> String {
+    match n {
+        0..1_000_000 => format!("{:.0}K", n as f64 / 1e3),
+        1_000_000..1_000_000_000 => format!("{:.1}M", n as f64 / 1e6),
+        _ => format!("{:.2}G", n as f64 / 1e9),
+    }
+}
+
+/// Panes, each followed by its processes (foreground ones marked `*`).
+fn process_table(panes: &[artty_core::control::PaneProcesses], by_cpu: bool) -> String {
+    use std::fmt::Write as _;
+    let bold = |s: &str| if is_tty() { format!("\x1b[1m{s}\x1b[0m") } else { s.to_owned() };
+    let dim = |s: &str| if is_tty() { format!("\x1b[2m{s}\x1b[0m") } else { s.to_owned() };
+    let mut panes: Vec<_> = panes.iter().collect();
+    if by_cpu {
+        panes.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
+    }
+    let mut out = String::new();
+    let _ = writeln!(out, "{}", bold("PANE WIN TAB  STATUS      CPU     MEM  TITLE"));
+    for pane in panes {
+        let shown = if pane.attached { "" } else { "  (detached)" };
+        let _ = writeln!(
+            out,
+            "{:>4} {:>3} {:>3}  {:<8} {:>5.1}% {:>7}  {}{}",
+            pane.id,
+            pane.window,
+            pane.tab,
+            pane.status,
+            pane.cpu_percent,
+            bytes(pane.memory_bytes),
+            pane.title,
+            dim(shown)
+        );
+        let mut processes: Vec<_> = pane.processes.iter().collect();
+        if by_cpu {
+            processes.sort_by(|a, b| b.cpu_percent.total_cmp(&a.cpu_percent));
+        }
+        for process in processes {
+            let marker = if process.foreground { "*" } else { " " };
+            let line = format!(
+                "{:>16}{marker}{:<16} {:>5.1}% {:>7}  pid {:<6} {}",
+                "",
+                process.name,
+                process.cpu_percent,
+                bytes(process.memory_bytes),
+                process.pid,
+                duration(process.elapsed_secs)
+            );
+            let _ = writeln!(out, "{}", if process.foreground { line } else { dim(&line) });
+        }
+    }
+    out
+}
+
+fn is_tty() -> bool {
+    // SAFETY: plain syscall.
+    unsafe { libc::isatty(1) == 1 }
+}
+
+/// `artty top`: the process table, refreshed every second until Ctrl-C.
+fn top() -> Result<i32, String> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static STOP: AtomicBool = AtomicBool::new(false);
+    extern "C" fn stop(_: libc::c_int) {
+        STOP.store(true, Ordering::Relaxed);
+    }
+    // SAFETY: the handler only stores to an atomic.
+    unsafe { libc::signal(libc::SIGINT, stop as *const () as libc::sighandler_t) };
+
+    // Alternate screen, hidden cursor; restored on exit.
+    print!("\x1b[?1049h\x1b[?25l");
+    let result = loop {
+        if STOP.load(Ordering::Relaxed) {
+            break Ok(0);
+        }
+        let status = send(&Request::ServerStatus, Some(Duration::from_secs(5)));
+        let panes = send(&Request::Processes { tab: None }, Some(Duration::from_secs(5)));
+        let (Ok(Response::Server { info }), Ok(Response::Processes { panes })) = (status, panes) else {
+            break Err("lost the artty server".to_owned());
+        };
+        let total_cpu: f32 = panes.iter().map(|p| p.cpu_percent).fold(0., |a, b| a + b);
+        let total_memory: u64 = panes.iter().map(|p| p.memory_bytes).sum();
+        let mut screen = String::from("\x1b[H\x1b[2J");
+        screen.push_str(&format!(
+            "artty server {} · pid {} · up {} · {} windows ({} shown) · {} panes · CPU {:.1}% · memory {}\n\n",
+            info.version,
+            info.pid,
+            duration(info.uptime_secs),
+            info.windows,
+            info.attached_windows,
+            info.panes,
+            total_cpu,
+            bytes(total_memory)
+        ));
+        screen.push_str(&process_table(&panes, true));
+        screen.push_str("\n\x1b[2mCtrl-C to quit\x1b[0m");
+        print!("{}", screen.replace('\n', "\r\n"));
+        let _ = std::io::stdout().flush();
+        for _ in 0..10 {
+            if STOP.load(Ordering::Relaxed) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    print!("\x1b[?25h\x1b[?1049l");
+    let _ = std::io::stdout().flush();
+    result
 }
 
 /// `90s` → `1m30s`, `5400s` → `1h30m`.

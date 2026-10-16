@@ -11,7 +11,10 @@ Rust with [GPUI](https://gpui.rs).
 - Notifications when a tab needs you while you're elsewhere, and ⌘J to jump to it.
 - An `artty` command that lets agents (or scripts) list tabs, read their
   output, run commands in other tabs and get the result, and report status.
-- Tabs come back after a restart or crash: directories, recent output, and
+- Sessions live in a background server, like tmux: closing a window or
+  quitting the app (⌘Q) leaves them running, and reopening attaches again.
+  `artty ps` / `artty top` show what runs where and what it costs.
+- Tabs come back after a reboot or crash: directories, recent output, and
   the coding agents running in them, resumed in the same conversation.
 
 ## Build and run
@@ -30,8 +33,13 @@ cargo test --workspace
 The app bundle gets the icon (`scripts/make-icon.py` redraws it) and native
 notifications. A rebuild replaces the bundle atomically, so a running artty is
 never modified underneath itself; it notices the new build and offers
-"Restart to update", which reopens your tabs and resumes agents (running
-programs in them do restart). GPUI's Metal shaders compile at startup (`runtime_shaders`), so
+"Restart to update". That restarts the app only — sessions keep running in
+the server. When the server is from an older build too, the window offers to
+restart it (artty → Restart Server), which reopens your tabs and resumes
+agents, but running programs in them do restart. The server runs from its own
+copy of the executable, so rebuilds never touch it. (A dev build run from
+`target/` is killed by macOS when cargo rewrites it in place; its sessions
+survive.) GPUI's Metal shaders compile at startup (`runtime_shaders`), so
 the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 
 ## Keys
@@ -96,18 +104,42 @@ artty the conversation id, which is what lets restored tabs resume the right
 conversation. The files are backed up first; rerunning `install` upgrades
 hooks from older versions.
 
+## Sessions
+
+The `artty server` process owns every terminal session; app windows attach
+to it. The app starts the server when needed, and the server exits once its
+last session ends.
+
+- Closing a window detaches it: its tabs keep running, and
+  Shell → Reopen Closed Windows brings it back.
+- ⌘Q quits the app and leaves everything running; the next launch reopens the
+  windows. artty → Quit and End Sessions ends them instead.
+- artty → Restart Server restarts it on the current build (see above).
+
+```sh
+artty ps                    # each pane: status, CPU, memory, process tree
+artty ps --tab 3 --json
+artty top                   # the same, live, busiest first
+artty kill 3                # SIGTERM the program running in pane 3
+artty kill 3 --signal INT   # or another signal; --pane closes the pane
+artty server status         # pid, uptime, windows, panes, attached apps
+artty server restart        # restart on this build; tabs and agents return
+artty server stop           # end every session
+```
+
+The server logs to `~/Library/Logs/artty/server.log`.
+
 ### Restoring tabs and resuming agents
 
-artty saves your tabs every few seconds and on quit, and reopens them on the
-next launch: each tab's split layout, and each pane's directory, its last 1000 lines of output (with colors),
+The server saves your tabs every few seconds, and reopens them when it next
+starts (after a reboot, a crash, or a restart): each tab's split layout, and each pane's directory, its last 1000 lines of output (with colors),
 and the program it was opened with. A tab where an agent was running reopens
 its shell and runs the agent's resume command — for Claude Code,
 `claude --resume <id>` with the conversation id its hooks reported (or
 `claude --continue` without hooks). Resuming opens the conversation; nothing
 is sent until you type.
 
-Only the first artty instance saves and restores; later ones start fresh. See
-`restore-sessions`, `restore-scrollback`, `resume-agents` and `[resume.*]` in
+See `restore-sessions`, `restore-scrollback`, `resume-agents` and `[resume.*]` in
 the config to change or turn this off.
 
 ### The `artty` command
@@ -128,8 +160,8 @@ artty notify "Build finished"
 artty status waiting --message "Need a decision on the API"
 ```
 
-Outside artty, `artty` finds the most recently started instance. `artty help`
-lists everything.
+Outside artty, `artty` talks to the running server. `artty help` lists
+everything.
 
 ### Shell integration
 
@@ -144,4 +176,5 @@ over ssh, say — `artty shell-integration zsh|bash` prints a script to source.
 |---|---|
 | `crates/artty-vt` | Terminal emulation: a fork of `alacritty_terminal` plus vte's escape-code layer, extended with shell-integration, notification, working-directory and progress escape codes. See [`UPSTREAM.md`](crates/artty-vt/UPSTREAM.md). |
 | `crates/artty-core` | Sessions (PTY, process inspection, command tracking, search, links), config, the control protocol, and render snapshots. |
-| `crates/artty-app` | The GPUI app and the `artty` command. |
+| `crates/artty-server` | The server that owns sessions, windows' tabs and layouts, saving and restoring them. |
+| `crates/artty-app` | The GPUI app (a client of the server) and the `artty` command. |

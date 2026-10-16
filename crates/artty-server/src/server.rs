@@ -511,10 +511,8 @@ impl Server {
                 }
             },
             Input::Connected(id, tx) => {
-                let _ = tx.send(ServerMessage::Welcome {
-                    version: PROTOCOL_VERSION,
-                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
-                });
+                let build = std::env::current_exe().map(|exe| artty_core::protocol::build_id(&exe)).unwrap_or_default();
+                let _ = tx.send(ServerMessage::Welcome { version: PROTOCOL_VERSION, server_version: build });
                 self.clients.insert(id, Client { tx, sent: HashMap::new(), dirty: HashSet::new(), panes_sent: Vec::new() });
             }
             Input::Client(id, message) => self.handle_client(id, message),
@@ -996,7 +994,8 @@ impl Server {
                     self.close_pane(id);
                 } else {
                     let group = self.panes[&id].process.foreground_group.ok_or("no foreground process")?;
-                    if self.panes[&id].process.at_shell {
+                    // A pane opened with a program has no shell to protect.
+                    if self.panes[&id].process.at_shell && self.panes[&id].command.is_none() {
                         return Err("only the shell is running; use --pane to close the pane".into());
                     }
                     // SAFETY: plain syscall.
@@ -1013,7 +1012,7 @@ impl Server {
     fn processes(&mut self, only: Option<PaneId>) -> Result<Vec<PaneProcesses>, String> {
         let samples = processes();
         let now = Instant::now();
-        let unix_now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let unix_now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
         let cpu = |previous: &HashMap<i32, (u64, Instant)>, sample: &artty_core::ProcessSample| -> f32 {
             match previous.get(&sample.pid) {
                 // Since the last look, if recent; else the lifetime average.
@@ -1022,7 +1021,7 @@ impl Server {
                     ((sample.cpu_ns - used) as f64 / wall * 100.) as f32
                 }
                 _ => {
-                    let alive = unix_now.saturating_sub(sample.started).max(1) as f64 * 1e9;
+                    let alive = (unix_now - sample.started).max(0.05) * 1e9;
                     (sample.cpu_ns as f64 / alive * 100.) as f32
                 }
             }
@@ -1042,7 +1041,7 @@ impl Server {
                     cpu_percent: cpu(&self.cpu_samples, p),
                     memory_bytes: p.memory,
                     foreground: Some(p.pgid) == foreground,
-                    elapsed_secs: unix_now.saturating_sub(p.started),
+                    elapsed_secs: (unix_now - p.started).max(0.) as u64,
                 })
                 .collect();
             let attached = self.window_of(info.id).is_some_and(|(w, _)| self.windows[&w].client.is_some());
@@ -1285,5 +1284,10 @@ impl Server {
         self.save();
         // Dropping sessions hangs up their shells.
         self.panes.clear();
+        // Tell apps whether to reconnect; dropping the senders lets the
+        // writers finish.
+        for client in std::mem::take(&mut self.clients).into_values() {
+            let _ = client.tx.send(ServerMessage::Stopping { restart: self.restarting });
+        }
     }
 }
