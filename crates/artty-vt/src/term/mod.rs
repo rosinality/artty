@@ -937,6 +937,30 @@ impl<T> Term<T> {
 
     /// Active terminal cursor style.
     ///
+    /// The cell holding the last character written, where combining
+    /// characters go (artty: factored out of `input`).
+    fn previous_cell(&self) -> Point {
+        let mut column = self.grid.cursor.point.column;
+        if !self.grid.cursor.input_needs_wrap {
+            column.0 = column.saturating_sub(1);
+        }
+        // Put zerowidth characters over first fullwidth character cell.
+        let line = self.grid.cursor.point.line;
+        if self.grid[line][column].flags.contains(Flags::WIDE_CHAR_SPACER) {
+            column.0 = column.saturating_sub(1);
+        }
+        Point::new(line, column)
+    }
+
+    /// Whether `c` continues the previous character's grapheme (artty).
+    fn joins_previous(&self, c: char) -> bool {
+        const ZWJ: char = '\u{200d}';
+        let skin_tone = ('\u{1f3fb}'..='\u{1f3ff}').contains(&c);
+        let cell = &self.grid[self.previous_cell()];
+        let after_joiner = cell.zerowidth().and_then(|z| z.last()) == Some(&ZWJ);
+        after_joiner || (skin_tone && cell.flags.contains(Flags::WIDE_CHAR))
+    }
+
     /// While vi mode is active, this will automatically return the vi mode cursor style.
     #[inline]
     pub fn cursor_style(&self) -> CursorStyle {
@@ -1066,21 +1090,12 @@ impl<T: EventListener> Handler for Term<T> {
             None => return,
         };
 
-        // Handle zero-width characters.
-        if width == 0 {
-            // Get previous column.
-            let mut column = self.grid.cursor.point.column;
-            if !self.grid.cursor.input_needs_wrap {
-                column.0 = column.saturating_sub(1);
-            }
-
-            // Put zerowidth characters over first fullwidth character cell.
-            let line = self.grid.cursor.point.line;
-            if self.grid[line][column].flags.contains(Flags::WIDE_CHAR_SPACER) {
-                column.0 = column.saturating_sub(1);
-            }
-
-            self.grid[line][column].push_zerowidth(c);
+        // Handle zero-width characters, and characters that join the previous
+        // grapheme: emoji after a zero-width joiner and skin-tone modifiers
+        // (artty: 👨‍👩‍👧 takes two cells, like in Ghostty and kitty).
+        if width == 0 || self.joins_previous(c) {
+            let point = self.previous_cell();
+            self.grid[point].push_zerowidth(c);
             return;
         }
 

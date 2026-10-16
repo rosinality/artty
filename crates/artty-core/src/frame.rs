@@ -232,6 +232,16 @@ impl LineBuilder {
         };
         if ascii {
             self.run = Some((run, style));
+        } else if is_regional_indicator(cell.c)
+            && let Some(previous) = self.line.runs.last_mut()
+            && previous.column + 1 == column
+            && previous.cells == 1
+            && previous.text.chars().count() == 1
+            && previous.text.chars().all(is_regional_indicator)
+        {
+            // Two regional indicators are one flag, drawn across both cells.
+            previous.text.push(cell.c);
+            previous.cells = 2;
         } else {
             self.line.runs.push(run);
         }
@@ -249,6 +259,10 @@ impl LineBuilder {
         self.flush();
         self.line
     }
+}
+
+fn is_regional_indicator(c: char) -> bool {
+    ('\u{1f1e6}'..='\u{1f1ff}').contains(&c)
 }
 
 #[cfg(test)]
@@ -284,6 +298,13 @@ mod tests {
         assert_eq!(texts(&frame.lines[0]), vec![(0, "a"), (1, "한"), (3, "b"), (4, "✳"), (5, "c")]);
         let cells: Vec<_> = frame.lines[0].runs.iter().map(|r| r.cells).collect();
         assert_eq!(cells, vec![1, 2, 1, 1, 1]);
+    }
+
+    #[test]
+    fn flags_and_emoji_sequences_are_single_runs() {
+        let frame = frame_for("🇰🇷🇯🇵 👨\u{200d}👩\u{200d}👧!".as_bytes());
+        let runs: Vec<_> = frame.lines[0].runs.iter().map(|r| (r.column, r.cells, r.text.as_str())).collect();
+        assert_eq!(runs, vec![(0, 2, "🇰🇷"), (2, 2, "🇯🇵"), (5, 2, "👨\u{200d}👩\u{200d}👧"), (7, 1, "!")]);
     }
 
     #[test]

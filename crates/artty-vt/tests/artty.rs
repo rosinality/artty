@@ -122,3 +122,15 @@ fn progress_and_working_directory() {
     assert_eq!(progress, vec![Progress::Normal(42), Progress::Indeterminate, Progress::Remove]);
     assert_eq!(cwd.as_deref(), Some("file://host/Users/me/a%20b"));
 }
+
+#[test]
+fn emoji_sequences_share_one_cell() {
+    let (term, _) = run("👨\u{200d}👩\u{200d}👧x 👍🏽y".as_bytes(), 3);
+    let row = &term.grid()[Line(0)];
+    assert_eq!(row[Column(0)].c, '👨');
+    assert_eq!(row[Column(0)].zerowidth(), Some(&['\u{200d}', '👩', '\u{200d}', '👧'][..]));
+    assert_eq!(row[Column(2)].c, 'x');
+    assert_eq!(row[Column(4)].c, '👍');
+    assert_eq!(row[Column(4)].zerowidth(), Some(&['🏽'][..]));
+    assert_eq!(row[Column(6)].c, 'y');
+}

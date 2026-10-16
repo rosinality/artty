@@ -25,3 +25,4 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   and single-part OSC 99; `Term` forwards them as new `Event` variants.
   `Grid::lines_scrolled` counts lines scrolled into history so marks have
   stable line numbers. Tests: `tests/artty.rs`.
+- `term/mod.rs`: emoji after a zero-width joiner, and skin-tone modifiers, join the previous cell (grapheme clusters take one emoji's width, as in Ghostty and kitty). Test: `tests/artty.rs`.
