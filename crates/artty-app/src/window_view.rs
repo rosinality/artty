@@ -1744,6 +1744,9 @@ impl WindowView {
             .child(
                 div()
                     .id(("workspace-new-tab", id as usize))
+                    // Shown on hover, like the close button.
+                    .opacity(0.)
+                    .group_hover(group.clone(), |s| s.opacity(1.))
                     .flex_none()
                     .px_1()
                     .rounded(px(4.))
