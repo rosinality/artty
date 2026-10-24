@@ -10,6 +10,7 @@ pub mod control;
 mod frame;
 pub mod integration;
 pub mod layout;
+pub mod logging;
 pub mod pane;
 mod process;
 pub mod protocol;

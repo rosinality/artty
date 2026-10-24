@@ -150,8 +150,25 @@ where
                 writer.write_all(&buf[..unprocessed]).unwrap();
             }
 
-            // Parse the incoming bytes.
-            state.parser.advance(&mut **terminal, &buf[..unprocessed]);
+            // Parse the incoming bytes. artty: a bug in parsing must not end
+            // the reader (which froze the pane): start the terminal state
+            // afresh, say so on screen, and carry on.
+            let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state.parser.advance(&mut **terminal, &buf[..unprocessed]);
+            }));
+            if let Err(panic) = parsed {
+                let message = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_default();
+                error!("Terminal state reset after a panic while parsing output: {message}");
+                state.parser = ansi::Processor::new();
+                let notice = "\x1bc\x1b[2m[artty: the terminal hit a bug and was reset; output may be missing]\x1b[0m\r\n";
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    state.parser.advance(&mut **terminal, notice.as_bytes());
+                }));
+            }
 
             processed += unprocessed;
             unprocessed = 0;

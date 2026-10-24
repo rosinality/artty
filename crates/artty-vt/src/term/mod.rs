@@ -44,6 +44,10 @@ const TITLE_STACK_MAX_DEPTH: usize = 4096;
 /// Default semantic escape characters.
 pub const SEMANTIC_ESCAPE_CHARS: &str = ",│`|:\"' ()[]{}<>\t";
 
+
+/// Asks for the emoji presentation of the character before it.
+const VARIATION_SELECTOR_16: char = '\u{fe0f}';
+
 /// Max size of the keyboard modes.
 const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = TITLE_STACK_MAX_DEPTH;
 
@@ -408,8 +412,9 @@ impl<T> Term<T> {
     }
 
     pub fn new<D: Dimensions>(config: Config, dimensions: &D, event_proxy: T) -> Term<T> {
-        let num_cols = dimensions.columns();
-        let num_lines = dimensions.screen_lines();
+        // artty: at least the minimum (see `resize`).
+        let num_cols = dimensions.columns().max(MIN_COLUMNS);
+        let num_lines = dimensions.screen_lines().max(MIN_SCREEN_LINES);
 
         let history_size = config.scrolling_history;
         let grid = Grid::new(num_lines, num_cols, history_size);
@@ -656,8 +661,11 @@ impl<T> Term<T> {
         let old_cols = self.columns();
         let old_lines = self.screen_lines();
 
-        let num_cols = size.columns();
-        let num_lines = size.screen_lines();
+        // artty: upstream leaves the minimum to its window code. Reflowing a
+        // wide character into one column never ends (it wraps onto a new row,
+        // forever, allocating as it goes), so the grid enforces it itself.
+        let num_cols = size.columns().max(MIN_COLUMNS);
+        let num_lines = size.screen_lines().max(MIN_SCREEN_LINES);
 
         if old_cols == num_cols && old_lines == num_lines {
             debug!("Term::resize dimensions unchanged");
@@ -952,6 +960,41 @@ impl<T> Term<T> {
         Point::new(line, column)
     }
 
+    /// Make the one-cell character before the cursor two cells wide, if it
+    /// has an emoji presentation (artty). Not at the end of a line, where
+    /// there is no room left.
+    fn widen_previous_for_emoji(&mut self) {
+        use unicode_width::UnicodeWidthStr;
+        let point = self.grid.cursor.point;
+        if self.grid.cursor.input_needs_wrap || point.column.0 == 0 {
+            return;
+        }
+        let base = &self.grid[point.line][point.column - 1];
+        let plain = !base.flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER) && base.zerowidth().is_none();
+        if !plain || [base.c, VARIATION_SELECTOR_16].iter().collect::<String>().width() != 2 {
+            return;
+        }
+        self.grid[point.line][point.column - 1].flags.insert(Flags::WIDE_CHAR);
+        // The cell under the cursor becomes the spacer, as for any wide glyph.
+        self.grid.cursor.template.flags.insert(Flags::WIDE_CHAR_SPACER);
+        self.write_at_cursor(' ');
+        self.grid.cursor.template.flags.remove(Flags::WIDE_CHAR_SPACER);
+        if point.column + 1 < self.columns() {
+            self.grid.cursor.point.column += 1;
+        } else {
+            self.grid.cursor.input_needs_wrap = true;
+        }
+    }
+
+    /// Forget every kitty keyboard mode a program pushed, on both screens
+    /// (artty). No escape sequence can: `CSI = 0 u` only rewrites the flags
+    /// in effect, so a killed program's pushes would come back later.
+    pub fn reset_keyboard_modes(&mut self) {
+        self.keyboard_mode_stack.clear();
+        self.inactive_keyboard_mode_stack.clear();
+        self.set_keyboard_mode(TermMode::empty(), KeyboardModesApplyBehavior::Replace);
+    }
+
     /// Whether `c` continues the previous character's grapheme (artty).
     fn joins_previous(&self, c: char) -> bool {
         const ZWJ: char = '\u{200d}';
@@ -1089,6 +1132,12 @@ impl<T: EventListener> Handler for Term<T> {
             Some(width) => width,
             None => return,
         };
+
+        // artty: VS16 asks for the emoji presentation, two cells wide where
+        // the base alone takes one (❤️, ⚠️), as in kitty and Ghostty.
+        if c == VARIATION_SELECTOR_16 {
+            self.widen_previous_for_emoji();
+        }
 
         // Handle zero-width characters, and characters that join the previous
         // grapheme: emoji after a zero-width joiner and skin-tone modifiers
@@ -1307,8 +1356,10 @@ impl<T: EventListener> Handler for Term<T> {
 
         trace!("Pushing `{mode:?}` keyboard mode into the stack");
 
+        // artty: upstream removed from `title_stack` here, which panics once
+        // that is empty (about 20KB of `CSI > 1 u`, and the pane froze).
         if self.keyboard_mode_stack.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH {
-            let removed = self.title_stack.remove(0);
+            let removed = self.keyboard_mode_stack.remove(0);
             trace!(
                 "Removing '{removed:?}' from bottom of keyboard mode stack that exceeds its \
                  maximum depth"
@@ -2248,6 +2299,11 @@ impl<T: EventListener> Handler for Term<T> {
 
     #[inline]
     fn shell_mark(&mut self, mark: ShellMark) {
+        // artty: back at the prompt, a program that died without popping its
+        // kitty keyboard modes mustn't garble what the shell is typed.
+        if mark == ShellMark::PromptStart {
+            self.reset_keyboard_modes();
+        }
         let cursor = self.grid.cursor.point;
         let line = (self.grid.lines_scrolled() as i64 + i64::from(cursor.line.0)).max(0) as u64;
         self.event_proxy.send_event(Event::ShellMark { mark, line, column: cursor.column.0 });

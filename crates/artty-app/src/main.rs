@@ -125,6 +125,7 @@ fn menus() -> Vec<Menu> {
 }
 
 fn main() {
+    artty_core::logging::init();
     let command = parse_args();
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());

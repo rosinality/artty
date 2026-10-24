@@ -37,6 +37,7 @@ pub(crate) enum Input {
 /// Run the server until its last session ends. Fails if another server is
 /// already running.
 pub fn run() -> io::Result<()> {
+    artty_core::logging::init();
     let path = server_socket_path();
     if UnixStream::connect(&path).is_ok() {
         return Err(io::Error::new(io::ErrorKind::AddrInUse, "an artty server is already running"));
@@ -63,16 +64,16 @@ pub fn run() -> io::Result<()> {
     loop {
         let timeout = server.next_deadline().saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout.max(Duration::from_millis(1))) {
-            Ok(input) => server.handle(input),
+            Ok(input) => survive("handling an input", || server.handle(input)),
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
         // Handle everything already queued before doing per-batch work, so a
         // burst of output costs one screen update.
         while let Ok(input) = rx.try_recv() {
-            server.handle(input);
+            survive("handling an input", || server.handle(input));
         }
-        server.after_batch();
+        survive("updating", || server.after_batch());
         if server.should_exit() {
             break;
         }
@@ -92,6 +93,15 @@ pub fn run() -> io::Result<()> {
 
 /// Connections still writing to an app.
 static WRITERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Run `work`, and if it panics, log it and carry on: the server holds every
+/// session, so a bug in handling one thing mustn't end them all. (The panic
+/// itself is printed to the log by the default hook.)
+fn survive(what: &str, work: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).is_err() {
+        log::error!("recovered from a panic while {what}");
+    }
+}
 
 struct RemoveOnDrop(PathBuf);
 

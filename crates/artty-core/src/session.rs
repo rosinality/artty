@@ -227,7 +227,10 @@ impl Session {
     }
 
     pub fn resize(&mut self, size: TerminalSize) {
-        if size == self.size || size.columns == 0 || size.lines == 0 {
+        // The terminal is never narrower than two columns (a wide character
+        // has to fit); the shell is told the same size.
+        let size = TerminalSize { columns: size.columns.max(artty_vt::term::MIN_COLUMNS as u16), lines: size.lines.max(1), ..size };
+        if size == self.size {
             return;
         }
         self.size = size;

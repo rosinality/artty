@@ -134,3 +134,105 @@ fn emoji_sequences_share_one_cell() {
     assert_eq!(row[Column(4)].zerowidth(), Some(&['🏽'][..]));
     assert_eq!(row[Column(6)].c, 'y');
 }
+
+#[test]
+fn variation_selector_16_makes_emoji_wide() {
+    use artty_vt::term::cell::Flags;
+    let (term, _) = run("❤\u{fe0f}x ⚠\u{fe0f}y".as_bytes(), 3);
+    let row = &term.grid()[Line(0)];
+    assert_eq!(row[Column(0)].c, '❤');
+    assert!(row[Column(0)].flags.contains(Flags::WIDE_CHAR));
+    assert_eq!(row[Column(0)].zerowidth(), Some(&['\u{fe0f}'][..]));
+    assert!(row[Column(1)].flags.contains(Flags::WIDE_CHAR_SPACER));
+    assert_eq!(row[Column(2)].c, 'x');
+    assert_eq!(row[Column(4)].c, '⚠');
+    assert_eq!(row[Column(6)].c, 'y');
+
+    // In the last column there's no room: it stays narrow, and nothing breaks.
+    let (term, _) = run(format!("{}❤\u{fe0f}z", "a".repeat(19)).as_bytes(), 3);
+    assert_eq!(term.grid()[Line(0)][Column(19)].c, '❤');
+    assert_eq!(term.grid()[Line(1)][Column(0)].c, 'z');
+}
+
+fn kitty_term() -> Term<Recorder> {
+    let config = Config { kitty_keyboard: true, ..Config::default() };
+    Term::new(config, &Size(20, 3), Recorder::default())
+}
+
+#[test]
+fn deep_keyboard_mode_pushes_are_capped_not_fatal() {
+    // Upstream removed from the title stack here and panicked once it was
+    // empty, freezing the pane.
+    let mut term = kitty_term();
+    Processor::<StdSyncHandler>::new().advance(&mut term, "\x1b[>1u".repeat(5000).as_bytes());
+    assert!(term.mode().intersects(artty_vt::term::TermMode::KITTY_KEYBOARD_PROTOCOL));
+}
+
+#[test]
+fn a_prompt_forgets_keyboard_modes_a_program_left() {
+    let mut term = kitty_term();
+    let mut parser = Processor::<StdSyncHandler>::new();
+    // A program pushes modes on both screens and dies without popping them.
+    parser.advance(&mut term, b"\x1b[>1u\x1b[?1049h\x1b[>3u");
+    parser.advance(&mut term, b"\x1b[?1049l\x1b]133;A\x07");
+    assert!(!term.mode().intersects(artty_vt::term::TermMode::KITTY_KEYBOARD_PROTOCOL));
+    // Nothing comes back from either screen's stack.
+    parser.advance(&mut term, b"\x1b[<u\x1b[?1049h\x1b[<u");
+    assert!(!term.mode().intersects(artty_vt::term::TermMode::KITTY_KEYBOARD_PROTOCOL));
+}
+
+/// Random bytes, biased toward escape sequences, fed in uneven chunks with
+/// resizes in between: nothing may panic. Seeded, so a failure reproduces.
+#[test]
+fn random_input_never_panics() {
+    let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    const PIECES: &[&str] = &[
+        "\x1b[", "\x1b]", "\x1bP", "\x1b_", "\x1b^", "\x1b\\", "\x07", "\x1b", ";", "?", ">", "<", "=", ":", "0", "1",
+        "9", "99", "65535", "4294967296", "m", "H", "J", "K", "r", "h", "l", "u", "q", "t", "@", "P", "X", "L", "M", "S",
+        "T", "b", "c", "n", "s", "x", "z", "{", "~", "133;A", "133;D;1", "8;;https://x", "52;c;aGk=", "1337;", "9;4;1;50",
+        "\r", "\n", "\t", "\x08", "\x7f", "a", "é", "한", "👨\u{200d}👩", "❤\u{fe0f}", "\u{fe0f}", "\u{200d}", "🏽",
+        "\u{0301}", "\x0e", "\x0f", "\x1b(0", "\x1b(B", "\x1b#8", "\x1b7", "\x1b8", "\x1bM", "\x1bD", "\x1bE",
+    ];
+    for round in 0..300 {
+        let mut term = kitty_term();
+        let mut parser = Processor::<StdSyncHandler>::new();
+        let mut bytes = Vec::new();
+        for _ in 0..600 {
+            let roll = next();
+            if roll % 5 == 0 {
+                bytes.push((roll >> 8) as u8);
+            } else {
+                bytes.extend_from_slice(PIECES[(roll >> 8) as usize % PIECES.len()].as_bytes());
+            }
+        }
+        let mut rest = &bytes[..];
+        while !rest.is_empty() {
+            let take = (next() as usize % 97 + 1).min(rest.len());
+            parser.advance(&mut term, &rest[..take]);
+            rest = &rest[take..];
+            if next() % 13 == 0 {
+                let columns = next() as usize % 120 + 1;
+                let lines = next() as usize % 50 + 1;
+                term.resize(Size(columns, lines));
+            }
+        }
+        let _ = round;
+    }
+}
+
+#[test]
+fn a_one_column_resize_with_wide_characters_finishes() {
+    // Reflowing a wide character into one column used to wrap it onto a new
+    // row forever, allocating without end. The terminal keeps two columns.
+    let (mut term, _) = run("한글 ❤\u{fe0f} 👍".as_bytes(), 3);
+    term.resize(Size(1, 27));
+    assert_eq!(term.columns(), 2);
+    term.resize(Size(0, 0));
+    assert_eq!((term.columns(), term.screen_lines()), (2, 1));
+}

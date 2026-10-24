@@ -27,3 +27,20 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   stable line numbers. Tests: `tests/artty.rs`.
 - `term/mod.rs`: emoji after a zero-width joiner, and skin-tone modifiers, join the previous cell (grapheme clusters take one emoji's width, as in Ghostty and kitty). Test: `tests/artty.rs`.
 - `ansi.rs`: `CursorShape` is serializable (screen snapshots sent from the artty server).
+- `term/mod.rs`: fixes, each with a test in `tests/artty.rs`:
+  - `push_keyboard_mode` removed the oldest entry from `title_stack` instead
+    of `keyboard_mode_stack`; once that was empty it panicked (about 20KB of
+    `CSI > 1 u`). Also fixed in [tty7's fork](https://github.com/l0ng-ai/tty7).
+  - VS16 (U+FE0F) widens a one-cell base with an emoji presentation (❤️, ⚠️)
+    to two cells, as in kitty and Ghostty.
+  - `Term::resize` and `Term::new` enforce `MIN_COLUMNS`/`MIN_SCREEN_LINES`
+    themselves (upstream leaves it to its window code): reflowing a wide
+    character into one column looped forever, allocating a row each time.
+  - `Term::reset_keyboard_modes` clears both screens' kitty keyboard stacks
+    and flags; an OSC 133 prompt mark calls it, so a program killed without
+    popping its modes can't garble the shell (idea from tty7).
+- `event_loop.rs`: a panic while parsing output resets the terminal and says
+  so on screen, instead of ending the reader thread (which froze the pane).
+- `tests/artty.rs`: `random_input_never_panics` feeds seeded random bytes and
+  escape sequences, in uneven chunks with resizes, and checks nothing panics
+  or runs away (it found the one-column reflow loop).
