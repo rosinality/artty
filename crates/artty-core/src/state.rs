@@ -156,6 +156,9 @@ pub struct SavedPane {
     pub agent: Option<SavedAgent>,
     /// Recent output, with SGR color codes.
     pub scrollback: String,
+    /// In a server hand-over: the running pane this is (its id).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

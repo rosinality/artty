@@ -35,8 +35,11 @@ notifications. A rebuild replaces the bundle atomically, so a running artty is
 never modified underneath itself; it notices the new build and offers
 "Restart to update". That restarts the app only — sessions keep running in
 the server. When the server is from an older build too, the window offers to
-restart it (artty → Restart Server), which reopens your tabs and resumes
-agents, but running programs in them do restart. The server runs from its own
+move it to the new build (artty → Restart Server): the server hands every
+session over to the new build in place, so shells, agents and whatever runs
+in them carry on, screens and scrollback included. (A server from before
+hand-overs existed restarts instead: tabs reopen and agents resume, but
+running programs restart.) The server runs from its own
 copy of the executable, so rebuilds never touch it. (A dev build run from
 `target/` is killed by macOS when cargo rewrites it in place; its sessions
 survive.) GPUI's Metal shaders compile at startup (`runtime_shaders`), so
@@ -137,7 +140,8 @@ last session ends.
   Shell → Reopen Closed Windows brings it back.
 - ⌘Q quits the app and leaves everything running; the next launch reopens the
   windows. artty → Quit and End Sessions ends them instead.
-- artty → Restart Server restarts it on the current build (see above).
+- artty → Restart Server moves it to the current build without ending
+  anything (see above).
 
 ```sh
 artty ps                    # each pane: status, CPU, memory, process tree
@@ -153,7 +157,7 @@ artty workspace rename 3 notes
 artty workspace set blog --root ~/blog --color teal --env NODE_ENV=development
 artty workspace close blog  # end its tabs
 artty server status         # pid, uptime, windows, panes, attached apps
-artty server restart        # restart on this build; tabs and agents return
+artty server restart        # move to this build; programs keep running
 artty server stop           # end every session
 ```
 

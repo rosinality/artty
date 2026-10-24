@@ -44,3 +44,16 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
 - `tests/artty.rs`: `random_input_never_panics` feeds seeded random bytes and
   escape sequences, in uneven chunks with resizes, and checks nothing panics
   or runs away (it found the one-column reflow loop).
+- Server hand-over (a new artty server build takes over running sessions in
+  place):
+  - `term/snapshot.rs`, `grid/snapshot.rs`: `Term::snapshot`/`from_snapshot`
+    carry a terminal's state as data (both screens and scrollback, trimmed of
+    trailing blanks; cursors, modes, colors, titles, tab stops, keyboard
+    modes). Cursor and charset types derive serde for it. Test:
+    `tests/artty.rs`.
+  - `tty/unix.rs`: `Pty::adopt` takes over a running child's PTY by
+    descriptor and pid (waited for with `waitpid`; the hand-over `exec`s in
+    place, so it's still our child). `Pty::child()` became `Pty::pid()`.
+  - `event_loop.rs`: `Msg::Freeze` stops the reader with everything read
+    parsed, until resumed or the process is replaced; a failed PTY read now
+    reports `Event::Exit` instead of ending the reader silently.

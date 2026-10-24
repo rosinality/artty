@@ -25,6 +25,18 @@ use crate::theme::Theme;
 
 pub type SessionId = u64;
 
+/// A pane as one server build hands it to the next (see [`Session::handover`]).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct SessionHandover {
+    pub id: SessionId,
+    /// The PTY controller, inherited across `exec`.
+    pub fd: i32,
+    pub pid: u32,
+    pub size: TerminalSize,
+    shell: crate::shell::ShellState,
+    reported_cwd: Option<PathBuf>,
+}
+
 /// Terminal size in cells, plus the cell size in pixels (reported to programs
 /// that ask for the text area size).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -174,7 +186,7 @@ impl Session {
             env,
         };
         let pty = tty::new(&pty_options, size.into(), id)?;
-        let probe = ProcessProbe::new(pty.file().as_raw_fd(), pty.child().id());
+        let probe = ProcessProbe::new(pty.file().as_raw_fd(), pty.pid());
 
         let event_loop = EventLoop::new(term.clone(), proxy.clone(), pty, false, false)?;
         let sender = event_loop.channel();
@@ -190,6 +202,91 @@ impl Session {
             theme,
             shell: ShellTracker::default(),
             reported_cwd: None,
+            search: None,
+            term_config,
+        })
+    }
+
+    /// Stop reading the PTY for a hand-over. Returns when everything read so
+    /// far is parsed (or after a second, if the reader is stuck), with a
+    /// sender that resumes the reader if the hand-over is called off. If the
+    /// process is replaced instead, the reader never reads again.
+    pub fn freeze(&self) -> std::sync::mpsc::Sender<()> {
+        let (frozen, is_frozen) = std::sync::mpsc::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let _ = self.pty.send(Msg::Freeze(frozen, resumed));
+        let _ = is_frozen.recv_timeout(std::time::Duration::from_secs(1));
+        resume
+    }
+
+    /// What the next server build needs to carry on with this pane: the PTY
+    /// descriptor it inherits across `exec` (which this clears close-on-exec
+    /// on) and the rest, and the terminal's state, kept apart so a snapshot a
+    /// newer build can't read costs only the screen. `None` without a PTY.
+    pub fn handover(&self) -> Option<(SessionHandover, artty_vt::term::TermSnapshot)> {
+        let probe = self.probe.as_ref()?;
+        let fd = probe.pty_fd();
+        // SAFETY: plain syscall on a descriptor we own.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+        let handover = SessionHandover {
+            id: self.id,
+            fd,
+            pid: probe.shell_pid() as u32,
+            size: self.size,
+            shell: self.shell.state(),
+            reported_cwd: self.reported_cwd.clone(),
+        };
+        Some((handover, self.term.lock().snapshot()))
+    }
+
+    /// Carry on with a pane a previous server build handed over: the shell
+    /// keeps running, and the terminal is where it was. Without its snapshot
+    /// the screen starts blank, and the program is asked to redraw.
+    pub fn adopt(
+        handover: SessionHandover,
+        snapshot: Option<artty_vt::term::TermSnapshot>,
+        options: SessionOptions,
+        theme: Arc<Theme>,
+        sink: Arc<dyn Fn(SessionId, Event) + Send + Sync>,
+    ) -> io::Result<Self> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let SessionHandover { id, fd, pid, size, shell, reported_cwd } = handover;
+        let redraw = snapshot.is_none();
+        let proxy = EventProxy { id, pty: Arc::new(OnceLock::new()), sink };
+        let mut config = Config { kitty_keyboard: true, ..Config::default() };
+        if let Some(scrollback) = options.scrollback {
+            config.scrolling_history = scrollback;
+        }
+        config.default_cursor_style.shape = options.cursor_shape;
+        let term_config = config.clone();
+        let term = match snapshot {
+            Some(snapshot) => Term::from_snapshot(config, snapshot, proxy.clone()),
+            None => Term::new(config, &size, proxy.clone()),
+        };
+        let term = Arc::new(FairMutex::new(term));
+        // SAFETY: `fd` was inherited for exactly this, and nothing else owns it.
+        let master = unsafe { OwnedFd::from_raw_fd(fd) };
+        let pty = tty::Pty::adopt(master, pid)?;
+        let probe = ProcessProbe::new(pty.file().as_raw_fd(), pid);
+        let event_loop = EventLoop::new(term.clone(), proxy.clone(), pty, false, false)?;
+        let sender = event_loop.channel();
+        let _ = proxy.pty.set(sender.clone());
+        event_loop.spawn();
+        if redraw {
+            // A size change makes full-screen programs and most shells repaint.
+            let narrower = TerminalSize { columns: size.columns.saturating_sub(1).max(2), ..size };
+            let _ = sender.send(Msg::Resize(narrower.into()));
+            let _ = sender.send(Msg::Resize(size.into()));
+        }
+        Ok(Self {
+            id,
+            term,
+            pty: sender,
+            probe,
+            size,
+            theme,
+            shell: ShellTracker::from_state(shell),
+            reported_cwd,
             search: None,
             term_config,
         })

@@ -5,9 +5,11 @@
 //! [`Input`] over a channel. The app attaches windows over the same socket the
 //! `artty` command and agent hooks use (see `artty_core::protocol`).
 
+mod handover;
 mod server;
 
 use std::io::{self, BufRead, BufReader, Write};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -46,7 +48,34 @@ pub fn run() -> io::Result<()> {
     let listener = UnixListener::bind(&path)?;
     // Only this user may drive the terminal.
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    serve_on(listener, path, None)
+}
+
+/// What `artty server --handover-check` prints: that this build can take
+/// over, and which hand-over it reads. A server checks it before `exec`ing a
+/// build, since after that there's no going back.
+pub fn handover_check() -> String {
+    format!("artty-handover {}", handover::VERSION)
+}
+
+/// Take over from a previous server build (which `exec`ed this one): its
+/// sessions, its socket, and its process.
+pub fn resume(header: &Path) -> io::Result<()> {
+    artty_core::logging::init();
+    let (header, snapshots) = handover::read(header)?;
+    // SAFETY: the previous build left the listening socket open at this
+    // descriptor for exactly this.
+    let listener = unsafe { UnixListener::from_raw_fd(header.listener_fd) };
+    // SAFETY: plain syscall; not to be inherited by what we start.
+    unsafe { libc::fcntl(header.listener_fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+    serve_on(listener, server_socket_path(), Some((header, snapshots)))
+}
+
+type Handover = (handover::Header, std::collections::HashMap<u64, artty_core::vt::term::TermSnapshot>);
+
+fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -> io::Result<()> {
     let socket = RemoveOnDrop(path.clone());
+    let listener_fd = listener.as_raw_fd();
 
     let (tx, rx) = mpsc::channel::<Input>();
     let accept = tx.clone();
@@ -59,8 +88,11 @@ pub fn run() -> io::Result<()> {
         }
     })?;
 
-    let mut server = Server::new(path, tx);
-    server.start();
+    let mut server = Server::new(path, tx, listener_fd);
+    match handover {
+        Some((header, snapshots)) => server.adopt(header, snapshots),
+        None => server.start(),
+    }
     loop {
         let timeout = server.next_deadline().saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout.max(Duration::from_millis(1))) {
@@ -74,6 +106,10 @@ pub fn run() -> io::Result<()> {
             survive("handling an input", || server.handle(input));
         }
         survive("updating", || server.after_batch());
+        // Asked to hand over: it doesn't come back if it works.
+        if let Some(executable) = server.take_handover() {
+            server.hand_over(&executable);
+        }
         if server.should_exit() {
             break;
         }
@@ -174,6 +210,71 @@ fn serve_app(mut reader: BufReader<UnixStream>, mut writer: UnixStream, id: Clie
     let _ = tx.send(Input::Disconnected(id));
 }
 
+/// One JSON control request to the running server.
+fn control(request: &Request, timeout: Duration) -> io::Result<Response> {
+    let mut stream = UnixStream::connect(server_socket_path())?;
+    stream.set_read_timeout(Some(timeout))?;
+    let mut line = serde_json::to_string(request)?;
+    line.push('\n');
+    stream.write_all(line.as_bytes())?;
+    let mut answer = String::new();
+    BufReader::new(stream).read_line(&mut answer)?;
+    Ok(serde_json::from_str(&answer)?)
+}
+
+fn uptime() -> Option<u64> {
+    match control(&Request::ServerStatus, Duration::from_secs(2)) {
+        Ok(Response::Server { info }) => Some(info.uptime_secs),
+        _ => None,
+    }
+}
+
+/// How the running server moved to a new build.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Upgrade {
+    /// Handed over: every program kept running.
+    HandedOver,
+    /// Too old to hand over, so restarted: tabs reopen, programs restart.
+    Restarted,
+}
+
+/// Move the running server onto the build at `executable`, and wait until
+/// it answers.
+pub fn upgrade(executable: &Path) -> io::Result<Upgrade> {
+    let before = uptime();
+    let request = Request::HandOver { executable: executable.to_owned() };
+    match control(&request, Duration::from_secs(5))? {
+        Response::Ok => {
+            // Same socket, same process: the new build is in once the
+            // server's uptime starts over.
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+                if let (Some(now), Some(before)) = (uptime(), before)
+                    && now < before.max(1)
+                {
+                    return Ok(Upgrade::HandedOver);
+                }
+            }
+            Err(io::Error::new(io::ErrorKind::TimedOut, "the new server build didn't answer"))
+        }
+        Response::Error { message } if message.starts_with("bad request") => {
+            // A server from before hand-overs: restart it.
+            control(&Request::RestartServer, Duration::from_secs(5))?;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while running() {
+                if Instant::now() > deadline {
+                    return Err(io::Error::other("the old artty server didn't stop"));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Ok(Upgrade::Restarted)
+        }
+        Response::Error { message } => Err(io::Error::other(message)),
+        _ => Err(io::Error::other("unexpected answer")),
+    }
+}
+
 /// Whether a server is running.
 pub fn running() -> bool {
     UnixStream::connect(server_socket_path()).is_ok()
@@ -182,7 +283,7 @@ pub fn running() -> bool {
 /// A private copy of `executable` for the server to run from, so rebuilding
 /// (which may rewrite the build output in place) can never touch a running
 /// server, and with it every session. Older copies are removed.
-fn server_copy(executable: &Path) -> io::Result<PathBuf> {
+pub(crate) fn server_copy(executable: &Path) -> io::Result<PathBuf> {
     let dir = server_bin_dir().ok_or_else(|| io::Error::other("no HOME"))?;
     std::fs::create_dir_all(&dir)?;
     let modified = std::fs::metadata(executable)?.modified()?;

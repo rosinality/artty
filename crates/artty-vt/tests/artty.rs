@@ -236,3 +236,40 @@ fn a_one_column_resize_with_wide_characters_finishes() {
     term.resize(Size(0, 0));
     assert_eq!((term.columns(), term.screen_lines()), (2, 1));
 }
+
+#[test]
+fn snapshots_carry_a_terminal_over_exactly() {
+    use artty_vt::term::TermSnapshot;
+    let mut term = kitty_term();
+    let mut parser = Processor::<StdSyncHandler>::new();
+    // History, colors and a title on the main screen; then the alternate
+    // screen with its own content, keyboard modes and a cursor elsewhere.
+    for i in 0..10 {
+        parser.advance(&mut term, format!("line {i} \x1b[1;31mred\x1b[0m 한\r\n").as_bytes());
+    }
+    parser.advance(&mut term, b"\x1b]0;my title\x07\x1b]4;1;#123456\x07\x1b[>1u\x1b[?1049h\x1b[2;5Halt\x1b[>3u\x1b[?2004h");
+
+    let json = serde_json::to_string(&term.snapshot()).unwrap();
+    let snapshot: TermSnapshot = serde_json::from_str(&json).unwrap();
+    let copy = Term::from_snapshot(Config { kitty_keyboard: true, ..Config::default() }, snapshot, Recorder::default());
+
+    assert_eq!(copy.mode(), term.mode());
+    assert_eq!(copy.grid().cursor.point, term.grid().cursor.point);
+    assert_eq!(copy.colors()[1], term.colors()[1]);
+    let text = |t: &Term<Recorder>| {
+        let grid = t.grid();
+        (grid.topmost_line().0..grid.screen_lines() as i32)
+            .map(|line| (0..grid.columns()).map(|c| grid[Line(line)][Column(c)].c).collect::<String>())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(text(&copy), text(&term));
+    // And back on the main screen, history and styles are intact.
+    let mut copy = copy;
+    parser.advance(&mut term, b"\x1b[?1049l");
+    parser.advance(&mut copy, b"\x1b[?1049l");
+    assert_eq!(text(&copy), text(&term));
+    assert_eq!(copy.history_size(), term.history_size());
+    let cell = |t: &Term<Recorder>| t.grid()[Line(-1)][Column(7)].clone();
+    assert_eq!(cell(&copy), cell(&term));
+    assert_eq!(copy.mode(), term.mode());
+}

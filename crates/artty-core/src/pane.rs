@@ -7,6 +7,22 @@ use crate::control::{AgentState, TabInfo};
 use artty_vt::ansi::Progress;
 use crate::{ProcessInfo, SavedAgent, SavedPane, Session, ShellPhase};
 
+/// What a pane knows beyond its terminal, carried across a server hand-over:
+/// what its agent reported, and what the user hasn't seen yet.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct PaneMeta {
+    reported: Option<AgentState>,
+    agent_session: Option<String>,
+    reported_agent: Option<String>,
+    message: Option<String>,
+    attention: bool,
+    done_seen: bool,
+    /// The command running (from shell integration) and for how long, in
+    /// seconds; and the last one's exit code.
+    running: Option<(Option<String>, u64)>,
+    last_exit: Option<i32>,
+}
+
 /// What a pane is doing, as shown in the sidebar.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Status {
@@ -228,6 +244,33 @@ impl Pane {
         self.status = Status::Agent { name: agent, state };
     }
 
+    pub fn meta(&self) -> PaneMeta {
+        PaneMeta {
+            reported: self.reported,
+            agent_session: self.agent_session.clone(),
+            reported_agent: self.reported_agent.clone(),
+            message: self.message.clone(),
+            attention: self.attention,
+            done_seen: self.done_seen,
+            running: self.running.as_ref().map(|(command, since)| (command.clone(), since.elapsed().as_secs())),
+            last_exit: self.last_exit,
+        }
+    }
+
+    /// Take back what a previous server build knew about this pane.
+    pub fn restore_meta(&mut self, meta: PaneMeta) {
+        self.reported = meta.reported;
+        self.agent_session = meta.agent_session;
+        self.reported_agent = meta.reported_agent;
+        self.message = meta.message;
+        self.attention = meta.attention;
+        self.done_seen = meta.done_seen;
+        let now = Instant::now();
+        self.running = meta.running.map(|(command, secs)| (command, now.checked_sub(Duration::from_secs(secs)).unwrap_or(now)));
+        self.last_exit = meta.last_exit;
+        self.refresh();
+    }
+
     /// The user is looking at the pane.
     pub fn seen(&mut self) {
         self.attention = false;
@@ -343,6 +386,7 @@ impl Pane {
             command,
             agent,
             scrollback: self.session.styled_scrollback(scrollback_lines),
+            pane: None,
         }
     }
 

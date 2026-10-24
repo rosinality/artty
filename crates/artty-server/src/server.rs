@@ -23,10 +23,11 @@ use artty_core::vt::index::Side;
 use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
 use artty_core::{
-    Config, Frame, Notice, SavedLayout, SavedState, SavedTab, SavedWindow, SavedWindowState, SavedWorkspace, Session,
+    Config, Frame, Notice, SavedLayout, SavedPane, SavedState, SavedTab, SavedWindow, SavedWindowState, SavedWorkspace, Session,
     SessionOptions, ShellPhase, TerminalSize, Theme, process_tree, processes,
 };
 
+use crate::handover::{self, HandedPane};
 use crate::{ClientId, Input};
 
 /// Each visible pane gets at most one screen update per frame at 120 Hz.
@@ -192,6 +193,12 @@ pub(crate) struct Server {
     usage: Vec<PaneProcesses>,
     history: HashMap<PaneId, VecDeque<(f32, u64)>>,
     server_usage: Option<ServerUsage>,
+    /// The listening socket's descriptor, kept open across a hand-over.
+    listener_fd: i32,
+    /// Asked to hand over to this build, after answering.
+    handover_to: Option<PathBuf>,
+    /// Panes a previous build handed over, until their layout places them.
+    handed: HashMap<PaneId, (HandedPane, Option<artty_core::vt::term::TermSnapshot>)>,
 }
 
 fn config_modified() -> Option<SystemTime> {
@@ -260,7 +267,7 @@ fn pbpaste() -> String {
 }
 
 impl Server {
-    pub(crate) fn new(socket: PathBuf, tx: Sender<Input>) -> Self {
+    pub(crate) fn new(socket: PathBuf, tx: Sender<Input>, listener_fd: i32) -> Self {
         let (config, error) = Config::load();
         if let Some(error) = error {
             log::error!("config: {error}");
@@ -298,6 +305,9 @@ impl Server {
             usage: Vec::new(),
             history: HashMap::new(),
             server_usage: None,
+            listener_fd,
+            handover_to: None,
+            handed: HashMap::new(),
         }
     }
 
@@ -370,6 +380,9 @@ impl Server {
     fn restore_layout(&mut self, layout: SavedLayout, defaults: &Defaults) -> Option<Node> {
         match layout {
             SavedLayout::Pane(saved) => {
+                if let Some((handed, snapshot)) = saved.pane.and_then(|id| self.handed.remove(&id)) {
+                    return self.adopt_pane(handed, snapshot, saved).map(Node::Pane);
+                }
                 let initial_output = (!saved.scrollback.is_empty())
                     .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
                 let spec = PaneSpec { command: saved.command, cwd: saved.cwd, title: saved.title };
@@ -1502,6 +1515,14 @@ impl Server {
                 Response::Processes { panes, server: self.server_usage.clone() }
             }
             Request::Workspaces => Response::Workspaces { workspaces: self.workspace_infos() },
+            Request::HandOver { executable } => {
+                if !executable.is_file() {
+                    return Err(format!("{} isn't a file", executable.display()));
+                }
+                // After this answer goes out.
+                self.handover_to = Some(executable);
+                Response::Ok
+            }
             Request::Signal { pid, signal } => {
                 // Only what runs in a pane: never the server, the app, or
                 // anything else of yours.
@@ -1846,14 +1867,24 @@ impl Server {
         }
     }
 
-    fn saved_layout(&self, node: &Node) -> SavedLayout {
+    /// A tab's layout as saved; for a hand-over, each pane names its running
+    /// self instead of carrying its output.
+    fn saved_layout(&self, node: &Node, handover: bool) -> SavedLayout {
         match node {
-            Node::Pane(id) => SavedLayout::Pane(self.panes.get(id).map(|p| p.saved(self.config.restore_scrollback)).unwrap_or_default()),
+            Node::Pane(id) => SavedLayout::Pane(
+                self.panes
+                    .get(id)
+                    .map(|p| match handover {
+                        true => SavedPane { pane: Some(*id), command: p.command.clone(), ..p.saved(0) },
+                        false => p.saved(self.config.restore_scrollback),
+                    })
+                    .unwrap_or_default(),
+            ),
             Node::Split { axis, ratio, first, second } => SavedLayout::Split {
                 vertical: *axis == Axis::Vertical,
                 ratio: *ratio,
-                first: Box::new(self.saved_layout(first)),
-                second: Box::new(self.saved_layout(second)),
+                first: Box::new(self.saved_layout(first, handover)),
+                second: Box::new(self.saved_layout(second, handover)),
             },
         }
     }
@@ -1863,6 +1894,18 @@ impl Server {
         if !self.config.restore_sessions {
             return;
         }
+        let state = self.saved_state(false);
+        let Ok(json) = serde_json::to_string(&state) else { return };
+        if self.last_saved.as_ref() == Some(&json) {
+            return;
+        }
+        match state.save() {
+            Ok(()) => self.last_saved = Some(json),
+            Err(err) => log::error!("saving: {err}"),
+        }
+    }
+
+    fn saved_state(&self, handover: bool) -> SavedState {
         let saved_workspace = |workspace: &Workspace| SavedWorkspace {
             name: workspace.name.clone(),
             active: workspace.active,
@@ -1875,7 +1918,7 @@ impl Server {
                 .iter()
                 .map(|tab| SavedTab {
                     title: tab.title.clone(),
-                    layout: self.saved_layout(&tab.root),
+                    layout: self.saved_layout(&tab.root, handover),
                     focused: tab.root.panes().iter().position(|&id| id == tab.focused).unwrap_or(0),
                     zoomed: tab.zoomed,
                 })
@@ -1895,15 +1938,137 @@ impl Server {
             .filter(|(id, _)| self.window_of_workspace(**id).is_none())
             .map(|(_, workspace)| saved_workspace(workspace))
             .collect();
-        let state = SavedState::new(windows, hidden);
-        let Ok(json) = serde_json::to_string(&state) else { return };
-        if self.last_saved.as_ref() == Some(&json) {
-            return;
+        SavedState::new(windows, hidden)
+    }
+
+    // Handing over to a new build (see `handover`).
+
+    pub(crate) fn take_handover(&mut self) -> Option<PathBuf> {
+        self.handover_to.take()
+    }
+
+    /// Hand every session to the build at `executable` by becoming it.
+    /// Returns only if that failed, with everything running as before.
+    pub(crate) fn hand_over(&mut self, executable: &Path) -> std::io::Error {
+        let copy = match crate::server_copy(executable) {
+            Ok(copy) => copy,
+            Err(err) => return err,
+        };
+        // Once `exec`ed there's no way back, so make sure first that the
+        // build can take over, and reads what this one writes.
+        let check = std::process::Command::new(&copy).args(["server", "--handover-check"]).output();
+        let expected = crate::handover_check();
+        match check {
+            Ok(out) if String::from_utf8_lossy(&out.stdout).trim() == expected => {}
+            Ok(out) => {
+                let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                let err = std::io::Error::other(format!("that build can't take over (it said {said:?})"));
+                log::error!("hand-over called off: {err}");
+                return err;
+            }
+            Err(err) => {
+                log::error!("hand-over called off: {err}");
+                return err;
+            }
         }
-        match state.save() {
-            Ok(()) => self.last_saved = Some(json),
-            Err(err) => log::error!("saving: {err}"),
+        // Apps reconnect, to the new build.
+        for client in self.clients.values() {
+            let _ = client.tx.send(ServerMessage::Stopping { restart: true });
         }
+        std::thread::sleep(Duration::from_millis(150));
+        // Every reader stops with what it read parsed; output waits in the PTY.
+        let resumes: Vec<_> = self.panes.values().map(|pane| pane.session.freeze()).collect();
+        let resume = |err: std::io::Error| {
+            for resume in &resumes {
+                let _ = resume.send(());
+            }
+            log::error!("hand-over failed, carrying on: {err}");
+            err
+        };
+        let mut panes = Vec::new();
+        let mut snapshots = Vec::new();
+        for (&id, pane) in &self.panes {
+            if let Some((session, snapshot)) = pane.session.handover() {
+                panes.push(HandedPane { session, meta: pane.meta() });
+                snapshots.push((id, snapshot));
+            }
+        }
+        let header = handover::Header {
+            version: 0,
+            listener_fd: self.listener_fd,
+            next_pane: self.next_pane,
+            state: self.saved_state(true),
+            panes,
+        };
+        let path = match handover::write(header, &snapshots) {
+            Ok(path) => path,
+            Err(err) => return resume(err),
+        };
+        // SAFETY: plain syscall; the socket must survive `exec`.
+        unsafe { libc::fcntl(self.listener_fd, libc::F_SETFD, 0) };
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&copy).arg("server").arg("--resume").arg(&path).exec();
+        // Still here: `exec` failed.
+        unsafe { libc::fcntl(self.listener_fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        resume(err)
+    }
+
+    /// Start from what a previous build handed over (instead of `start`).
+    pub(crate) fn adopt(&mut self, header: handover::Header, mut snapshots: HashMap<PaneId, artty_core::vt::term::TermSnapshot>) {
+        self.next_pane = self.next_pane.max(header.next_pane);
+        for pane in header.panes {
+            let id = pane.session.id;
+            self.handed.insert(id, (pane, snapshots.remove(&id)));
+        }
+        let mut state = header.state;
+        let hidden = std::mem::take(&mut state.hidden);
+        for saved in state.into_windows() {
+            let workspaces: Vec<Workspace> = saved.workspaces.into_iter().filter_map(|w| self.restore_workspace(w)).collect();
+            if !workspaces.is_empty() {
+                self.add_window(workspaces, saved.active, saved.window);
+            }
+        }
+        for saved in hidden {
+            if let Some(workspace) = self.restore_workspace(saved) {
+                self.add_workspace(workspace);
+            }
+        }
+        // Anything the layout didn't place still runs: keep it reachable.
+        let left: Vec<PaneId> = self.handed.keys().copied().collect();
+        let mut tabs = Vec::new();
+        for id in left {
+            let (handed, snapshot) = self.handed.remove(&id).unwrap();
+            if let Some(pane) = self.adopt_pane(handed, snapshot, SavedPane::default()) {
+                tabs.push(Tab::new(pane));
+            }
+        }
+        if !tabs.is_empty() {
+            self.add_workspace(Workspace::new(Some("Recovered".into()), tabs, 0));
+        }
+        log::warn!("took over {} panes from the previous server", self.panes.len());
+    }
+
+    fn adopt_pane(
+        &mut self,
+        handed: HandedPane,
+        snapshot: Option<artty_core::vt::term::TermSnapshot>,
+        saved: SavedPane,
+    ) -> Option<PaneId> {
+        let id = handed.session.id;
+        let options = SessionOptions {
+            scrollback: Some(self.config.scrollback),
+            cursor_shape: self.config.cursor_style.shape(),
+            ..Default::default()
+        };
+        let session = Session::adopt(handed.session, snapshot, options, self.theme.clone(), self.sink.clone())
+            .inspect_err(|err| log::error!("taking over pane {id}: {err}"))
+            .ok()?;
+        let mut pane = Pane::new(session, saved.title, saved.command, self.agents.clone());
+        pane.restore_meta(handed.meta);
+        self.panes.insert(id, pane);
+        self.next_pane = self.next_pane.max(id + 1);
+        self.had_panes = true;
+        Some(id)
     }
 
     pub(crate) fn should_exit(&self) -> bool {

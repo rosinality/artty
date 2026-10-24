@@ -22,6 +22,11 @@ pub struct ProcessInfo {
 }
 
 impl ProcessProbe {
+    /// The duplicate of the PTY controller this probe holds.
+    pub(crate) fn pty_fd(&self) -> RawFd {
+        self.pty.as_raw_fd()
+    }
+
     pub(crate) fn new(pty: RawFd, shell_pid: u32) -> Option<Self> {
         // SAFETY: `dup` returns a new descriptor we own, or -1.
         let fd = unsafe { libc::dup(pty) };

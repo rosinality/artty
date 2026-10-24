@@ -100,20 +100,59 @@ fn get_pw_entry(buf: &mut [i8; 1024]) -> Result<Passwd<'_>> {
 }
 
 pub struct Pty {
-    child: Child,
+    /// The child, when this process spawned it; `None` for one adopted from
+    /// a previous server build (artty), which `waitpid` still works for: the
+    /// hand-over `exec`s in place, so it is still our child.
+    child: Option<Child>,
+    pid: u32,
     file: File,
     signals: UnixStream,
     sig_id: SigId,
 }
 
 impl Pty {
-    pub fn child(&self) -> &Child {
-        &self.child
+    /// The child's process id.
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     pub fn file(&self) -> &File {
         &self.file
     }
+
+    /// Take over a running child's PTY (artty): `master` is the PTY's
+    /// controlling side and `pid` the child, both inherited across `exec`.
+    pub fn adopt(master: OwnedFd, pid: u32) -> Result<Pty> {
+        let (signals, sig_id) = signal_pipe_for_children()?;
+        unsafe {
+            set_nonblocking(master.as_raw_fd());
+            // Not to be inherited again by programs we start.
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        Ok(Pty { child: None, pid, file: File::from(master), signals, sig_id })
+    }
+
+    /// Whether the child has exited, without waiting.
+    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(child) = &mut self.child {
+            return child.try_wait();
+        }
+        let mut status = 0;
+        match unsafe { libc::waitpid(self.pid as i32, &mut status, libc::WNOHANG) } {
+            0 => Ok(None),
+            -1 => Err(Error::last_os_error()),
+            _ => Ok(Some(std::process::ExitStatus::from_raw(status))),
+        }
+    }
+}
+
+/// A pipe that becomes readable on SIGCHLD.
+fn signal_pipe_for_children() -> Result<(UnixStream, SigId)> {
+    let (sender, recv) = UnixStream::pair()?;
+    let sig_id = signal_pipe::register(sigconsts::SIGCHLD, sender)?;
+    recv.set_nonblocking(true)?;
+    Ok((recv, sig_id))
 }
 
 /// User information that is required for a new shell session.
@@ -278,14 +317,7 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
     }
 
     // Prepare signal handling before spawning child.
-    let (signals, sig_id) = {
-        let (sender, recv) = UnixStream::pair()?;
-
-        // Register the recv end of the pipe for SIGCHLD.
-        let sig_id = signal_pipe::register(sigconsts::SIGCHLD, sender)?;
-        recv.set_nonblocking(true)?;
-        (recv, sig_id)
-    };
+    let (signals, sig_id) = signal_pipe_for_children()?;
 
     match builder.spawn() {
         Ok(child) => {
@@ -295,7 +327,8 @@ pub fn from_fd(config: &Options, window_id: u64, master: OwnedFd, slave: OwnedFd
                 set_nonblocking(master_fd);
             }
 
-            Ok(Pty { child, file: File::from(master), signals, sig_id })
+            let pid = child.id();
+            Ok(Pty { child: Some(child), pid, file: File::from(master), signals, sig_id })
         },
         Err(err) => Err(Error::new(
             err.kind(),
@@ -312,13 +345,21 @@ impl Drop for Pty {
     fn drop(&mut self) {
         // Make sure the PTY is terminated properly.
         unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGHUP);
+            libc::kill(self.pid as i32, libc::SIGHUP);
         }
 
         // Clear signal-hook handler.
         unregister_signal(self.sig_id);
 
-        let _ = self.child.wait();
+        match &mut self.child {
+            Some(child) => {
+                let _ = child.wait();
+            },
+            None => unsafe {
+                let mut status = 0;
+                libc::waitpid(self.pid as i32, &mut status, 0);
+            },
+        }
     }
 }
 
@@ -394,7 +435,7 @@ impl EventedPty for Pty {
         }
 
         // Match on the child process.
-        match self.child.try_wait() {
+        match self.try_wait() {
             Err(err) => {
                 error!("Error checking child process termination: {err}");
                 None

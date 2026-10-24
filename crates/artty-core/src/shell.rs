@@ -25,7 +25,7 @@ pub struct CommandRecord {
     pub finished: Option<Instant>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ShellPhase {
     /// No shell-integration marks seen yet.
     #[default]
@@ -80,7 +80,25 @@ fn text_between<T>(term: &Term<T>, start: Point, end: Point) -> String {
     term.bounds_to_string(start, end)
 }
 
+/// What a shell tracker carries across a server hand-over: where the prompt
+/// and the running command's output are. (Finished commands' output isn't
+/// kept; `artty read --last` starts over.)
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct ShellState {
+    phase: ShellPhase,
+    input_start: Option<(u64, usize)>,
+    output_start: Option<u64>,
+}
+
 impl ShellTracker {
+    pub(crate) fn state(&self) -> ShellState {
+        ShellState { phase: self.phase, input_start: self.input_start, output_start: self.output_start }
+    }
+
+    pub(crate) fn from_state(state: ShellState) -> Self {
+        Self { phase: state.phase, input_start: state.input_start, output_start: state.output_start, ..Self::default() }
+    }
+
     pub(crate) fn mark<T>(&mut self, mark: ShellMark, line: u64, column: usize, term: &Term<T>) -> Option<ShellEvent> {
         match mark {
             ShellMark::PromptStart => {

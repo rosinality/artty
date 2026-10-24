@@ -90,6 +90,9 @@ pub enum Request {
     /// Send a signal (default SIGTERM) to one process; only processes running
     /// in artty's panes.
     Signal { pid: i32, signal: Option<i32> },
+    /// Hand every session to the server build at `executable` without
+    /// ending them (it takes over this process).
+    HandOver { executable: PathBuf },
     /// Every workspace, shown or not.
     Workspaces,
     /// A workspace with one tab, in the frontmost window.

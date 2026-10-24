@@ -29,6 +29,9 @@ use crate::ansi::{
 pub mod cell;
 pub mod color;
 pub mod search;
+mod snapshot;
+
+pub use snapshot::TermSnapshot;
 
 /// Minimum number of columns.
 ///

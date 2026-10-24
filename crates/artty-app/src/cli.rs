@@ -70,8 +70,9 @@ artty, your own pane is found automatically:
                                          variables for its new panes
   artty server [status|stop|restart]     the server that keeps sessions running:
                                          show it, end every session and stop it,
-                                         or restart it on this build (programs
-                                         end; tabs and agents come back)
+                                         or move it to this build (programs keep
+                                         running; a server too old to hand over
+                                         restarts, and tabs and agents return)
   artty settings                         open the Settings window
   artty activity                         show the Activity view (processes,
                                          CPU and memory of every pane)
@@ -124,6 +125,18 @@ fn own_tab() -> Option<SessionId> {
 }
 
 fn run(args: Vec<String>) -> Result<i32, String> {
+    // A server build taking over from another (see `artty_server::upgrade`):
+    // before the usual option parsing, which doesn't know these.
+    match (args.first().map(String::as_str), args.get(1).map(String::as_str), args.get(2)) {
+        (Some("server"), Some("--resume"), Some(header)) => {
+            return artty_server::resume(std::path::Path::new(header)).map(|()| 0).map_err(|err| format!("server: {err}"));
+        }
+        (Some("server"), Some("--handover-check"), _) => {
+            println!("{}", artty_server::handover_check());
+            return Ok(0);
+        }
+        _ => {}
+    }
     let mut args = Args { args: args.into_iter() };
     let command = args.next().unwrap_or_default();
     let mut tab: Option<SessionId> = None;
@@ -316,7 +329,19 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             }
             Some("status") => Request::ServerStatus,
             Some("stop") => Request::StopServer,
-            Some("restart") => Request::RestartServer,
+            Some("restart") => {
+                let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+                return match artty_server::upgrade(&exe).map_err(|err| format!("server restart: {err}"))? {
+                    artty_server::Upgrade::HandedOver => {
+                        println!("The server now runs this build; every program kept running.");
+                        Ok(0)
+                    }
+                    artty_server::Upgrade::Restarted => {
+                        println!("The server (too old to hand over) restarted on this build: tabs reopen, programs restarted.");
+                        Ok(0)
+                    }
+                };
+            }
             Some(other) => return Err(format!("server: unknown action {other} (run, status, stop, restart)")),
         },
         "shell-integration" => {

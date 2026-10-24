@@ -815,7 +815,7 @@ pub enum KeyboardModesApplyBehavior {
 }
 
 /// Terminal cursor configuration.
-#[derive(Default, Debug, Eq, PartialEq, Copy, Clone, Hash)]
+#[derive(Default, Debug, Eq, PartialEq, Copy, Clone, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CursorStyle {
     pub shape: CursorShape,
     pub blinking: bool,
@@ -1210,7 +1210,7 @@ pub enum Attr {
 }
 
 /// Identifiers which can be assigned to a graphic character set.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CharsetIndex {
     /// Default set, is designated as ASCII at startup.
     #[default]
@@ -1221,7 +1221,7 @@ pub enum CharsetIndex {
 }
 
 /// Standard or common character sets which can be designated as G0-G3.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum StandardCharset {
     #[default]
     Ascii,

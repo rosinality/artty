@@ -37,6 +37,13 @@ pub enum Msg {
 
     /// Instruction to resize the PTY.
     Resize(WindowSize),
+
+    /// Stop reading for a server hand-over (artty): everything read so far
+    /// is parsed; say so on the first sender, then wait. A message on the
+    /// second resumes (the hand-over failed); its sender going away means
+    /// the process is being replaced, so the loop never ends and never drops
+    /// the PTY (which would hang up the shell).
+    Freeze(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>),
 }
 
 /// The main event loop.
@@ -94,6 +101,14 @@ where
                 Msg::Input(input) => state.write_list.push_back(input),
                 Msg::Resize(window_size) => self.pty.on_resize(window_size),
                 Msg::Shutdown => return false,
+                Msg::Freeze(frozen, resume) => {
+                    let _ = frozen.send(());
+                    if resume.recv().is_err() {
+                        loop {
+                            std::thread::park();
+                        }
+                    }
+                },
             }
         }
 
@@ -308,6 +323,10 @@ where
                                     }
 
                                     error!("Error reading from PTY in event loop: {err}");
+                                    // artty: the shell is gone (say, it exited while a
+                                    // server hand-over took its PTY, before our SIGCHLD
+                                    // handler existed): say so, or the pane lingers.
+                                    self.event_proxy.send_event(Event::Exit);
                                     break 'event_loop;
                                 }
                             }

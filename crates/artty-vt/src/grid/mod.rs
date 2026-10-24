@@ -12,11 +12,13 @@ use crate::ansi::{CharsetIndex, StandardCharset};
 
 pub mod resize;
 mod row;
+mod snapshot;
 mod storage;
 #[cfg(test)]
 mod tests;
 
 pub use self::row::Row;
+pub use self::snapshot::GridSnapshot;
 use self::storage::Storage;
 
 pub trait GridCell: Sized {
@@ -31,6 +33,7 @@ pub trait GridCell: Sized {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Cursor<T> {
     /// The location of this cursor.
     pub point: Point,
@@ -53,6 +56,7 @@ pub struct Cursor<T> {
 }
 
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Charsets([StandardCharset; 4]);
 
 impl Index<CharsetIndex> for Charsets {
