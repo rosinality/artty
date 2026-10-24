@@ -225,6 +225,27 @@ with the text, and goes when cleared or overwritten. Cell sizes are
 reported in screen pixels, so programs that size images to the window send
 them sharp on Retina displays.
 
+## Performance
+
+`./scripts/bench.sh [io|fire|mem|all] [kitty alacritty ghostty]` measures
+artty, and any of those terminals that are installed, at the same grid:
+`cat` of an 11 MB text file, `cat` of 25 MB of colorful full-screen frames
+(every cell's background changing, like a fire animation), and memory at
+idle. artty runs isolated from your own server and settings. The method
+follows moktavizen/terminal-benchmark, as tty7's harness does.
+
+On an Apple Silicon Mac (2026-10), against kitty 0.49:
+
+| | artty | kitty |
+|---|---|---|
+| 11 MB text | 80 ms | 79 ms |
+| 25 MB of colorful frames | 188 ms | 169 ms |
+| Memory at idle | 147 MB (app + server) | 159 MB |
+
+Plain text is bound by the macOS PTY for both. Animations draw at 120 fps
+(the server's cap), about 1 ms per frame; a pane with 10,000 lines of
+scrollback costs the server about 6 MB.
+
 ## Layout
 
 | Crate | |
