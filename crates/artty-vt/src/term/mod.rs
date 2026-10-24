@@ -1081,6 +1081,16 @@ impl<T> Term<T> {
         self.grid.cursor.point = Point::new(Line(target.min(bottom)), Column(0));
     }
 
+    /// Where the current prompt starts (a stable line), carried across a
+    /// hand-over beside the snapshot.
+    pub fn prompt_line(&self) -> Option<u64> {
+        self.prompt_line
+    }
+
+    pub fn set_prompt_line(&mut self, line: Option<u64>) {
+        self.prompt_line = line;
+    }
+
     /// Go back to the configured cursor shape, whatever a program chose
     /// (artty).
     pub fn reset_cursor_style(&mut self) {

@@ -35,6 +35,10 @@ pub struct SessionHandover {
     pub size: TerminalSize,
     shell: crate::shell::ShellState,
     reported_cwd: Option<PathBuf>,
+    /// Where the prompt starts (see `Term::prompt_line`). Here, not in the
+    /// binary snapshot, whose shape must stay put.
+    #[serde(default)]
+    prompt_line: Option<u64>,
 }
 
 /// Terminal size in cells, plus the cell size in pixels (reported to programs
@@ -229,6 +233,7 @@ impl Session {
         let fd = probe.pty_fd();
         // SAFETY: plain syscall on a descriptor we own.
         unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+        let term = self.term.lock();
         let handover = SessionHandover {
             id: self.id,
             fd,
@@ -236,8 +241,9 @@ impl Session {
             size: self.size,
             shell: self.shell.state(),
             reported_cwd: self.reported_cwd.clone(),
+            prompt_line: term.prompt_line(),
         };
-        Some((handover, self.term.lock().snapshot()))
+        Some((handover, term.snapshot()))
     }
 
     /// Carry on with a pane a previous server build handed over: the shell
@@ -251,7 +257,7 @@ impl Session {
         sink: Arc<dyn Fn(SessionId, Event) + Send + Sync>,
     ) -> io::Result<Self> {
         use std::os::fd::{FromRawFd, OwnedFd};
-        let SessionHandover { id, fd, pid, size, shell, reported_cwd } = handover;
+        let SessionHandover { id, fd, pid, size, shell, reported_cwd, prompt_line } = handover;
         let redraw = snapshot.is_none();
         let proxy = EventProxy { id, pty: Arc::new(OnceLock::new()), sink };
         let mut config = Config { kitty_keyboard: true, ..Config::default() };
@@ -265,6 +271,7 @@ impl Session {
             None => Term::new(config, &size, proxy.clone()),
         };
         term.set_cell_size(size.cell_width, size.cell_height);
+        term.set_prompt_line(prompt_line);
         let term = Arc::new(FairMutex::new(term));
         // SAFETY: `fd` was inherited for exactly this, and nothing else owns it.
         let master = unsafe { OwnedFd::from_raw_fd(fd) };

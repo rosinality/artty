@@ -18,8 +18,117 @@ use crate::layout::{Axis, Node, PaneId};
 use crate::vt::ansi::Rgb;
 use crate::{SavedWindow, TerminalSize};
 
-/// Bumped on incompatible changes; app and server must agree.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// Bumped on incompatible changes that `protocol_version` can't see (new
+/// message kinds); app and server must agree on `protocol_version()`.
+pub const PROTOCOL_VERSION: u32 = 8;
+
+/// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
+/// with a fingerprint of how sample messages encode, every structure that
+/// crosses the wire filled in. A field added, removed or reordered anywhere
+/// changes it, so an app never takes a server's messages it can't read for
+/// compatible (it hands the server over to its own build instead).
+pub fn protocol_version() -> u32 {
+    use crate::frame::{FrameImage, FrameRect, FrameRun, FrameUnderline, UnderlineStyle};
+    use crate::layout::Node;
+    let line = FrameLine {
+        runs: vec![FrameRun {
+            column: 1,
+            cells: 2,
+            text: "ab".into(),
+            fg: Rgb { r: 3, g: 4, b: 5 },
+            bold: true,
+            italic: true,
+            strikeout: true,
+        }],
+        backgrounds: vec![FrameRect { column: 6, width: 7, color: Rgb { r: 8, g: 9, b: 10 } }],
+        selection: vec![FrameRect { column: 11, width: 12, color: Rgb { r: 13, g: 14, b: 15 } }],
+        matches: vec![FrameRect { column: 16, width: 17, color: Rgb { r: 18, g: 19, b: 20 } }],
+        images: vec![FrameImage { column: 21, cells: 22, image: 23, tile_column: 24, tile_row: 25 }],
+        underlines: vec![FrameUnderline { column: 26, width: 27, style: UnderlineStyle::Dashed, color: Rgb { r: 28, g: 29, b: 30 } }],
+    };
+    let update = FrameUpdate {
+        columns: 31,
+        line_count: 32,
+        lines: vec![(33, line)],
+        cursor: Some(FrameCursor {
+            line: 34,
+            column: 35,
+            shape: crate::vt::ansi::CursorShape::Beam,
+            wide: true,
+            blinking: true,
+            color: Rgb { r: 36, g: 37, b: 38 },
+        }),
+        display_offset: 39,
+        background: Rgb { r: 40, g: 41, b: 42 },
+        foreground: Rgb { r: 43, g: 44, b: 45 },
+        mode: 46,
+    };
+    let tab = TabLayout { title: Some("t".into()), root: Node::Pane(47), focused: 48, zoomed: true };
+    let workspace = WorkspaceLayout {
+        id: 49,
+        name: Some("n".into()),
+        title: "w".into(),
+        color: Some("c".into()),
+        root: Some("/r".into()),
+        tabs: vec![tab],
+        active: 50,
+        collapsed: true,
+        cpu_percent: 51.,
+        memory_bytes: 52,
+    };
+    let info = TabInfo {
+        id: 53,
+        window: 54,
+        workspace: 55,
+        workspace_name: Some("s".into()),
+        tab: 56,
+        title: "i".into(),
+        active: true,
+        focused: true,
+        cwd: Some("/d".into()),
+        process: Some("p".into()),
+        status: "x".into(),
+        detail: Some("y".into()),
+        needs_attention: true,
+        shell_integration: true,
+        kitty_keyboard: true,
+    };
+    let samples = [
+        postcard::to_stdvec(&ServerMessage::Frame { pane: 57, update }),
+        postcard::to_stdvec(&ServerMessage::Layout {
+            window: 58,
+            layout: WindowLayout { workspaces: vec![workspace], active: 59, hidden: 60 },
+        }),
+        postcard::to_stdvec(&ServerMessage::Panes {
+            panes: vec![PaneState { info, icon: "z".into(), progress: Some(61), agent: Some("a".into()) }],
+        }),
+        postcard::to_stdvec(&ServerMessage::Image(ImageData {
+            id: 62,
+            format: crate::vt::term::cell::ImageFormat::Rgba,
+            data: vec![63],
+            width: 64,
+            height: 65,
+            columns: 66.,
+            rows: 67.,
+        })),
+        postcard::to_stdvec(&ClientMessage::Resize {
+            pane: 68,
+            size: TerminalSize { columns: 69, lines: 70, cell_width: 71, cell_height: 72 },
+        }),
+        postcard::to_stdvec(&ClientMessage::AttachWindow {
+            window: Some(73),
+            spec: PaneSpec { command: Some(vec!["c".into()]), cwd: Some("/w".into()), title: Some("t".into()) },
+            bounds: Some(SavedWindow { x: 74., y: 75., width: 76., height: 77., maximized: true, fullscreen: true }),
+        }),
+    ];
+    // FNV-1a: the same in every build.
+    let mut hash: u32 = 0x811c_9dc5;
+    let bytes = samples.iter().flat_map(|sample| sample.as_deref().unwrap_or_default().iter().copied());
+    for byte in PROTOCOL_VERSION.to_le_bytes().into_iter().chain(bytes) {
+        hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
 
 /// Identifies a build: the package version and when the executable was
 /// built (rebuilds don't change the version). The server runs from a copy
@@ -445,6 +554,14 @@ mod tests {
         assert_eq!(panes, vec![state]);
         let ServerMessage::Layout { layout: back, .. } = read_message(&mut reader).unwrap() else { panic!() };
         assert_eq!(back, layout);
+    }
+
+    #[test]
+    fn the_protocol_version_includes_the_message_layout() {
+        // The same in every run (it's compared across processes), and not
+        // just the hand-kept number.
+        assert_eq!(protocol_version(), protocol_version());
+        assert_ne!(protocol_version(), PROTOCOL_VERSION);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime};
 use artty_core::control::{Request, Response};
 use artty_core::layout::PaneId;
 use artty_core::protocol::{
-    AppCommand, ClientMessage, Hello, PROTOCOL_VERSION, PaneSpec, PaneState, Query, Reply,
+    AppCommand, ClientMessage, Hello, PaneSpec, PaneState, Query, Reply,
     ServerMessage, WindowId, decode_response, encode_request, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
@@ -226,7 +226,7 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
     }
     let stream = UnixStream::connect(artty_core::control::server_socket_path())?;
     let mut hello = serde_json::to_string(&Hello::Attach {
-        version: PROTOCOL_VERSION,
+        version: artty_core::protocol::protocol_version(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
     })?;
     hello.push('\n');
@@ -251,7 +251,7 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
         std::thread::sleep(Duration::from_millis(200));
         return connect_once(cx, may_restart, retries - 1);
     }
-    let compatible = matches!(welcome, Ok(ServerMessage::Welcome { version, .. }) if version == PROTOCOL_VERSION);
+    let compatible = matches!(welcome, Ok(ServerMessage::Welcome { version, .. }) if version == artty_core::protocol::protocol_version());
     if !compatible {
         drop((writer, reader, stream));
         if !may_restart {
@@ -285,8 +285,13 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
                     }
                 }
                 Err(err) => {
-                    if err.kind() != std::io::ErrorKind::UnexpectedEof {
-                        eprintln!("artty: reading from the server: {err}");
+                    if err.kind() == std::io::ErrorKind::InvalidData {
+                        // A message this build can't read: the server is
+                        // from another build, though it said otherwise.
+                        log::error!("reading from the server: {err}");
+                        UNREADABLE.store(true, std::sync::atomic::Ordering::Relaxed);
+                    } else if err.kind() != std::io::ErrorKind::UnexpectedEof {
+                        log::warn!("reading from the server: {err}");
                     }
                     break;
                 }
@@ -326,7 +331,18 @@ fn restart_other_server() -> std::io::Result<artty_server::Upgrade> {
 /// The server went away (it crashed, or restarted). Close our windows and
 /// reconnect: a new server reopens what the old one saved. If it ended every
 /// session (`artty server stop`), quit.
+/// The server sent something this build couldn't read.
+static UNREADABLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn server_lost(cx: &mut App) {
+    // Move a server we can't read to our own build first (handing over,
+    // so programs keep running), then reconnect as usual.
+    if UNREADABLE.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        match restart_other_server() {
+            Ok(_) => cx.global_mut::<Shared>().lost_at = None,
+            Err(err) => log::error!("moving the server to this build: {err}"),
+        }
+    }
     let shared = cx.global_mut::<Shared>();
     if shared.stopped {
         return cx.quit();
@@ -359,7 +375,7 @@ fn handle(message: ServerMessage, cx: &mut App) {
     match message {
         ServerMessage::Welcome { version, server_version } => {
             let shared = cx.global_mut::<Shared>();
-            shared.server_mismatch = (version != PROTOCOL_VERSION || server_version != shared.build).then_some(server_version);
+            shared.server_mismatch = (version != artty_core::protocol::protocol_version() || server_version != shared.build).then_some(server_version);
             cx.refresh_windows();
         }
         ServerMessage::Attached { window, bounds } => {

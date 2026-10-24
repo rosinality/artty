@@ -14,7 +14,7 @@ use artty_core::control::{
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
-    AppCommand, ClientMessage, PROTOCOL_VERSION, PaneSpec, PaneState, Query, Reply, SelectionOp,
+    AppCommand, ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp,
     ServerMessage, TabLayout, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
 };
 use artty_core::vt::ansi::Progress;
@@ -970,7 +970,7 @@ impl Server {
             },
             Input::Connected(id, tx) => {
                 let build = std::env::current_exe().map(|exe| artty_core::protocol::build_id(&exe)).unwrap_or_default();
-                let _ = tx.send(ServerMessage::Welcome { version: PROTOCOL_VERSION, server_version: build });
+                let _ = tx.send(ServerMessage::Welcome { version: artty_core::protocol::protocol_version(), server_version: build });
                 self.clients.insert(id, Client { tx, sent: HashMap::new(), dirty: HashSet::new(), panes_sent: Vec::new(), images_sent: HashSet::new() });
             }
             Input::Client(id, message) => self.handle_client(id, message),
