@@ -1899,10 +1899,10 @@ impl<T: EventListener> Handler for Term<T> {
             _ => return,
         };
 
-        if let Ok(bytes) = Base64.decode(base64) {
-            if let Ok(text) = String::from_utf8(bytes) {
-                self.event_proxy.send_event(Event::ClipboardStore(clipboard_type, text));
-            }
+        if let Ok(bytes) = Base64.decode(base64)
+            && let Ok(text) = String::from_utf8(bytes)
+        {
+            self.event_proxy.send_event(Event::ClipboardStore(clipboard_type, text));
         }
     }
 
@@ -2443,7 +2443,7 @@ impl<T: EventListener> Handler for Term<T> {
     fn termcap_query(&mut self, names: &[u8]) {
         let hex = |s: &[u8]| s.iter().map(|b| format!("{b:02X}")).collect::<String>();
         let unhex = |s: &[u8]| -> Option<Vec<u8>> {
-            (s.len() % 2 == 0)
+            s.len().is_multiple_of(2)
                 .then(|| s.chunks(2).map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()).collect())
                 .flatten()
         };
@@ -2606,7 +2606,7 @@ impl TabStops {
     fn resize(&mut self, columns: usize) {
         let mut index = self.tabs.len();
         self.tabs.resize_with(columns, || {
-            let is_tabstop = index % INITIAL_TABSTOPS == 0;
+            let is_tabstop = index.is_multiple_of(INITIAL_TABSTOPS);
             index += 1;
             is_tabstop
         });
