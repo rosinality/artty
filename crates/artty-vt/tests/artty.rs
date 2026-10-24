@@ -392,3 +392,26 @@ fn sixel_images_are_shown_and_advertised() {
     // Text carries on below it.
     assert_eq!(term.grid()[Line(1)][Column(0)].c, 'a');
 }
+
+#[test]
+fn a_prompt_forgets_the_cursor_shape_a_program_chose() {
+    use artty_vt::ansi::CursorShape;
+    let mut term = kitty_term();
+    let mut parser = Processor::<StdSyncHandler>::new();
+    // yazi and friends set a block and leave it when they exit.
+    parser.advance(&mut term, b"\x1b[2 q");
+    assert_eq!(term.cursor_style().shape, CursorShape::Block);
+    parser.advance(&mut term, b"\x1b]133;A\x07");
+    assert_eq!(term.cursor_style(), Config::default().default_cursor_style);
+}
+
+#[test]
+fn termcap_and_version_queries_are_answered() {
+    // XTGETTCAP for TN, Co and something unknown; then XTVERSION.
+    let (_, events) = run(b"\x1bP+q544E;436F;7A7A\x1b\\\x1b[>q", 3);
+    let replies = replies(&events);
+    assert_eq!(replies[0], "\x1bP1+r544E=787465726D2D323536636F6C6F72\x1b\\");
+    assert_eq!(replies[1], "\x1bP1+r436F=323536\x1b\\");
+    assert_eq!(replies[2], "\x1bP0+r7A7A\x1b\\");
+    assert!(replies[3].starts_with("\x1bP>|artty "));
+}

@@ -238,14 +238,24 @@ fn parse_number_i32(input: &[u8]) -> Option<i32> {
     str::from_utf8(input).ok()?.parse().ok()
 }
 
+/// DCS strings handled (artty).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DcsKind {
+    /// `DCS q`: a sixel image.
+    Sixel,
+    /// `DCS + q`: XTGETTCAP, terminfo capabilities asked for by name.
+    TermcapQuery,
+}
+
 /// Internal state for VTE processor.
 #[derive(Debug, Default)]
 struct ProcessorState<T: Timeout> {
     /// Last processed character for repetition.
     preceding_char: Option<char>,
 
-    /// A sixel image arriving (artty): its parameters and data so far.
-    sixel: Option<(Vec<u16>, Vec<u8>)>,
+    /// A DCS string we handle, arriving (artty): which, its parameters and
+    /// its data so far.
+    dcs: Option<(DcsKind, Vec<u16>, Vec<u8>)>,
 
     /// State for synchronized terminal updates.
     sync_state: SyncState<T>,
@@ -497,6 +507,12 @@ pub trait Handler {
 
     /// A sixel image (artty): the DCS parameters P1–P3 and the data.
     fn sixel(&mut self, _params: &[u16], _data: &[u8]) {}
+
+    /// XTGETTCAP (artty): hex-encoded capability names, `;`-separated.
+    fn termcap_query(&mut self, _names: &[u8]) {}
+
+    /// XTVERSION (artty): report the terminal's name and version.
+    fn report_version(&mut self) {}
 
     /// OSC 9 / OSC 777 / OSC 99 desktop notification (artty).
     fn desktop_notification(&mut self, _title: Option<String>, _body: String) {}
@@ -1345,10 +1361,15 @@ where
 
     #[inline]
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        // artty: sixel images.
-        if action == 'q' && intermediates.is_empty() && !ignore {
+        // artty: sixel images, and terminfo queries.
+        let kind = match (intermediates, action) {
+            ([], 'q') => Some(DcsKind::Sixel),
+            ([b'+'], 'q') => Some(DcsKind::TermcapQuery),
+            _ => None,
+        };
+        if let Some(kind) = kind.filter(|_| !ignore) {
             let params = params.iter().map(|p| p.first().copied().unwrap_or(0)).take(3).collect();
-            self.state.sixel = Some((params, Vec::new()));
+            self.state.dcs = Some((kind, params, Vec::new()));
             return;
         }
         debug!(
@@ -1359,19 +1380,20 @@ where
 
     #[inline]
     fn put(&mut self, byte: u8) {
-        /// Longer sixel data is dropped.
-        const MAX_SIXEL: usize = 64 << 20;
-        match self.state.sixel.as_mut() {
-            Some((_, data)) if data.len() < MAX_SIXEL => data.push(byte),
-            Some(_) => self.state.sixel = None,
+        /// Longer DCS strings are dropped.
+        const MAX_DCS: usize = 64 << 20;
+        match self.state.dcs.as_mut() {
+            Some((_, _, data)) if data.len() < MAX_DCS => data.push(byte),
+            Some(_) => self.state.dcs = None,
             None => debug!("[unhandled put] byte={:?}", byte),
         }
     }
 
     #[inline]
     fn unhook(&mut self) {
-        match self.state.sixel.take() {
-            Some((params, data)) => self.handler.sixel(&params, &data),
+        match self.state.dcs.take() {
+            Some((DcsKind::Sixel, params, data)) => self.handler.sixel(&params, &data),
+            Some((DcsKind::TermcapQuery, _, data)) => self.handler.termcap_query(&data),
             None => debug!("[unhandled unhook]"),
         }
     }
@@ -1832,6 +1854,8 @@ where
                 let mode = next_param_or(0);
                 handler.report_private_mode(PrivateMode::new(mode));
             },
+            // XTVERSION (artty): the terminal's name and version.
+            ('q', [b'>']) => handler.report_version(),
             ('q', [b' ']) => {
                 // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
                 let cursor_style_id = next_param_or(0);

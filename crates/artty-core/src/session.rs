@@ -298,7 +298,10 @@ impl Session {
     pub fn set_cursor_shape(&mut self, shape: artty_vt::ansi::CursorShape) {
         if self.term_config.default_cursor_style.shape != shape {
             self.term_config.default_cursor_style.shape = shape;
-            self.term.lock().set_options(self.term_config.clone());
+            let mut term = self.term.lock();
+            term.set_options(self.term_config.clone());
+            // A change in Settings shows now, over a shape a program chose.
+            term.reset_cursor_style();
         }
     }
 

@@ -1004,6 +1004,12 @@ impl<T> Term<T> {
         }
     }
 
+    /// Go back to the configured cursor shape, whatever a program chose
+    /// (artty).
+    pub fn reset_cursor_style(&mut self) {
+        self.cursor_style = None;
+    }
+
     /// Forget every kitty keyboard mode a program pushed, on both screens
     /// (artty). No escape sequence can: `CSI = 0 u` only rewrites the flags
     /// in effect, so a killed program's pushes would come back later.
@@ -2333,11 +2339,44 @@ impl<T: EventListener> Handler for Term<T> {
         Term::sixel(self, params, data);
     }
 
+    fn report_version(&mut self) {
+        let reply = format!("\x1bP>|artty {}\x1b\\", env!("CARGO_PKG_VERSION"));
+        self.event_proxy.send_event(Event::PtyWrite(reply));
+    }
+
+    /// XTGETTCAP: answer what we know of our terminfo entry (we say we're
+    /// `xterm-256color`, with 24-bit color); "unknown" for the rest, so
+    /// programs waiting for an answer move on.
+    fn termcap_query(&mut self, names: &[u8]) {
+        let hex = |s: &[u8]| s.iter().map(|b| format!("{b:02X}")).collect::<String>();
+        let unhex = |s: &[u8]| -> Option<Vec<u8>> {
+            (s.len() % 2 == 0)
+                .then(|| s.chunks(2).map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()).collect())
+                .flatten()
+        };
+        for name in names.split(|&b| b == b';').filter(|n| !n.is_empty()) {
+            let value: Option<&[u8]> = match unhex(name).as_deref() {
+                Some(b"TN" | b"name") => Some(b"xterm-256color"),
+                Some(b"Co" | b"colors") => Some(b"256"),
+                Some(b"RGB") => Some(b"8/8/8"),
+                _ => None,
+            };
+            let reply = match value {
+                Some(value) => format!("\x1bP1+r{}={}\x1b\\", String::from_utf8_lossy(name), hex(value)),
+                None => format!("\x1bP0+r{}\x1b\\", String::from_utf8_lossy(name)),
+            };
+            self.event_proxy.send_event(Event::PtyWrite(reply));
+        }
+    }
+
     fn shell_mark(&mut self, mark: ShellMark) {
-        // artty: back at the prompt, a program that died without popping its
-        // kitty keyboard modes mustn't garble what the shell is typed.
+        // artty: back at the prompt, what the last program left behind goes:
+        // kitty keyboard modes it didn't pop (they'd garble what's typed),
+        // and the cursor shape it chose (shells that pick one, like vi
+        // modes, do so after the prompt starts).
         if mark == ShellMark::PromptStart {
             self.reset_keyboard_modes();
+            self.reset_cursor_style();
         }
         let cursor = self.grid.cursor.point;
         let line = (self.grid.lines_scrolled() as i64 + i64::from(cursor.line.0)).max(0) as u64;

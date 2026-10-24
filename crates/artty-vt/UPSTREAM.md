@@ -82,3 +82,8 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   default palette, repeats, raster attributes, transparent or register-0
   background), then placed like other images. Primary device attributes
   now answer `CSI ? 62 ; 4 ; 22 c` (sixel included) instead of `CSI ? 6 c`.
+- `ansi.rs`, `term/mod.rs`: XTGETTCAP (`DCS + q`) is answered (`TN`, `Co`,
+  `RGB`; "unknown" for the rest) — `kitten icat` waited forever without an
+  answer — and XTVERSION (`CSI > q`) reports `artty <version>`. A shell
+  prompt mark also forgets a cursor shape a program chose
+  (`Term::reset_cursor_style`), as with keyboard modes.
