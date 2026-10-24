@@ -1865,7 +1865,7 @@ impl Server {
                         messages.push(ServerMessage::Image(artty_core::protocol::ImageData {
                             id: image.id,
                             format: image.format,
-                            data: image.data.clone(),
+                            data: image.data.to_vec(),
                             width: image.width,
                             height: image.height,
                             columns: image.columns,

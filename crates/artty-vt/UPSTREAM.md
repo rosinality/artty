@@ -66,3 +66,14 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   last cell showing it. `Term::place_image` puts one at the cursor.
   Snapshots carry each image once (tiles serialize as ids). Tests:
   `tests/artty.rs`, `term::image`.
+- `src/vte/`: vte's parser (`src/lib.rs`, `src/params.rs`, v0.15.0) is
+  vendored, std build only (no 1KB OSC cap, no const generic), so that APC
+  strings (`ESC _ ... ESC \`) are collected and passed to the new
+  `Perform::apc_dispatch` instead of dropped (SOS and PM still are). The
+  `vte` dependency is gone.
+- `term/kitty.rs`: kitty's graphics protocol on top of the image cells:
+  transmit (direct base64 in chunks, or a file; PNG, RGBA, RGB; zlib), show
+  at the cursor (now or by id; size in cells; `C=1`), delete (on screen, by
+  id, at the cursor; upper case frees), query, and replies honoring `q`.
+  Images kept for later display are capped (oldest go first); a reset
+  forgets them. Test: `tests/artty.rs`.

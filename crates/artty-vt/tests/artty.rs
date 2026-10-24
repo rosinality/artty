@@ -311,3 +311,67 @@ fn inline_images_cover_cells_and_carry_over() {
     assert!(term.grid()[Line(0)][Column(3)].image().is_none());
     assert!(term.grid()[Line(0)][Column(4)].image().is_some());
 }
+
+fn replies(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::PtyWrite(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn kitty_graphics_transmit_place_query_delete() {
+    use base64::Engine;
+    let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let recorder = Recorder::default();
+    let mut term = Term::new(Config::default(), &Size(20, 6), recorder.clone());
+    let mut parser = Processor::<StdSyncHandler>::new();
+    let mut run = |term: &mut Term<Recorder>, bytes: &str| {
+        parser.advance(term, bytes.as_bytes());
+        replies(&recorder.0.lock().unwrap().drain(..).collect::<Vec<_>>())
+    };
+
+    // Transmit and show a 2×2 RGBA image across 4×2 cells: answered OK.
+    let rgba = b64(&[255u8; 16]);
+    assert_eq!(run(&mut term, &format!("\x1b_Ga=T,f=32,s=2,v=2,i=7,c=4,r=2;{rgba}\x1b\\")), ["\x1b_Gi=7;OK\x1b\\"]);
+    let tile = |term: &Term<Recorder>, line, column| {
+        term.grid()[Line(line)][Column(column)].image().map(|t| (t.column, t.row, t.image.kitty_id))
+    };
+    assert_eq!(tile(&term, 0, 0), Some((0, 0, 7)));
+    assert_eq!(tile(&term, 1, 3), Some((3, 1, 7)));
+    assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(0)));
+
+    // Shown again later by id, without moving the cursor.
+    run(&mut term, "\x1b[3;10H\x1b_Ga=p,i=7,C=1,q=1;\x1b\\");
+    assert_eq!(tile(&term, 2, 9), Some((0, 0, 7)));
+    assert_eq!(term.grid().cursor.point, Point::new(Line(2), Column(9)));
+
+    // In chunks, compressed, as RGB.
+    let packed = miniz_oxide::deflate::compress_to_vec_zlib(&[1, 2, 3], 6);
+    let encoded = b64(&packed);
+    let (a, b) = encoded.split_at(4);
+    run(&mut term, "\x1b[5;1H");
+    assert!(run(&mut term, &format!("\x1b_Ga=T,f=24,s=1,v=1,o=z,i=9,m=1;{a}\x1b\\")).is_empty());
+    assert_eq!(run(&mut term, &format!("\x1b_Gm=0;{b}\x1b\\")), ["\x1b_Gi=9;OK\x1b\\"]);
+    assert_eq!(tile(&term, 4, 0), Some((0, 0, 9)));
+
+    // A query answers without showing anything; shared memory isn't supported.
+    let before = term.grid().cursor.point;
+    assert_eq!(run(&mut term, &format!("\x1b_Ga=q,f=32,s=2,v=2,i=31;{rgba}\x1b\\")), ["\x1b_Gi=31;OK\x1b\\"]);
+    assert_eq!(term.grid().cursor.point, before);
+    let shm = run(&mut term, &format!("\x1b_Ga=q,t=s,s=1,v=1,i=32;{}\x1b\\", b64(b"/x")));
+    assert!(shm[0].starts_with("\x1b_Gi=32;EINVAL"), "{shm:?}");
+
+    // Deleting image 7's placements leaves image 9 alone.
+    run(&mut term, "\x1b_Ga=d,d=i,i=7\x1b\\");
+    assert_eq!(tile(&term, 0, 0), None);
+    assert_eq!(tile(&term, 2, 9), None);
+    assert_eq!(tile(&term, 4, 0), Some((0, 0, 9)));
+    // And freeing it means it can't be shown again.
+    run(&mut term, "\x1b_Ga=d,d=I,i=7\x1b\\");
+    let gone = run(&mut term, "\x1b_Ga=p,i=7;\x1b\\");
+    assert!(gone[0].contains("ENOENT"), "{gone:?}");
+}

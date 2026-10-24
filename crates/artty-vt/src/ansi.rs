@@ -27,7 +27,7 @@ use log::debug;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-use vte::{Params, ParamsIter};
+use crate::vte::{self, Params, ParamsIter};
 
 /// Maximum time before a synchronized update is aborted.
 const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
@@ -487,6 +487,10 @@ pub trait Handler {
 
     /// iTerm2's `OSC 1337` (artty: inline images), parameters after `1337`.
     fn iterm2(&mut self, _params: &[&[u8]]) {}
+
+    /// A kitty graphics command (artty): an APC string `G<keys>;<payload>`,
+    /// without the `G`.
+    fn kitty_graphics(&mut self, _command: &[u8]) {}
 
     /// OSC 9 / OSC 777 / OSC 99 desktop notification (artty).
     fn desktop_notification(&mut self, _title: Option<String>, _body: String) {}
@@ -1349,6 +1353,14 @@ where
     #[inline]
     fn unhook(&mut self) {
         debug!("[unhandled unhook]");
+    }
+
+    #[inline]
+    fn apc_dispatch(&mut self, data: &[u8]) {
+        // artty: kitty graphics; other APC strings mean nothing to us.
+        if let Some(command) = data.strip_prefix(b"G") {
+            self.handler.kitty_graphics(command);
+        }
     }
 
     #[inline]

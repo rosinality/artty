@@ -30,6 +30,7 @@ pub mod cell;
 pub mod color;
 pub mod search;
 mod image;
+mod kitty;
 mod snapshot;
 
 pub use snapshot::TermSnapshot;
@@ -330,6 +331,9 @@ pub struct Term<T> {
     /// An iTerm2 image arriving in parts: its arguments and data so far.
     pending_image: Option<(String, Vec<u8>)>,
 
+    /// Kitty graphics: images kept for display, and a transfer under way.
+    kitty: kitty::KittyState,
+
     /// The stack for the keyboard modes.
     keyboard_mode_stack: Vec<KeyboardModes>,
 
@@ -454,6 +458,7 @@ impl<T> Term<T> {
             title_stack: Default::default(),
             cell_size: (8, 16),
             pending_image: None,
+            kitty: Default::default(),
             is_focused: Default::default(),
             selection: Default::default(),
             title: Default::default(),
@@ -1923,6 +1928,9 @@ impl<T: EventListener> Handler for Term<T> {
         self.title_stack = Vec::new();
         self.title = None;
         self.selection = None;
+        // artty: images kept for later display, and transfers under way.
+        self.kitty = Default::default();
+        self.pending_image = None;
         self.vi_mode_cursor = Default::default();
         self.keyboard_mode_stack = Default::default();
         self.inactive_keyboard_mode_stack = Default::default();
@@ -2312,6 +2320,10 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn iterm2(&mut self, params: &[&[u8]]) {
         Term::iterm2(self, params);
+    }
+
+    fn kitty_graphics(&mut self, command: &[u8]) {
+        Term::kitty_graphics(self, command);
     }
 
     fn shell_mark(&mut self, mark: ShellMark) {

@@ -153,7 +153,7 @@ impl<T: EventListener> Term<T> {
         let cell = (f32::from(self.cell_size.0), f32::from(self.cell_size.1));
         let terminal = (cell.0 * self.columns() as f32, cell.1 * self.screen_lines() as f32);
         let (w, h) = display_size((pixel_w as f32, pixel_h as f32), width, height, keep_aspect, cell, terminal);
-        let image = Image::new(ImageFormat::Encoded, data, pixel_w, pixel_h, w / cell.0, h / cell.1);
+        let image = Image::new(ImageFormat::Encoded, data.into(), (pixel_w, pixel_h), (w / cell.0, h / cell.1), 0);
         self.place_image(image, true);
     }
 

@@ -217,10 +217,12 @@ over ssh, say — `artty shell-integration zsh|bash` prints a script to source.
 
 ## Images
 
-Programs can show images in the terminal with iTerm2's inline image protocol
+Programs can show images in the terminal, with kitty's graphics protocol
+(`kitten icat`, yazi, timg, image.nvim, ...) or iTerm2's inline images
 (`imgcat`, and the many tools that support it): an image takes up the cells
 it covers, scrolls with the text, and goes when cleared or overwritten.
-Kitty's graphics protocol and sixel are next.
+Cell sizes are reported in screen pixels, so programs that size images to
+the window send them sharp on Retina displays. Sixel is next.
 
 ## Layout
 

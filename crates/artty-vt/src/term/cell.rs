@@ -139,8 +139,9 @@ pub struct Image {
     /// Unique among the images of this process (and those handed to it).
     pub id: u64,
     pub format: ImageFormat,
-    /// The file as sent (PNG, JPEG, GIF, ...), or RGBA pixels.
-    pub data: Vec<u8>,
+    /// The file as sent (PNG, JPEG, GIF, ...), or RGBA pixels; shared by
+    /// every placement of the same picture.
+    pub data: Arc<[u8]>,
     /// Pixels.
     pub width: u32,
     pub height: u32,
@@ -148,6 +149,9 @@ pub struct Image {
     /// whatever the font size later.
     pub columns: f32,
     pub rows: f32,
+    /// The kitty graphics image this places, or 0.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub kitty_id: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,9 +166,15 @@ pub enum ImageFormat {
 static NEXT_IMAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl Image {
-    pub fn new(format: ImageFormat, data: Vec<u8>, width: u32, height: u32, columns: f32, rows: f32) -> Arc<Self> {
+    pub fn new(
+        format: ImageFormat,
+        data: Arc<[u8]>,
+        (width, height): (u32, u32),
+        (columns, rows): (f32, f32),
+        kitty_id: u32,
+    ) -> Arc<Self> {
         let id = NEXT_IMAGE.fetch_add(1, Ordering::Relaxed);
-        Arc::new(Self { id, format, data, width, height, columns, rows })
+        Arc::new(Self { id, format, data, width, height, columns, rows, kitty_id })
     }
 
     /// Keep ids unique after taking over images from a previous process.

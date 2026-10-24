@@ -281,6 +281,8 @@ pub struct WindowView {
     autoscrolling: bool,
     /// ⌘ is held: the sidebar shows tabs' ⌘N shortcuts.
     command_held: bool,
+    /// Screen pixels per point, as of the last render.
+    scale_factor: f32,
     /// Button held down while the program receives mouse reports.
     reporting_button: Option<Button>,
     /// Last cell reported for motion, to avoid duplicate reports.
@@ -381,6 +383,7 @@ impl WindowView {
             selecting: false,
             autoscrolling: false,
             command_held: false,
+            scale_factor: window.scale_factor(),
             reporting_button: None,
             last_mouse_cell: None,
             scroll_remainder: 0.,
@@ -476,8 +479,10 @@ impl WindowView {
         TerminalSize {
             columns: (px(rect.width) / self.metrics.cell_width).floor().max(2.) as u16,
             lines: (px(rect.height) / self.metrics.line_height).floor().max(1.) as u16,
-            cell_width: f32::from(self.metrics.cell_width).round() as u16,
-            cell_height: f32::from(self.metrics.line_height).round() as u16,
+            // Screen pixels, as other terminals report them: programs that
+            // size images to the window send them sharp on Retina displays.
+            cell_width: (f32::from(self.metrics.cell_width) * self.scale_factor).round() as u16,
+            cell_height: (f32::from(self.metrics.line_height) * self.scale_factor).round() as u16,
         }
     }
 
@@ -2310,6 +2315,11 @@ impl Render for WindowView {
         }
         self.area = Self::area_rect(window);
         self.window_active = window.is_window_active();
+        if self.scale_factor != window.scale_factor() {
+            // Another display: tell programs the new pixel sizes.
+            self.scale_factor = window.scale_factor();
+            self.sizes.clear();
+        }
         if let Some(id) = self.window {
             let bounds = saved_window(window.window_bounds());
             if self.bounds_sent != Some(bounds) {
