@@ -53,6 +53,9 @@ pub struct Config {
     /// How to resume each agent, by process name.
     pub resume: BTreeMap<String, ResumeCommand>,
     pub colors: Colors,
+    /// Key bindings over the defaults: keystrokes (as in `cmd-shift-t`, or
+    /// several separated by spaces) to what they do.
+    pub keys: BTreeMap<String, KeyAction>,
 }
 
 /// Commands that resume an agent's conversation.
@@ -163,6 +166,7 @@ impl Default for Config {
                 ),
             ]),
             colors: Colors::default(),
+            keys: BTreeMap::new(),
         }
     }
 }
@@ -200,6 +204,15 @@ fn palette<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Rgb>, D::Error> {
         return Err(serde::de::Error::custom("palette has more than 16 colors"));
     }
     colors.iter().map(|s| parse_rgb(s)).collect()
+}
+
+/// What a key does, in `[keys]`: an action by name (`"new-tab"`), `"none"`
+/// to take a default binding away, or text to type (`{ send = "..." }`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum KeyAction {
+    Named(String),
+    Send { send: String },
 }
 
 impl Config {
@@ -249,6 +262,17 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_bindings() {
+        let config = Config::parse(
+            "[keys]\n\"cmd-shift-t\" = \"new-tab\"\n\"cmd-t\" = \"none\"\n\"shift-enter\" = { send = \"\\u001b[13;2u\" }\n",
+        )
+        .unwrap();
+        assert_eq!(config.keys["cmd-shift-t"], KeyAction::Named("new-tab".into()));
+        assert_eq!(config.keys["cmd-t"], KeyAction::Named("none".into()));
+        assert_eq!(config.keys["shift-enter"], KeyAction::Send { send: "\x1b[13;2u".into() });
+    }
 
     #[test]
     fn empty_config_is_default() {

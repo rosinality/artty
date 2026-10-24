@@ -3,6 +3,7 @@ mod boxdraw;
 mod cli;
 mod hooks;
 mod keys;
+mod keymap;
 mod mouse;
 mod notify;
 mod profile;
@@ -51,7 +52,7 @@ fn parse_args() -> Option<Vec<String>> {
     }
 }
 
-fn menus() -> Vec<Menu> {
+pub fn menus() -> Vec<Menu> {
     vec![
         Menu {
             name: "artty".into(),
@@ -124,6 +125,15 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
+/// The app's own default bindings (windows' are in `window_view`).
+pub fn bind_default_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-n", NewWindow, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
+    ]);
+}
+
 fn main() {
     artty_core::logging::init();
     let command = parse_args();
@@ -135,13 +145,7 @@ fn main() {
         cx.on_action(|_: &OpenSettings, cx| app_state::open_settings(cx));
         cx.on_action(|_: &RestartToUpdate, cx| app_state::restart(cx));
         cx.on_action(|_: &RestartServer, cx| app_state::restart_server(cx));
-        cx.bind_keys([
-            KeyBinding::new("cmd-q", Quit, None),
-            KeyBinding::new("cmd-n", NewWindow, None),
-            KeyBinding::new("cmd-,", OpenSettings, None),
-        ]);
-        window_view::bind_keys(cx);
-        cx.set_menus(menus());
+        keymap::refresh(cx);
         notify::init();
         app_state::init(PaneSpec { command, ..Default::default() }, cx);
         cx.activate(true);

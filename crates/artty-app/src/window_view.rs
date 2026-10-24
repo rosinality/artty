@@ -86,6 +86,14 @@ const FLASH: Duration = Duration::from_millis(220);
 const MIN_FONT_SIZE: f32 = 6.;
 const MAX_FONT_SIZE: f32 = 72.;
 
+/// Type text into the focused pane: what `{ send = "..." }` in `[keys]`
+/// binds to.
+#[derive(Clone, PartialEq, gpui::Action)]
+#[action(namespace = artty, no_json)]
+pub struct SendText {
+    pub text: String,
+}
+
 /// Right-click menu commands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MenuCommand {
@@ -2396,6 +2404,11 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
             .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
+            .on_action(cx.listener(|this, action: &SendText, _, cx| {
+                if !this.showing_activity() {
+                    this.input(action.text.clone().into_bytes(), cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.cycle_workspace(1, cx)))
             .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.cycle_workspace(-1, cx)))
             .on_action(cx.listener(|this, _: &ClosePane, _, cx| {

@@ -163,6 +163,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
                 window_view::flush_detached(cx);
                 check_for_update(cx);
                 forget_unshown_images(cx);
+                crate::keymap::refresh(cx);
             });
             if alive.is_err() {
                 break;

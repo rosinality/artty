@@ -81,6 +81,9 @@ fish, neovim) can tell Shift+Enter, Ctrl+I and Escape apart.
 keyboard, bell, notifications, sessions). Everything lives in
 `~/.config/artty/config.toml`, which Settings edits in place and every window
 reloads when it changes; see [`config.example.toml`](config.example.toml).
+Its `[keys]` table rebinds keys: `"cmd-shift-t" = "new-tab"`, `"cmd-t" =
+"none"` to take a default away, or `"shift-enter" = { send = "..." }` to
+type text; the example lists every action.
 
 ## Agents
 

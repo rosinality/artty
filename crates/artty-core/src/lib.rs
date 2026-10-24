@@ -20,7 +20,7 @@ mod state;
 mod theme;
 
 pub use artty_vt as vt;
-pub use config::{Colors, Config, CursorStyle, ResumeCommand};
+pub use config::{Colors, Config, CursorStyle, KeyAction, ResumeCommand};
 pub use frame::{Frame, FrameCursor, FrameImage, FrameLine, FrameRect, FrameRun, FrameUnderline, UnderlineStyle};
 pub use process::{ProcessInfo, ProcessSample, process_tree, processes};
 pub use session::{Notice, Session, SessionHandover, SessionId, SessionOptions, TerminalSize};

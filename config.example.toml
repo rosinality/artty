@@ -81,3 +81,23 @@ latest = "gemini --resume latest"
 #   "#3b4252", "#e06c75", "#9ece6a", "#e0af68", "#7aa2f7", "#bb9af7", "#7dcfff", "#d8dee9",
 #   "#616e88", "#f7768e", "#b9f27c", "#ffc777", "#8fb4ff", "#c7a9ff", "#a4e0ff", "#eceff4",
 # ]
+
+# Key bindings over the defaults: keystrokes to an action, "none" (takes a
+# default binding away) or text to type. Keystrokes are modifiers (cmd,
+# ctrl, alt, shift) and a key joined by `-`; several, separated by spaces,
+# make a sequence. Changes apply as soon as the file is saved.
+[keys]
+# "cmd-shift-t" = "new-tab"
+# "cmd-t" = "none"
+# "shift-enter" = { send = "\u001b[13;2u" }
+# "ctrl-a c" = "new-tab"
+#
+# Actions: new-window, new-tab, close-tab, close-pane, next-tab,
+# previous-tab, rename-tab, move-tab-up, move-tab-down, new-workspace,
+# open-workspace, next-workspace, previous-workspace, show-activity,
+# split-right, split-down, focus-left, focus-right, focus-up, focus-down,
+# next-pane, previous-pane, toggle-zoom, jump-to-attention, copy, paste,
+# find, find-next, find-previous, increase-font-size, decrease-font-size,
+# reset-font-size, open-settings, reopen-closed-windows, restart-to-update,
+# restart-server, quit, quit-and-end-sessions.
+# (⌘1–⌘9 always select tabs.)
