@@ -244,6 +244,9 @@ struct ProcessorState<T: Timeout> {
     /// Last processed character for repetition.
     preceding_char: Option<char>,
 
+    /// A sixel image arriving (artty): its parameters and data so far.
+    sixel: Option<(Vec<u16>, Vec<u8>)>,
+
     /// State for synchronized terminal updates.
     sync_state: SyncState<T>,
 }
@@ -491,6 +494,9 @@ pub trait Handler {
     /// A kitty graphics command (artty): an APC string `G<keys>;<payload>`,
     /// without the `G`.
     fn kitty_graphics(&mut self, _command: &[u8]) {}
+
+    /// A sixel image (artty): the DCS parameters P1–P3 and the data.
+    fn sixel(&mut self, _params: &[u16], _data: &[u8]) {}
 
     /// OSC 9 / OSC 777 / OSC 99 desktop notification (artty).
     fn desktop_notification(&mut self, _title: Option<String>, _body: String) {}
@@ -1339,6 +1345,12 @@ where
 
     #[inline]
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        // artty: sixel images.
+        if action == 'q' && intermediates.is_empty() && !ignore {
+            let params = params.iter().map(|p| p.first().copied().unwrap_or(0)).take(3).collect();
+            self.state.sixel = Some((params, Vec::new()));
+            return;
+        }
         debug!(
             "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
             params, intermediates, ignore, action
@@ -1347,12 +1359,21 @@ where
 
     #[inline]
     fn put(&mut self, byte: u8) {
-        debug!("[unhandled put] byte={:?}", byte);
+        /// Longer sixel data is dropped.
+        const MAX_SIXEL: usize = 64 << 20;
+        match self.state.sixel.as_mut() {
+            Some((_, data)) if data.len() < MAX_SIXEL => data.push(byte),
+            Some(_) => self.state.sixel = None,
+            None => debug!("[unhandled put] byte={:?}", byte),
+        }
     }
 
     #[inline]
     fn unhook(&mut self) {
-        debug!("[unhandled unhook]");
+        match self.state.sixel.take() {
+            Some((params, data)) => self.handler.sixel(&params, &data),
+            None => debug!("[unhandled unhook]"),
+        }
     }
 
     #[inline]

@@ -77,3 +77,8 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   id, at the cursor; upper case frees), query, and replies honoring `q`.
   Images kept for later display are capped (oldest go first); a reset
   forgets them. Test: `tests/artty.rs`.
+- `term/sixel.rs`: sixel images (DCS `q`), collected through `hook`/`put`/
+  `unhook` and decoded to RGBA (color registers in RGB and HLS, VT340
+  default palette, repeats, raster attributes, transparent or register-0
+  background), then placed like other images. Primary device attributes
+  now answer `CSI ? 62 ; 4 ; 22 c` (sixel included) instead of `CSI ? 6 c`.

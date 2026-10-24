@@ -31,6 +31,7 @@ pub mod color;
 pub mod search;
 mod image;
 mod kitty;
+mod sixel;
 mod snapshot;
 
 pub use snapshot::TermSnapshot;
@@ -1339,7 +1340,9 @@ impl<T: EventListener> Handler for Term<T> {
         match intermediate {
             None => {
                 trace!("Reporting primary device attributes");
-                let text = String::from("\x1b[?6c");
+                // artty: a VT220 with sixel graphics (4) and ANSI color (22),
+                // so programs know they can send sixel.
+                let text = String::from("\x1b[?62;4;22c");
                 self.event_proxy.send_event(Event::PtyWrite(text));
             },
             Some('>') => {
@@ -2324,6 +2327,10 @@ impl<T: EventListener> Handler for Term<T> {
 
     fn kitty_graphics(&mut self, command: &[u8]) {
         Term::kitty_graphics(self, command);
+    }
+
+    fn sixel(&mut self, params: &[u16], data: &[u8]) {
+        Term::sixel(self, params, data);
     }
 
     fn shell_mark(&mut self, mark: ShellMark) {

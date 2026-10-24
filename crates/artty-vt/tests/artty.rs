@@ -198,6 +198,10 @@ fn random_input_never_panics() {
         "T", "b", "c", "n", "s", "x", "z", "{", "~", "133;A", "133;D;1", "8;;https://x", "52;c;aGk=", "1337;", "9;4;1;50",
         "\r", "\n", "\t", "\x08", "\x7f", "a", "é", "한", "👨\u{200d}👩", "❤\u{fe0f}", "\u{fe0f}", "\u{200d}", "🏽",
         "\u{0301}", "\x0e", "\x0f", "\x1b(0", "\x1b(B", "\x1b#8", "\x1b7", "\x1b8", "\x1bM", "\x1bD", "\x1bE",
+        // Images: sixel, kitty graphics, iTerm2.
+        "\x1bPq", "\x1bP0;1q", "#1;2;100;0;0", "#2;1;120;50;100", "!999~", "~", "-", "$", "\"1;1;640;480",
+        "\x1b_Ga=T,f=32,s=1,v=1,c=3,r=2;", "\x1b_Ga=T,f=100,m=1;", "\x1b_Gm=0;", "\x1b_Ga=d,d=A;", "AAAA",
+        "\x1b_Ga=p,i=1,C=1;", "\x1b]1337;File=inline=1;width=3:", "iVBORw0KGgo",
     ];
     for round in 0..300 {
         let mut term = kitty_term();
@@ -374,4 +378,17 @@ fn kitty_graphics_transmit_place_query_delete() {
     run(&mut term, "\x1b_Ga=d,d=I,i=7\x1b\\");
     let gone = run(&mut term, "\x1b_Ga=p,i=7;\x1b\\");
     assert!(gone[0].contains("ENOENT"), "{gone:?}");
+}
+
+#[test]
+fn sixel_images_are_shown_and_advertised() {
+    let (term, events) = run(b"\x1b[c\x1bP0;1q\"1;1;16;12#1;2;100;0;0#1!16~-!16~\x1b\\after", 6);
+    // Programs learn they can send sixel (4) from the device attributes.
+    assert!(replies(&events).contains(&"\x1b[?62;4;22c".to_owned()));
+    // 16 × 12 pixels in 8 × 16 pixel cells: two cells by one.
+    let tile = term.grid()[Line(0)][Column(1)].image().map(|t| (t.column, t.row, t.image.width, t.image.height));
+    assert_eq!(tile, Some((1, 0, 16, 12)));
+    assert!(term.grid()[Line(0)][Column(2)].image().is_none());
+    // Text carries on below it.
+    assert_eq!(term.grid()[Line(1)][Column(0)].c, 'a');
 }
