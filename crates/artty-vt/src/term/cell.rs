@@ -131,6 +131,13 @@ pub struct CellExtra {
     image: Option<ImageTile>,
 }
 
+/// Base64 with or without `=` padding (artty): `kitten icat` sends it
+/// without.
+pub(crate) const BASE64: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    base64::engine::GeneralPurposeConfig::new().with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+);
+
 /// An image shown in the grid (artty). Its data is kept once, however many
 /// cells show it, and goes when the last of them does.
 #[derive(Debug)]

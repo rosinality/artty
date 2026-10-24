@@ -14,10 +14,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD as Base64;
 
 use super::Term;
-use super::cell::{Cell, Image, ImageFormat};
+use super::cell::{BASE64, Cell, Image, ImageFormat};
 use crate::event::{Event, EventListener};
 use crate::grid::Dimensions;
 use crate::index::{Column, Line};
@@ -127,6 +126,7 @@ impl<T: EventListener> Term<T> {
     pub(crate) fn kitty_graphics(&mut self, command: &[u8]) {
         let split = command.iter().position(|&b| b == b';').unwrap_or(command.len());
         let (keys, payload) = (&command[..split], command.get(split + 1..).unwrap_or_default());
+        log::debug!("kitty graphics: {} ({} bytes of payload)", String::from_utf8_lossy(keys), payload.len());
         let mut command = Command::parse(keys);
 
         // Later chunks of a transmission carry only `m` (and maybe `q`).
@@ -173,6 +173,9 @@ impl<T: EventListener> Term<T> {
             },
             _ => return,
         };
+        if let Err(err) = &result {
+            log::debug!("kitty graphics: {err}");
+        }
         self.kitty_reply(&command, result);
     }
 
@@ -199,7 +202,7 @@ impl<T: EventListener> Term<T> {
     /// The image a command carries: decoded payload, checked.
     fn kitty_load(&self, command: &Command, payload: &[u8]) -> Result<Pixels, String> {
         let payload: Vec<u8> = payload.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
-        let decoded = Base64.decode(&payload).map_err(|_| "EINVAL:bad base64".to_owned())?;
+        let decoded = BASE64.decode(&payload).map_err(|_| "EINVAL:bad base64".to_owned())?;
         let mut data = match command.medium {
             b'd' => decoded,
             b'f' | b't' => {

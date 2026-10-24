@@ -4,10 +4,9 @@
 use std::sync::Arc;
 
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD as Base64;
 
 use super::Term;
-use super::cell::{Image, ImageFormat, ImageTile};
+use super::cell::{BASE64, Image, ImageFormat, ImageTile};
 use crate::ansi::Handler;
 use crate::event::EventListener;
 use crate::grid::Dimensions;
@@ -138,7 +137,7 @@ impl<T: EventListener> Term<T> {
             return;
         }
         let payload: Vec<u8> = payload.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
-        let Ok(data) = Base64.decode(&payload) else {
+        let Ok(data) = BASE64.decode(&payload) else {
             log::warn!("inline image: bad base64");
             return;
         };

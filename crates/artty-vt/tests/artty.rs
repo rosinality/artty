@@ -415,3 +415,12 @@ fn termcap_and_version_queries_are_answered() {
     assert_eq!(replies[2], "\x1bP0+r7A7A\x1b\\");
     assert!(replies[3].starts_with("\x1bP>|artty "));
 }
+
+#[test]
+fn unpadded_base64_is_accepted() {
+    // `kitten icat` leaves out the `=` padding: 6 RGB bytes are 8 base64
+    // characters, but 3 (one pixel) are "AAAA" and 4 bytes are "AAAAAA".
+    let (term, events) = run(b"\x1b_Ga=T,f=32,s=1,v=1,i=5;AAAAAA\x1b\\", 3);
+    assert_eq!(replies(&events), ["\x1b_Gi=5;OK\x1b\\"]);
+    assert!(term.grid()[Line(0)][Column(0)].image().is_some());
+}
