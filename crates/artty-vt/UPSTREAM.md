@@ -99,3 +99,10 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   limit): past it they're dropped when they end. `term/kitty.rs`: file
   transfers read only absolute paths to regular files outside /dev, /proc
   and /sys, and errors don't tell why.
+- `term/kitty.rs`, `term/placeholder.rs`: kitty's Unicode placeholders, the
+  way images get through tmux. `U=1` keeps an image (fit to its `c`×`r`
+  cells) as a virtual placement, shown wherever U+10EEEE cells name it: the
+  id in the foreground color, row, column and the id's high byte in
+  diacritics, missing ones inferred from the cell before. `Term` only keeps
+  the placements (`placeholder_image`); artty-core's frame turns the cells
+  into image spans. Test: `tests/artty.rs`, `artty-core` `frame.rs`.

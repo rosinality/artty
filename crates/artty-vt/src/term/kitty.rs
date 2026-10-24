@@ -4,11 +4,12 @@
 //! Supported: transmitting images (directly in base64, possibly in chunks,
 //! or from a file; PNG, RGBA or RGB; optionally zlib-compressed), showing
 //! them at the cursor (now or later by id, at a size in cells if given, the
-//! cursor moving past them or not), deleting placements (all on screen, by
+//! cursor moving past them or not), virtual placements for Unicode
+//! placeholders (see `placeholder`), deleting placements (all on screen, by
 //! image id, or at the cursor) and freeing images, and queries. Not
 //! supported: shared memory (answered as such, so programs fall back to
-//! sending directly), animation, Unicode placeholders, source rectangles and
-//! z-index (images go under the text).
+//! sending directly), animation, source rectangles and z-index (images go
+//! under the text).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,6 +36,9 @@ pub(crate) struct KittyState {
     age: u64,
     /// For images sent with a number (`I`) instead of an id.
     next_id: u32,
+    /// Virtual placements (`U=1`), shown wherever placeholder text names
+    /// them, by image id.
+    virtual_placements: HashMap<u32, Arc<Image>>,
     chunk: Option<(Command, Vec<u8>)>,
 }
 
@@ -90,6 +94,8 @@ struct Command {
     rows: u32,
     stay: bool,
     delete: u8,
+    /// A virtual placement, for Unicode placeholders.
+    unicode: bool,
 }
 
 impl Command {
@@ -114,11 +120,19 @@ impl Command {
                 b'c' => command.columns = number(),
                 b'r' => command.rows = number(),
                 b'C' => command.stay = number() == 1,
+                b'U' => command.unicode = number() == 1,
                 b'd' => command.delete = letter,
                 _ => {},
             }
         }
         command
+    }
+}
+
+impl<T> Term<T> {
+    /// The image a placeholder naming kitty image `id` shows.
+    pub fn placeholder_image(&self, id: u32) -> Option<Arc<Image>> {
+        self.kitty.virtual_placements.get(&id).cloned()
     }
 }
 
@@ -296,6 +310,17 @@ impl<T: EventListener> Term<T> {
     fn kitty_place(&mut self, command: &Command, Pixels { format, data, width, height }: Pixels) {
         let cell = (f32::from(self.cell_size.0), f32::from(self.cell_size.1));
         let (natural_columns, natural_rows) = (width as f32 / cell.0, height as f32 / cell.1);
+        if command.unicode {
+            // Fit into the cells asked for, keeping the aspect ratio; shown
+            // where placeholder text names it.
+            let (c, r) = (command.columns.max(1) as f32, command.rows.max(1) as f32);
+            let scale = (c / natural_columns).min(r / natural_rows);
+            let size = (natural_columns * scale, natural_rows * scale);
+            let image = Image::new(format, data, (width, height), size, command.id);
+            self.kitty.virtual_placements.insert(command.id, image);
+            self.mark_fully_damaged();
+            return;
+        }
         let size = match (command.columns, command.rows) {
             (0, 0) => (natural_columns, natural_rows),
             (c, 0) => (c as f32, natural_rows * c as f32 / natural_columns),
@@ -310,6 +335,10 @@ impl<T: EventListener> Term<T> {
     /// at the cursor (`c`). Upper case also forgets the images.
     fn kitty_delete(&mut self, command: &Command) {
         let free = command.delete.is_ascii_uppercase();
+        // Virtual placements go only by image id.
+        if command.delete.eq_ignore_ascii_case(&b'i') {
+            self.kitty.virtual_placements.remove(&command.id);
+        }
         let doomed = match command.delete.to_ascii_lowercase() {
             b'i' => Doomed::Kitty(command.id),
             b'c' => match self.grid[self.grid.cursor.point].image() {

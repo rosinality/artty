@@ -228,6 +228,12 @@ with the text, and goes when cleared or overwritten. Cell sizes are
 reported in screen pixels, so programs that size images to the window send
 them sharp on Retina displays.
 
+Inside tmux, images work through kitty's Unicode placeholders
+(`kitten icat --unicode-placeholder`, and tools built on it): the image is passed through to
+artty once and tmux keeps only special characters standing for it, so it
+moves with tmux's panes, windows and scrollback. tmux needs
+`set -g allow-passthrough on`.
+
 ## Performance
 
 `./scripts/bench.sh [io|fire|mem|all] [kitty alacritty ghostty]` measures

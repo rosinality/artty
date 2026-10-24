@@ -28,6 +28,7 @@ use crate::ansi::{
 
 pub mod cell;
 pub mod color;
+pub mod placeholder;
 pub mod search;
 mod image;
 mod kitty;

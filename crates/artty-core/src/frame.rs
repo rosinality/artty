@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use artty_vt::term::cell::{Cell, Flags, Image, ImageTile};
+use artty_vt::term::placeholder::{PLACEHOLDER, PlaceholderLine};
 use artty_vt::term::search::Match;
 
 use crate::theme::{Theme, dim};
@@ -151,6 +152,10 @@ impl Frame {
         let mut lines = vec![FrameLine::default(); screen_lines];
         let mut builder: Option<(usize, LineBuilder)> = None;
         let mut images: BTreeMap<u64, Arc<Image>> = BTreeMap::new();
+        // Kitty's Unicode placeholders on the current line, and the column of
+        // the last one (they inherit from the cell to their left).
+        let mut placeholders = PlaceholderLine::default();
+        let mut last_placeholder: Option<usize> = None;
 
         for indexed in content.display_iter {
             let line = (indexed.point.line.0 + display_offset as i32) as usize;
@@ -164,6 +169,8 @@ impl Frame {
                         lines[done] = b.finish();
                     }
                     builder = Some((line, LineBuilder::default()));
+                    placeholders = PlaceholderLine::default();
+                    last_placeholder = None;
                 }
             }
             let (_, b) = builder.as_mut().unwrap();
@@ -172,9 +179,25 @@ impl Frame {
             if selected {
                 b.select(indexed.point.column.0, indexed.cell.flags, theme.selection);
             }
+            let column = indexed.point.column.0;
             if let Some(tile) = indexed.cell.image() {
-                b.image(indexed.point.column.0, tile);
+                b.image(column, tile);
                 images.entry(tile.image.id).or_insert_with(|| tile.image.clone());
+            }
+            if indexed.cell.c == PLACEHOLDER {
+                let marks = indexed.cell.zerowidth().unwrap_or_default();
+                let adjacent = last_placeholder.is_some_and(|last| last + 1 == column);
+                last_placeholder = Some(column);
+                let decoded = placeholders.decode(indexed.cell.fg, marks, adjacent);
+                if let Some((placeholder, image)) =
+                    decoded.and_then(|p| Some((p, term.placeholder_image(p.image)?)))
+                {
+                    let tile = ImageTile { image, column: placeholder.column as u16, row: placeholder.row as u16 };
+                    b.image(column, &tile);
+                    images.entry(tile.image.id).or_insert_with(|| tile.image.clone());
+                }
+            } else {
+                placeholders.gap();
             }
             b.push(indexed.point.column.0, indexed.cell, theme, colors, background);
         }
@@ -292,7 +315,8 @@ impl LineBuilder {
             }
         }
 
-        if cell.c == ' ' && cell.zerowidth().is_none() || flags.contains(Flags::HIDDEN) {
+        // Placeholders (kitty's, for images in tmux) show an image, not a glyph.
+        if cell.c == ' ' && cell.zerowidth().is_none() || flags.contains(Flags::HIDDEN) || cell.c == PLACEHOLDER {
             // Blank cells only matter as a gap: end the run unless it can absorb
             // the space and stay on the grid.
             if let Some((run, _)) = &mut self.run
@@ -389,6 +413,35 @@ mod tests {
 
     fn texts(line: &FrameLine) -> Vec<(usize, &str)> {
         line.runs.iter().map(|r| (r.column, r.text.as_str())).collect()
+    }
+
+    #[test]
+    fn unicode_placeholders_show_their_images() {
+        // As the protocol's example: image 42, a 2×2 virtual placement, then
+        // its placeholders, row and column spelled out with marks.
+        let frame = frame_for(
+            "\x1b_Ga=T,U=1,f=32,s=2,v=2,i=42,c=2,r=2,q=2;AAAAAAAAAAAAAAAAAAAAAA\x1b\\\
+             \x1b[38;5;42m\u{10eeee}\u{305}\u{305}\u{10eeee}\u{305}\u{30d}\x1b[39m\r\n\
+             \x1b[38;5;42m\u{10eeee}\u{30d}\u{305}\u{10eeee}\u{30d}\u{30d}\x1b[39m"
+                .as_bytes(),
+        );
+        let spans = |line: usize| {
+            frame.lines[line].images.iter().map(|i| (i.column, i.cells, i.tile_column, i.tile_row)).collect::<Vec<_>>()
+        };
+        assert_eq!(spans(0), vec![(0, 2, 0, 0)]);
+        assert_eq!(spans(1), vec![(0, 2, 0, 1)]);
+        assert_eq!(frame.images.len(), 1);
+        assert_eq!(frame.images[0].kitty_id, 42);
+        // The placeholder character itself isn't drawn.
+        assert!(frame.lines[0].runs.is_empty());
+
+        // Marks left out after the first column: carried on from the left.
+        let frame = frame_for(
+            "\x1b_Ga=T,U=1,f=32,s=2,v=2,i=7,c=3,r=1,q=2;AAAAAAAAAAAAAAAAAAAAAA\x1b\\\
+             \x1b[38;5;7m\u{10eeee}\u{305}\u{10eeee}\u{10eeee}"
+                .as_bytes(),
+        );
+        assert_eq!(frame.lines[0].images.iter().map(|i| (i.column, i.cells)).collect::<Vec<_>>(), vec![(0, 3)]);
     }
 
     #[test]
