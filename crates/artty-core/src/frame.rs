@@ -2,7 +2,10 @@ use artty_vt::ansi::{CursorShape, Rgb};
 use artty_vt::event::EventListener;
 use artty_vt::grid::Dimensions;
 use artty_vt::term::Term;
-use artty_vt::term::cell::{Cell, Flags};
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use artty_vt::term::cell::{Cell, Flags, Image, ImageTile};
 use artty_vt::term::search::Match;
 
 use crate::theme::{Theme, dim};
@@ -22,6 +25,9 @@ pub struct Frame {
     pub display_offset: usize,
     pub background: Rgb,
     pub foreground: Rgb,
+    /// The images shown, for sending each to a renderer once (by id).
+    #[serde(skip)]
+    pub images: Vec<Arc<Image>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -33,6 +39,19 @@ pub struct FrameLine {
     pub selection: Vec<FrameRect>,
     /// Search matches, drawn under the selection (which marks the current one).
     pub matches: Vec<FrameRect>,
+    /// Parts of images, drawn over the backgrounds and under the text.
+    pub images: Vec<FrameImage>,
+}
+
+/// Consecutive cells showing one row of an image: from its cell
+/// (`tile_column`, `tile_row`) on, `cells` wide.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FrameImage {
+    pub column: usize,
+    pub cells: usize,
+    pub image: u64,
+    pub tile_column: u16,
+    pub tile_row: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -94,6 +113,7 @@ impl Frame {
         let screen_lines = term.screen_lines();
         let mut lines = vec![FrameLine::default(); screen_lines];
         let mut builder: Option<(usize, LineBuilder)> = None;
+        let mut images: BTreeMap<u64, Arc<Image>> = BTreeMap::new();
 
         for indexed in content.display_iter {
             let line = (indexed.point.line.0 + display_offset as i32) as usize;
@@ -114,6 +134,10 @@ impl Frame {
                 selection.is_some_and(|s| s.contains_cell(&indexed, cursor_point, cursor_shape));
             if selected {
                 b.select(indexed.point.column.0, indexed.cell.flags, theme.selection);
+            }
+            if let Some(tile) = indexed.cell.image() {
+                b.image(indexed.point.column.0, tile);
+                images.entry(tile.image.id).or_insert_with(|| tile.image.clone());
             }
             b.push(indexed.point.column.0, indexed.cell, theme, colors, background);
         }
@@ -146,7 +170,7 @@ impl Frame {
             }
         }
 
-        Frame { columns, lines, cursor, display_offset, background, foreground }
+        Frame { columns, lines, cursor, display_offset, background, foreground, images: images.into_values().collect() }
     }
 }
 
@@ -157,6 +181,28 @@ struct LineBuilder {
 }
 
 impl LineBuilder {
+    /// A cell showing part of an image: extends the previous span when it
+    /// continues it.
+    fn image(&mut self, column: usize, tile: &ImageTile) {
+        match self.line.images.last_mut() {
+            Some(span)
+                if span.image == tile.image.id
+                    && span.tile_row == tile.row
+                    && span.column + span.cells == column
+                    && usize::from(span.tile_column) + span.cells == usize::from(tile.column) =>
+            {
+                span.cells += 1;
+            }
+            _ => self.line.images.push(FrameImage {
+                column,
+                cells: 1,
+                image: tile.image.id,
+                tile_column: tile.column,
+                tile_row: tile.row,
+            }),
+        }
+    }
+
     fn select(&mut self, column: usize, flags: Flags, color: Rgb) {
         if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
             return;

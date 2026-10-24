@@ -126,6 +126,112 @@ pub struct CellExtra {
     zerowidth: Vec<char>,
     underline_color: Option<Color>,
     hyperlink: Option<Hyperlink>,
+    /// The part of an image this cell shows (artty).
+    #[cfg_attr(feature = "serde", serde(default, with = "tile_serde"))]
+    image: Option<ImageTile>,
+}
+
+/// An image shown in the grid (artty). Its data is kept once, however many
+/// cells show it, and goes when the last of them does.
+#[derive(Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct Image {
+    /// Unique among the images of this process (and those handed to it).
+    pub id: u64,
+    pub format: ImageFormat,
+    /// The file as sent (PNG, JPEG, GIF, ...), or RGBA pixels.
+    pub data: Vec<u8>,
+    /// Pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Size in cells as placed, fractional: drawn at the same size in cells
+    /// whatever the font size later.
+    pub columns: f32,
+    pub rows: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum ImageFormat {
+    /// An image file, for the renderer to decode.
+    Encoded,
+    /// 8-bit RGBA, row by row.
+    Rgba,
+}
+
+static NEXT_IMAGE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+impl Image {
+    pub fn new(format: ImageFormat, data: Vec<u8>, width: u32, height: u32, columns: f32, rows: f32) -> Arc<Self> {
+        let id = NEXT_IMAGE.fetch_add(1, Ordering::Relaxed);
+        Arc::new(Self { id, format, data, width, height, columns, rows })
+    }
+
+    /// Keep ids unique after taking over images from a previous process.
+    pub(crate) fn reserve_id(id: u64) {
+        NEXT_IMAGE.fetch_max(id + 1, Ordering::Relaxed);
+    }
+}
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for Image {}
+
+impl std::hash::Hash for Image {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+/// Which part of an image a cell shows: the image's cell at `column`, `row`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ImageTile {
+    pub image: Arc<Image>,
+    pub column: u16,
+    pub row: u16,
+}
+
+/// Tiles serialize as the image's id: a snapshot carries each image once
+/// (see `TermSnapshot`), and while it is read back the images wait here.
+#[cfg(feature = "serde")]
+pub(crate) mod tile_serde {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::{Image, ImageTile};
+
+    thread_local! {
+        static RESTORING: RefCell<HashMap<u64, Arc<Image>>> = RefCell::new(HashMap::new());
+    }
+
+    /// Make `images` available to tiles read next on this thread.
+    pub(crate) fn restoring(images: Vec<Arc<Image>>) {
+        RESTORING.with(|r| *r.borrow_mut() = images.into_iter().map(|i| (i.id, i)).collect());
+    }
+
+    pub(crate) fn done_restoring() {
+        RESTORING.with(|r| r.borrow_mut().clear());
+    }
+
+    pub fn serialize<S: Serializer>(tile: &Option<ImageTile>, serializer: S) -> Result<S::Ok, S::Error> {
+        tile.as_ref().map(|t| (t.image.id, t.column, t.row)).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<ImageTile>, D::Error> {
+        let tile = Option::<(u64, u16, u16)>::deserialize(deserializer)?;
+        // An image that didn't come along is simply gone.
+        Ok(tile.and_then(|(id, column, row)| {
+            let image = RESTORING.with(|r| r.borrow().get(&id).cloned())?;
+            Some(ImageTile { image, column, row })
+        }))
+    }
 }
 
 /// Content and attributes of a single cell in the terminal grid.
@@ -183,7 +289,7 @@ impl Cell {
             && self
                 .extra
                 .as_ref()
-                .is_none_or(|extra| extra.zerowidth.is_empty() && extra.hyperlink.is_none())
+                .is_none_or(|extra| extra.zerowidth.is_empty() && extra.hyperlink.is_none() && extra.image.is_none())
         {
             self.extra = None;
         } else {
@@ -204,7 +310,9 @@ impl Cell {
             && self
                 .extra
                 .as_ref()
-                .is_none_or(|extra| extra.zerowidth.is_empty() && extra.underline_color.is_none());
+                .is_none_or(|extra| {
+                    extra.zerowidth.is_empty() && extra.underline_color.is_none() && extra.image.is_none()
+                });
 
         if should_drop {
             self.extra = None;
@@ -218,6 +326,18 @@ impl Cell {
     #[inline]
     pub fn hyperlink(&self) -> Option<Hyperlink> {
         self.extra.as_ref()?.hyperlink.clone()
+    }
+
+    /// The part of an image this cell shows (artty).
+    #[inline]
+    pub fn image(&self) -> Option<&ImageTile> {
+        self.extra.as_ref()?.image.as_ref()
+    }
+
+    /// Show part of an image, and nothing else.
+    pub fn set_image(&mut self, tile: ImageTile) {
+        *self = Cell::default();
+        self.extra = Some(Arc::new(CellExtra { image: Some(tile), ..Default::default() }));
     }
 }
 
@@ -235,7 +355,7 @@ impl GridCell for Cell {
                     | Flags::WIDE_CHAR_SPACER
                     | Flags::LEADING_WIDE_CHAR_SPACER,
             )
-            && self.extra.as_ref().map(|extra| extra.zerowidth.is_empty()) != Some(false)
+            && self.extra.as_ref().map(|extra| extra.zerowidth.is_empty() && extra.image.is_none()) != Some(false)
     }
 
     #[inline]

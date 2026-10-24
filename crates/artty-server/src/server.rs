@@ -147,6 +147,8 @@ struct Client {
     sent: HashMap<PaneId, (Frame, Instant)>,
     dirty: HashSet<PaneId>,
     panes_sent: Vec<PaneState>,
+    /// Images it has (by id), so each is sent once.
+    images_sent: HashSet<u64>,
 }
 
 /// Who's waiting for `artty run` to finish.
@@ -969,7 +971,7 @@ impl Server {
             Input::Connected(id, tx) => {
                 let build = std::env::current_exe().map(|exe| artty_core::protocol::build_id(&exe)).unwrap_or_default();
                 let _ = tx.send(ServerMessage::Welcome { version: PROTOCOL_VERSION, server_version: build });
-                self.clients.insert(id, Client { tx, sent: HashMap::new(), dirty: HashSet::new(), panes_sent: Vec::new() });
+                self.clients.insert(id, Client { tx, sent: HashMap::new(), dirty: HashSet::new(), panes_sent: Vec::new(), images_sent: HashSet::new() });
             }
             Input::Client(id, message) => self.handle_client(id, message),
             Input::Disconnected(id) => {
@@ -1128,6 +1130,13 @@ impl Server {
             }
             ClientMessage::MoveWorkspace { workspace, window, to } => self.move_workspace(workspace, window, to),
             ClientMessage::TabToNewWorkspace { workspace, tab } => self.tab_to_new_workspace(workspace, tab),
+            ClientMessage::ForgetImages { ids } => {
+                if let Some(c) = self.clients.get_mut(&client) {
+                    for id in ids {
+                        c.images_sent.remove(&id);
+                    }
+                }
+            }
             ClientMessage::OpenWorkspace { workspace, window } => {
                 if self.workspaces.contains_key(&workspace) && self.windows.contains_key(&window) {
                     self.show_workspace(workspace, window);
@@ -1850,6 +1859,20 @@ impl Server {
                 let frame = state.session.frame();
                 let mode = state.session.mode().bits();
                 let client = self.clients.get_mut(&client_id).unwrap();
+                // Images first, each once.
+                for image in &frame.images {
+                    if client.images_sent.insert(image.id) {
+                        messages.push(ServerMessage::Image(artty_core::protocol::ImageData {
+                            id: image.id,
+                            format: image.format,
+                            data: image.data.clone(),
+                            width: image.width,
+                            height: image.height,
+                            columns: image.columns,
+                            rows: image.rows,
+                        }));
+                    }
+                }
                 let previous = client.sent.get(&pane).map(|(f, _)| f);
                 let update = artty_core::protocol::FrameUpdate::diff(previous, &frame, mode);
                 client.dirty.remove(&pane);

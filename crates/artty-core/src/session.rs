@@ -167,6 +167,7 @@ impl Session {
         config.default_cursor_style.shape = options.cursor_shape;
         let term_config = config.clone();
         let mut term = Term::new(config, &size, proxy.clone());
+        term.set_cell_size(size.cell_width, size.cell_height);
         if let Some(output) = &options.initial_output {
             artty_vt::ansi::Processor::<artty_vt::ansi::StdSyncHandler>::new().advance(&mut term, output);
         }
@@ -259,10 +260,11 @@ impl Session {
         }
         config.default_cursor_style.shape = options.cursor_shape;
         let term_config = config.clone();
-        let term = match snapshot {
+        let mut term = match snapshot {
             Some(snapshot) => Term::from_snapshot(config, snapshot, proxy.clone()),
             None => Term::new(config, &size, proxy.clone()),
         };
+        term.set_cell_size(size.cell_width, size.cell_height);
         let term = Arc::new(FairMutex::new(term));
         // SAFETY: `fd` was inherited for exactly this, and nothing else owns it.
         let master = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -331,7 +333,10 @@ impl Session {
             return;
         }
         self.size = size;
-        self.term.lock().resize(size);
+        let mut term = self.term.lock();
+        term.resize(size);
+        term.set_cell_size(size.cell_width, size.cell_height);
+        drop(term);
         self.send(Msg::Resize(size.into()));
     }
 

@@ -29,6 +29,7 @@ use crate::ansi::{
 pub mod cell;
 pub mod color;
 pub mod search;
+mod image;
 mod snapshot;
 
 pub use snapshot::TermSnapshot;
@@ -323,6 +324,12 @@ pub struct Term<T> {
     /// term is set.
     title_stack: Vec<Option<String>>,
 
+    /// Cell size in pixels, for sizing images (artty).
+    cell_size: (u16, u16),
+
+    /// An iTerm2 image arriving in parts: its arguments and data so far.
+    pending_image: Option<(String, Vec<u8>)>,
+
     /// The stack for the keyboard modes.
     keyboard_mode_stack: Vec<KeyboardModes>,
 
@@ -445,6 +452,8 @@ impl<T> Term<T> {
             cursor_style: Default::default(),
             colors: color::Colors::default(),
             title_stack: Default::default(),
+            cell_size: (8, 16),
+            pending_image: None,
             is_focused: Default::default(),
             selection: Default::default(),
             title: Default::default(),
@@ -2301,6 +2310,10 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
+    fn iterm2(&mut self, params: &[&[u8]]) {
+        Term::iterm2(self, params);
+    }
+
     fn shell_mark(&mut self, mark: ShellMark) {
         // artty: back at the prompt, a program that died without popping its
         // kitty keyboard modes mustn't garble what the shell is typed.

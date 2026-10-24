@@ -19,7 +19,7 @@ use crate::vt::ansi::Rgb;
 use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes; app and server must agree.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Identifies a build: the package version and when the executable was
 /// built (rebuilds don't change the version). The server runs from a copy
@@ -106,6 +106,8 @@ pub enum ClientMessage {
     SetWorkspaceColor { workspace: WorkspaceId, color: Option<String> },
     /// Where its new tabs start (unless the current pane is inside it).
     SetWorkspaceRoot { workspace: WorkspaceId, root: Option<PathBuf> },
+    /// The app let go of these images; send them again if they're shown.
+    ForgetImages { ids: Vec<u64> },
     ToggleZoom { window: WindowId },
     SetRatio { window: WindowId, path: Vec<bool>, ratio: f32 },
 
@@ -306,6 +308,22 @@ pub enum ServerMessage {
     /// The server is exiting: sessions ended (`artty server stop`), or it's
     /// restarting and a new server will reopen them.
     Stopping { restart: bool },
+    /// An image that frames show (by id), sent before the first of them.
+    Image(ImageData),
+}
+
+/// An image's pixels and how big it's shown.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageData {
+    pub id: u64,
+    pub format: crate::vt::term::cell::ImageFormat,
+    /// The image file, or RGBA rows.
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// Size in cells.
+    pub columns: f32,
+    pub rows: f32,
 }
 
 /// Encode a control request for [`ClientMessage::Control`].

@@ -3,9 +3,13 @@
 //! programs, titles, tab stops and keyboard modes. Not kept: the selection,
 //! vi mode and damage (everything is redrawn).
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::color::COUNT;
+use super::cell::{Image, tile_serde};
 use super::{Config, KeyboardModes, TabStops, Term, TermMode};
 use crate::ansi::{CharsetIndex, CursorStyle, Rgb};
 use crate::event::EventListener;
@@ -14,6 +18,10 @@ use crate::index::Line;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TermSnapshot {
+    /// The images the grids show, each once. First: reading them makes them
+    /// available to the grids' cells, read next.
+    #[serde(deserialize_with = "read_images")]
+    images: Vec<Arc<Image>>,
     grid: GridSnapshot,
     inactive_grid: GridSnapshot,
     active_charset: CharsetIndex,
@@ -27,6 +35,15 @@ pub struct TermSnapshot {
     keyboard_mode_stack: Vec<u8>,
     inactive_keyboard_mode_stack: Vec<u8>,
     is_focused: bool,
+}
+
+fn read_images<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Arc<Image>>, D::Error> {
+    let images: Vec<Arc<Image>> = Vec::<Image>::deserialize(deserializer)?.into_iter().map(Arc::new).collect();
+    for image in &images {
+        Image::reserve_id(image.id);
+    }
+    tile_serde::restoring(images.clone());
+    Ok(images)
 }
 
 struct Size(usize, usize);
@@ -47,9 +64,17 @@ impl Dimensions for Size {
 
 impl<T: EventListener> Term<T> {
     pub fn snapshot(&self) -> TermSnapshot {
+        let (grid, inactive_grid) = (self.grid.snapshot(), self.inactive_grid.snapshot());
+        let images: HashMap<u64, Arc<Image>> = grid
+            .cells()
+            .chain(inactive_grid.cells())
+            .filter_map(|cell| cell.image())
+            .map(|tile| (tile.image.id, tile.image.clone()))
+            .collect();
         TermSnapshot {
-            grid: self.grid.snapshot(),
-            inactive_grid: self.inactive_grid.snapshot(),
+            images: images.into_values().collect(),
+            grid,
+            inactive_grid,
             active_charset: self.active_charset,
             tabs: self.tabs.tabs.clone(),
             mode: self.mode.bits(),
@@ -93,6 +118,7 @@ impl<T: EventListener> Term<T> {
             snapshot.inactive_keyboard_mode_stack.into_iter().map(KeyboardModes::from_bits_truncate).collect();
         term.is_focused = snapshot.is_focused;
         term.mark_fully_damaged();
+        tile_serde::done_restoring();
         term
     }
 }

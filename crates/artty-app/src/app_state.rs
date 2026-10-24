@@ -6,6 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use artty_core::control::{Request, Response};
@@ -35,6 +36,8 @@ pub struct Shared {
     replies: HashMap<u64, oneshot::Sender<Reply>>,
     controls: HashMap<u64, oneshot::Sender<Response>>,
     pub screens: HashMap<PaneId, Screen>,
+    /// Images screens show, by id (decoded off the main thread).
+    pub images: HashMap<u64, ShownImage>,
     pub panes: HashMap<PaneId, PaneState>,
     /// Visual bells: when each pane last rang.
     pub flashes: HashMap<PaneId, Instant>,
@@ -61,6 +64,65 @@ pub struct Shared {
 
 impl Global for Shared {}
 
+/// An image a screen shows: how big, in cells, and its pixels once decoded.
+pub struct ShownImage {
+    pub columns: f32,
+    pub rows: f32,
+    pub render: Option<Arc<gpui::RenderImage>>,
+}
+
+/// Keep an image the server sent, decoding it in the background.
+fn receive_image(image: artty_core::protocol::ImageData, cx: &mut App) {
+    let id = image.id;
+    cx.global_mut::<Shared>().images.insert(id, ShownImage { columns: image.columns, rows: image.rows, render: None });
+    let decoding = cx.background_spawn(async move { decode_image(image) });
+    cx.spawn(async move |cx| {
+        let render = decoding.await;
+        let _ = cx.update(|cx| {
+            if let (Some(render), Some(shown)) = (render, cx.global_mut::<Shared>().images.get_mut(&id)) {
+                shown.render = Some(Arc::new(render));
+                cx.refresh_windows();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Pixels GPUI can draw: BGRA, the first frame of an animation.
+fn decode_image(image: artty_core::protocol::ImageData) -> Option<gpui::RenderImage> {
+    use artty_core::vt::term::cell::ImageFormat;
+    let mut rgba = match image.format {
+        ImageFormat::Encoded => ::image::load_from_memory(&image.data)
+            .inspect_err(|err| log::warn!("image {}: {err}", image.id))
+            .ok()?
+            .into_rgba8(),
+        ImageFormat::Rgba => ::image::RgbaImage::from_raw(image.width, image.height, image.data)?,
+    };
+    for pixel in rgba.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    Some(gpui::RenderImage::new(vec![::image::Frame::new(rgba)]))
+}
+
+/// Let go of images no screen shows anymore, and tell the server, which
+/// sends them again if they come back.
+fn forget_unshown_images(cx: &mut App) {
+    let shared = cx.global_mut::<Shared>();
+    let shown: std::collections::HashSet<u64> = shared
+        .screens
+        .values()
+        .flat_map(|screen| screen.frame.lines.iter().flat_map(|line| line.images.iter().map(|span| span.image)))
+        .collect();
+    let gone: Vec<u64> = shared.images.keys().copied().filter(|id| !shown.contains(id)).collect();
+    if gone.is_empty() {
+        return;
+    }
+    for id in &gone {
+        shared.images.remove(id);
+    }
+    send(ClientMessage::ForgetImages { ids: gone }, cx);
+}
+
 fn modified(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok()?.modified().ok()
 }
@@ -84,6 +146,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
             Some((path, built))
         }),
         update_ready: false,
+        images: HashMap::new(),
         server_mismatch: None,
         build: std::env::current_exe().map(|exe| artty_core::protocol::build_id(&exe)).unwrap_or_default(),
         stopped: false,
@@ -99,6 +162,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
                 // Windows that closed since: detach them in the server.
                 window_view::flush_detached(cx);
                 check_for_update(cx);
+                forget_unshown_images(cx);
             });
             if alive.is_err() {
                 break;
@@ -367,6 +431,7 @@ fn handle(message: ServerMessage, cx: &mut App) {
             }
         }
         ServerMessage::Stopping { restart } => cx.global_mut::<Shared>().stopped = !restart,
+        ServerMessage::Image(image) => receive_image(image, cx),
     }
 }
 

@@ -87,6 +87,28 @@ pub struct PaintState<'a> {
     pub flash: f32,
 }
 
+/// Each run of image cells shows its part of the image: the whole image is
+/// drawn where its top left cell would be, clipped to those cells, so text
+/// written over part of it hides only that part.
+fn paint_images(origin: gpui::Point<Pixels>, frame: &Frame, metrics: &Metrics, window: &mut Window, cx: &App) {
+    let images = &cx.global::<crate::app_state::Shared>().images;
+    for (index, line) in frame.lines.iter().enumerate() {
+        for span in &line.images {
+            let Some(image) = images.get(&span.image) else { continue };
+            let Some(render) = image.render.clone() else { continue };
+            let top_left = point(
+                origin.x + metrics.cell_width * (span.column as f32 - f32::from(span.tile_column)),
+                origin.y + metrics.line_height * (index as f32 - f32::from(span.tile_row)),
+            );
+            let whole = Bounds::new(top_left, size(metrics.cell_width * image.columns, metrics.line_height * image.rows));
+            let cells = metrics.cell_bounds(origin, index, span.column, span.cells);
+            window.with_content_mask(Some(gpui::ContentMask { bounds: cells }), |window| {
+                let _ = window.paint_image(whole, gpui::Corners::default(), render, 0, false);
+            });
+        }
+    }
+}
+
 pub fn paint(
     bounds: Bounds<Pixels>,
     frame: &Frame,
@@ -100,7 +122,13 @@ pub fn paint(
     let faded = |color: Hsla| Hsla { a: color.a * (1. - fade), ..color };
 
     for (index, line) in frame.lines.iter().enumerate() {
-        for rect in line.backgrounds.iter().chain(&line.matches).chain(&line.selection) {
+        for rect in line.backgrounds.iter().chain(&line.matches) {
+            window.paint_quad(fill(metrics.cell_bounds(origin, index, rect.column, rect.width), faded(hsla(rect.color))));
+        }
+    }
+    paint_images(origin, frame, metrics, window, cx);
+    for (index, line) in frame.lines.iter().enumerate() {
+        for rect in &line.selection {
             window.paint_quad(fill(metrics.cell_bounds(origin, index, rect.column, rect.width), faded(hsla(rect.color))));
         }
     }

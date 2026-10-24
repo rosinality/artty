@@ -273,3 +273,41 @@ fn snapshots_carry_a_terminal_over_exactly() {
     assert_eq!(cell(&copy), cell(&term));
     assert_eq!(copy.mode(), term.mode());
 }
+
+/// A 1×1 PNG.
+const PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+#[test]
+fn inline_images_cover_cells_and_carry_over() {
+    use artty_vt::term::TermSnapshot;
+    let mut term = kitty_term();
+    let mut parser = Processor::<StdSyncHandler>::new();
+    // Four cells by two, not keeping the 1:1 aspect ratio, after some text.
+    parser.advance(&mut term, format!("ab\x1b]1337;File=inline=1;width=4;height=2;preserveAspectRatio=0:{PIXEL_PNG}\x07").as_bytes());
+    let grid = term.grid();
+    let tile = |line, column| grid[Line(line)][Column(column)].image().map(|t| (t.column, t.row));
+    assert_eq!(tile(0, 2), Some((0, 0)));
+    assert_eq!(tile(0, 5), Some((3, 0)));
+    assert_eq!(tile(1, 2), Some((0, 1)));
+    assert_eq!(tile(1, 6), None);
+    assert_eq!(grid[Line(0)][Column(2)].image().unwrap().image.width, 1);
+    // The cursor goes below the image, at the start of the line.
+    assert_eq!(grid.cursor.point, Point::new(Line(2), Column(0)));
+
+    // Not inline: nothing shown.
+    let before = term.grid().cursor.point;
+    parser.advance(&mut term, format!("\x1b]1337;File=name=eA==:{PIXEL_PNG}\x07").as_bytes());
+    assert_eq!(term.grid().cursor.point, before);
+
+    // A snapshot keeps the image once, and the cells pointing at it.
+    let json = serde_json::to_string(&term.snapshot()).unwrap();
+    assert_eq!(json.matches("\"width\":1,").count(), 1, "one copy of the image");
+    let snapshot: TermSnapshot = serde_json::from_str(&json).unwrap();
+    let copy = Term::from_snapshot(Config::default(), snapshot, Recorder::default());
+    assert_eq!(copy.grid()[Line(1)][Column(5)].image().map(|t| (t.column, t.row)), Some((3, 1)));
+
+    // Text written over part of it replaces that part only.
+    parser.advance(&mut term, b"\x1b[1;4HX");
+    assert!(term.grid()[Line(0)][Column(3)].image().is_none());
+    assert!(term.grid()[Line(0)][Column(4)].image().is_some());
+}

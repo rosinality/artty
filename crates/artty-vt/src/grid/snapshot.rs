@@ -21,6 +21,13 @@ pub struct GridSnapshot {
     saved_cursor: Cursor<Cell>,
 }
 
+impl GridSnapshot {
+    /// Every cell kept.
+    pub(crate) fn cells(&self) -> impl Iterator<Item = &Cell> {
+        self.rows.iter().flatten()
+    }
+}
+
 impl Grid<Cell> {
     pub fn snapshot(&self) -> GridSnapshot {
         let blank = Cell::default();

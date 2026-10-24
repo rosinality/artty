@@ -485,6 +485,9 @@ pub trait Handler {
     /// OSC 133 shell-integration mark (artty).
     fn shell_mark(&mut self, _: ShellMark) {}
 
+    /// iTerm2's `OSC 1337` (artty: inline images), parameters after `1337`.
+    fn iterm2(&mut self, _params: &[&[u8]]) {}
+
     /// OSC 9 / OSC 777 / OSC 99 desktop notification (artty).
     fn desktop_notification(&mut self, _title: Option<String>, _body: String) {}
 
@@ -1369,6 +1372,9 @@ where
         }
 
         match params[0] {
+            // iTerm2: inline images (artty).
+            b"1337" => self.handler.iterm2(&params[1..]),
+
             // Set window title.
             b"0" | b"2" => {
                 if params.len() >= 2 {

@@ -57,3 +57,12 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   - `event_loop.rs`: `Msg::Freeze` stops the reader with everything read
     parsed, until resumed or the process is replaced; a failed PTY read now
     reports `Event::Exit` instead of ending the reader silently.
+- Images (artty), `term/image.rs`: iTerm2 inline images (`OSC 1337;File=`,
+  and `MultipartFile`/`FilePart`/`FileEnd`), sized from `width`/`height`
+  (cells, `px`, `%`, `auto`) and the cell size (`Term::set_cell_size`). An
+  image lives in the cells it covers: `CellExtra` holds an `ImageTile` (an
+  `Arc<Image>` and which cell of it), so scrolling, clearing, overwriting and
+  the scrollback limit handle images like text, and the data goes with the
+  last cell showing it. `Term::place_image` puts one at the cursor.
+  Snapshots carry each image once (tiles serialize as ids). Tests:
+  `tests/artty.rs`, `term::image`.

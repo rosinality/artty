@@ -215,6 +215,13 @@ use OSC 133 marks from the shell. fish 4 sends them natively; artty sets up zsh
 and bash automatically (your startup files still load as usual). Elsewhere —
 over ssh, say — `artty shell-integration zsh|bash` prints a script to source.
 
+## Images
+
+Programs can show images in the terminal with iTerm2's inline image protocol
+(`imgcat`, and the many tools that support it): an image takes up the cells
+it covers, scrolls with the text, and goes when cleared or overwritten.
+Kitty's graphics protocol and sixel are next.
+
 ## Layout
 
 | Crate | |
