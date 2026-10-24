@@ -51,6 +51,11 @@ const TITLE_STACK_MAX_DEPTH: usize = 4096;
 pub const SEMANTIC_ESCAPE_CHARS: &str = ",│`|:\"' ()[]{}<>\t";
 
 
+/// Regional indicators: in pairs, they spell a flag.
+fn is_regional_indicator(c: char) -> bool {
+    ('\u{1f1e6}'..='\u{1f1ff}').contains(&c)
+}
+
 /// Asks for the emoji presentation of the character before it.
 const VARIATION_SELECTOR_16: char = '\u{fe0f}';
 
@@ -335,6 +340,11 @@ pub struct Term<T> {
     /// Kitty graphics: images kept for display, and a transfer under way.
     kitty: kitty::KittyState,
 
+    /// Where the shell's prompt starts (a stable line, see
+    /// `Grid::lines_scrolled`), from its prompt mark until a command runs
+    /// (artty): a resize then leaves the prompt for the shell to redraw.
+    prompt_line: Option<u64>,
+
     /// The stack for the keyboard modes.
     keyboard_mode_stack: Vec<KeyboardModes>,
 
@@ -460,6 +470,7 @@ impl<T> Term<T> {
             cell_size: (8, 16),
             pending_image: None,
             kitty: Default::default(),
+            prompt_line: None,
             is_focused: Default::default(),
             selection: Default::default(),
             title: Default::default(),
@@ -700,8 +711,12 @@ impl<T> Term<T> {
         self.vi_mode_cursor.point.line += delta;
 
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
+        let prompt = if old_cols != num_cols && !is_alt { self.hand_back_prompt() } else { None };
         self.grid.resize(!is_alt, num_lines, num_cols);
         self.inactive_grid.resize(is_alt, num_lines, num_cols);
+        if let Some(rows_below) = prompt {
+            self.restore_prompt_cursor(rows_below);
+        }
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {
@@ -989,7 +1004,28 @@ impl<T> Term<T> {
         }
         let base = &self.grid[point.line][point.column - 1];
         let plain = !base.flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER) && base.zerowidth().is_none();
-        if !plain || [base.c, VARIATION_SELECTOR_16].iter().collect::<String>().width() != 2 {
+        if plain && [base.c, VARIATION_SELECTOR_16].iter().collect::<String>().width() == 2 {
+            self.widen_previous();
+        }
+    }
+
+    /// Whether the cell before the cursor holds a regional indicator not yet
+    /// paired into a flag (artty).
+    fn after_lone_regional_indicator(&self) -> bool {
+        let point = self.grid.cursor.point;
+        if self.grid.cursor.input_needs_wrap || point.column.0 == 0 {
+            return false;
+        }
+        let cell = &self.grid[point.line][point.column - 1];
+        is_regional_indicator(cell.c) && cell.zerowidth().is_none() && !cell.flags.contains(Flags::WIDE_CHAR)
+    }
+
+    /// Make the one-cell character before the cursor two cells wide
+    /// (artty), the cell under the cursor becoming its spacer. Not at the end
+    /// of a line, where there's no room.
+    fn widen_previous(&mut self) {
+        let point = self.grid.cursor.point;
+        if self.grid.cursor.input_needs_wrap || point.column.0 == 0 {
             return;
         }
         self.grid[point.line][point.column - 1].flags.insert(Flags::WIDE_CHAR);
@@ -1002,6 +1038,47 @@ impl<T> Term<T> {
         } else {
             self.grid.cursor.input_needs_wrap = true;
         }
+    }
+
+    /// Before a reflow at a prompt (artty): the shell is about to redraw its
+    /// prompt, moving up as many rows as it took at the old width. Reflowed,
+    /// those rows would no longer line up, and pieces of old prompts would
+    /// stay behind. So the prompt, from its first row down, is cleared and
+    /// left to the shell, as kitty does; the cursor goes to its start for
+    /// the reflow. Returns how many rows below that start the cursor was.
+    fn hand_back_prompt(&mut self) -> Option<i32> {
+        let stable = self.prompt_line?;
+        let line = i32::try_from(stable as i64 - self.grid.lines_scrolled() as i64).ok()?;
+        let cursor = self.grid.cursor.point.line.0;
+        // Only a prompt starting on screen: the cursor can't go into history.
+        if line < 0 || line > cursor {
+            return None;
+        }
+        let template = Cell::default();
+        for row in line..self.screen_lines() as i32 {
+            self.grid[Line(row)].reset(&template);
+        }
+        // Nothing above runs on into it.
+        if line > self.topmost_line().0 {
+            let last = self.last_column();
+            self.grid[Line(line - 1)][last].flags.remove(Flags::WRAPLINE);
+        }
+        self.grid.cursor.point = Point::new(Line(line), Column(0));
+        self.grid.cursor.input_needs_wrap = false;
+        Some(cursor - line)
+    }
+
+    /// After that reflow: the cursor goes as many rows below the prompt's
+    /// start as it was before, the count the shell moves up by (scrolling if
+    /// the screen ends first).
+    fn restore_prompt_cursor(&mut self, rows_below: i32) {
+        let bottom = self.screen_lines() as i32 - 1;
+        let target = self.grid.cursor.point.line.0 + rows_below;
+        if target > bottom {
+            let region = Line(0)..Line(self.screen_lines() as i32);
+            self.grid.scroll_up(&region, (target - bottom) as usize);
+        }
+        self.grid.cursor.point = Point::new(Line(target.min(bottom)), Column(0));
     }
 
     /// Go back to the configured cursor shape, whatever a program chose
@@ -1162,11 +1239,16 @@ impl<T: EventListener> Handler for Term<T> {
         if c == VARIATION_SELECTOR_16 {
             self.widen_previous_for_emoji();
         }
+        // artty: two regional indicators are one flag (🇰 🇷 → 🇰🇷), two cells.
+        let flag = is_regional_indicator(c) && self.after_lone_regional_indicator();
+        if flag {
+            self.widen_previous();
+        }
 
         // Handle zero-width characters, and characters that join the previous
         // grapheme: emoji after a zero-width joiner and skin-tone modifiers
         // (artty: 👨‍👩‍👧 takes two cells, like in Ghostty and kitty).
-        if width == 0 || self.joins_previous(c) {
+        if width == 0 || flag || self.joins_previous(c) {
             let point = self.previous_cell();
             self.grid[point].push_zerowidth(c);
             return;
@@ -2379,6 +2461,13 @@ impl<T: EventListener> Handler for Term<T> {
             self.reset_cursor_style();
         }
         let cursor = self.grid.cursor.point;
+        match mark {
+            ShellMark::PromptStart => {
+                self.prompt_line = Some((self.grid.lines_scrolled() as i64 + i64::from(cursor.line.0)).max(0) as u64)
+            },
+            ShellMark::CommandExecuted => self.prompt_line = None,
+            _ => {},
+        }
         let line = (self.grid.lines_scrolled() as i64 + i64::from(cursor.line.0)).max(0) as u64;
         self.event_proxy.send_event(Event::ShellMark { mark, line, column: cursor.column.0 });
     }

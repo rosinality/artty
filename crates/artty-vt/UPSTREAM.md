@@ -87,3 +87,11 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   answer — and XTVERSION (`CSI > q`) reports `artty <version>`. A shell
   prompt mark also forgets a cursor shape a program chose
   (`Term::reset_cursor_style`), as with keyboard modes.
+- `term/mod.rs`: prompt-aware reflow. The prompt mark's line is kept until
+  a command runs; when the columns change at a prompt, the prompt (its first
+  row down) is cleared and left to the shell, and after the reflow the
+  cursor goes as many rows below its start as before — the count zsh, bash
+  and fish move up by when they redraw — so no pieces of old prompts stay
+  behind (as kitty does; tty7 does likewise). Only a prompt starting on
+  screen. Test: `tests/artty.rs`.
+- `term/mod.rs`: two regional indicators make one flag (🇰🇷), two cells.

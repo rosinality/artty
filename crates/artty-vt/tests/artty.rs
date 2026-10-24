@@ -424,3 +424,51 @@ fn unpadded_base64_is_accepted() {
     assert_eq!(replies(&events), ["\x1b_Gi=5;OK\x1b\\"]);
     assert!(term.grid()[Line(0)][Column(0)].image().is_some());
 }
+
+#[test]
+fn narrowing_at_a_prompt_leaves_no_old_prompt_behind() {
+    let text = |term: &Term<Recorder>| {
+        let grid = term.grid();
+        (0..grid.screen_lines() as i32)
+            .map(|line| (0..grid.columns()).map(|c| grid[Line(line)][Column(c)].c).collect::<String>().trim_end().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let prompt = format!("$ {}", "x".repeat(30));
+    let mut term = Term::new(Config::default(), &Size(20, 6), Recorder::default());
+    let mut parser = Processor::<StdSyncHandler>::new();
+    // Some output, then a prompt whose command wraps onto a second row.
+    parser.advance(&mut term, format!("out\r\n\x1b]133;A\x07{prompt}").as_bytes());
+    term.resize(Size(10, 6));
+    // The shell redraws as zsh does: up the rows it used at the old width
+    // (one), to the line start, clear below, and draw again.
+    parser.advance(&mut term, format!("\x1b[1A\r\x1b[J{prompt}").as_bytes());
+
+    // As if the terminal had been 10 wide all along.
+    let mut fresh = Term::new(Config::default(), &Size(10, 6), Recorder::default());
+    Processor::<StdSyncHandler>::new().advance(&mut fresh, format!("out\r\n{prompt}").as_bytes());
+    assert_eq!(text(&term), text(&fresh));
+}
+
+#[test]
+fn regional_indicator_pairs_are_flags() {
+    use artty_vt::term::cell::Flags;
+    let (term, _) = run("🇰🇷x🇺🇸🇫y".as_bytes(), 3);
+    let row = &term.grid()[Line(0)];
+    assert_eq!((row[Column(0)].c, row[Column(0)].zerowidth()), ('🇰', Some(&['🇷'][..])));
+    assert!(row[Column(0)].flags.contains(Flags::WIDE_CHAR));
+    assert!(row[Column(1)].flags.contains(Flags::WIDE_CHAR_SPACER));
+    assert_eq!(row[Column(2)].c, 'x');
+    assert_eq!((row[Column(3)].c, row[Column(3)].zerowidth()), ('🇺', Some(&['🇸'][..])));
+    // A third indicator starts a new (here, unfinished) flag.
+    assert_eq!((row[Column(5)].c, row[Column(5)].zerowidth()), ('🇫', None));
+    assert_eq!(row[Column(6)].c, 'y');
+}
+
+#[test]
+fn a_prompt_scrolled_off_screen_reflows_as_usual() {
+    // A command so long its prompt's first row is in history by now.
+    let (mut term, _) = run(format!("\x1b]133;A\x07$ {}", "y".repeat(90)).as_bytes(), 3);
+    term.resize(Size(7, 3));
+    term.resize(Size(30, 3));
+    assert_eq!(term.columns(), 30);
+}

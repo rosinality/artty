@@ -35,6 +35,8 @@ pub struct TermSnapshot {
     keyboard_mode_stack: Vec<u8>,
     inactive_keyboard_mode_stack: Vec<u8>,
     is_focused: bool,
+    #[serde(default)]
+    prompt_line: Option<u64>,
 }
 
 fn read_images<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Arc<Image>>, D::Error> {
@@ -86,6 +88,7 @@ impl<T: EventListener> Term<T> {
             keyboard_mode_stack: self.keyboard_mode_stack.iter().map(|m| m.bits()).collect(),
             inactive_keyboard_mode_stack: self.inactive_keyboard_mode_stack.iter().map(|m| m.bits()).collect(),
             is_focused: self.is_focused,
+            prompt_line: self.prompt_line,
         }
     }
 
@@ -117,6 +120,7 @@ impl<T: EventListener> Term<T> {
         term.inactive_keyboard_mode_stack =
             snapshot.inactive_keyboard_mode_stack.into_iter().map(KeyboardModes::from_bits_truncate).collect();
         term.is_focused = snapshot.is_focused;
+        term.prompt_line = snapshot.prompt_line;
         term.mark_fully_damaged();
         tile_serde::done_restoring();
         term
