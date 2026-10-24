@@ -208,11 +208,21 @@ impl<T: EventListener> Term<T> {
             b'f' | b't' => {
                 let path = String::from_utf8(decoded).map_err(|_| "EINVAL:bad file name".to_owned())?;
                 let path = std::path::Path::new(&path);
-                let size = std::fs::metadata(path).map_err(|err| format!("EBADF:{err}"))?.len() as usize;
+                // Only an ordinary file: never a device or FIFO (which could
+                // hang the reader), nor anything under /dev, /proc or /sys.
+                // Errors don't say more than that, as a program over ssh
+                // could otherwise learn which local paths exist.
+                let refused = || "EBADF:not a regular file".to_owned();
+                let special = ["/dev", "/proc", "/sys"].iter().any(|dir| path.starts_with(dir));
+                let metadata = std::fs::metadata(path).map_err(|_| refused())?;
+                if special || !path.is_absolute() || !metadata.is_file() {
+                    return Err(refused());
+                }
+                let size = metadata.len() as usize;
                 if size > MAX_IMAGE {
                     return Err("EFBIG:image too large".to_owned());
                 }
-                let data = std::fs::read(path).map_err(|err| format!("EBADF:{err}"))?;
+                let data = std::fs::read(path).map_err(|_| refused())?;
                 // A temporary file is ours to delete, if it looks like one.
                 let temporary = path.to_string_lossy().contains("tty-graphics-protocol")
                     && (path.starts_with(std::env::temp_dir()) || path.starts_with("/tmp"));

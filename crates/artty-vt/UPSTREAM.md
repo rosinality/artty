@@ -95,3 +95,7 @@ only its `ansi` layer is vendored, so OSC sequences it ignores can be handled he
   behind (as kitty does; tty7 does likewise). Only a prompt starting on
   screen. Test: `tests/artty.rs`.
 - `term/mod.rs`: two regional indicators make one flag (🇰🇷), two cells.
+- `vte/mod.rs`: OSC strings are capped at 64 MB (vte's std build had no
+  limit): past it they're dropped when they end. `term/kitty.rs`: file
+  transfers read only absolute paths to regular files outside /dev, /proc
+  and /sys, and errors don't tell why.

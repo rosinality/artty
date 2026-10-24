@@ -14,6 +14,10 @@ const MAX_INTERMEDIATES: usize = 2;
 const MAX_OSC_PARAMS: usize = 16;
 /// Longer APC strings are dropped (artty): a kitty image chunk can be large.
 const MAX_APC: usize = 64 << 20;
+/// Longer OSC strings are dropped (artty): large enough for inline images,
+/// but an unterminated OSC (say, from `cat` of a binary file) can't grow the
+/// server's memory without end.
+const MAX_OSC: usize = 64 << 20;
 
 /// Parser for raw _VTE_ protocol which delegates actions to a [`Perform`]
 ///
@@ -34,6 +38,8 @@ pub struct Parser {
     /// An APC string so far (artty), and whether it got too long.
     apc: Vec<u8>,
     apc_overflow: bool,
+    /// The OSC string under way got too long (artty).
+    osc_overflow: bool,
 }
 
 impl Parser {
@@ -325,6 +331,7 @@ impl Parser {
             0x5D => {
                 self.osc_raw.clear();
                 self.osc_num_params = 0;
+                self.osc_overflow = false;
                 self.state = State::OscString
             },
             0x5E => self.state = State::SosPmApcString,
@@ -522,14 +529,25 @@ impl Parser {
 
     #[inline(always)]
     fn action_osc_put(&mut self, byte: u8) {
-        self.osc_raw.push(byte);
+        if self.osc_raw.len() < MAX_OSC {
+            self.osc_raw.push(byte);
+        } else {
+            self.osc_overflow = true;
+        }
     }
 
     fn osc_end<P: Perform>(&mut self, performer: &mut P, byte: u8) {
         self.action_osc_put_param();
-        self.osc_dispatch(performer, byte);
+        if !self.osc_overflow {
+            self.osc_dispatch(performer, byte);
+        }
         self.osc_raw.clear();
         self.osc_num_params = 0;
+        self.osc_overflow = false;
+        // Don't hold on to a large image's worth of memory.
+        if self.osc_raw.capacity() > 1 << 20 {
+            self.osc_raw = Vec::new();
+        }
     }
 
     /// Reset escape sequence parameters and intermediates.

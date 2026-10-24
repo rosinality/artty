@@ -472,3 +472,26 @@ fn a_prompt_scrolled_off_screen_reflows_as_usual() {
     term.resize(Size(30, 3));
     assert_eq!(term.columns(), 30);
 }
+
+#[test]
+fn an_unterminated_osc_is_capped_and_dropped() {
+    // 64 MB is the cap; a little over it, then the end: nothing dispatched,
+    // and the parser carries on.
+    let mut bytes = b"\x1b]0;".to_vec();
+    bytes.resize(bytes.len() + (64 << 20) + 16, b'x');
+    bytes.extend_from_slice(b"\x07\x1b]0;after\x07ok");
+    let (term, events) = run(&bytes, 3);
+    let titles: Vec<_> = events.iter().filter(|e| matches!(e, Event::Title(_))).collect();
+    assert_eq!(titles.len(), 1, "only the later title");
+    assert_eq!(term.grid()[Line(0)][Column(0)].c, 'o');
+}
+
+#[test]
+fn kitty_file_transfer_only_reads_regular_files() {
+    use base64::Engine;
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s);
+    for path in ["/dev/zero", "/etc", "relative.png", "/no/such/file"] {
+        let (_, events) = run(format!("\x1b_Ga=q,t=f,f=100,i=4;{}\x1b\\", b64(path)).as_bytes(), 3);
+        assert_eq!(replies(&events), ["\x1b_Gi=4;EBADF:not a regular file\x1b\\"], "{path}");
+    }
+}
