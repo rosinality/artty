@@ -133,20 +133,20 @@ struct Style {
 }
 
 impl Frame {
-    pub(crate) fn capture<T: EventListener>(term: &Term<T>, theme: &Theme, matches: &[Match]) -> Self {
+    pub(crate) fn capture<T: EventListener>(
+        term: &Term<T>,
+        theme: &Theme,
+        matches: &[Match],
+    ) -> Self {
         let content = term.renderable_content();
         let colors = content.colors;
         let selection = content.selection;
         let (cursor_point, cursor_shape) = (content.cursor.point, content.cursor.shape);
         let display_offset = content.display_offset;
-        let background = theme.resolve(
-            artty_vt::ansi::Color::Named(artty_vt::ansi::NamedColor::Background),
-            colors,
-        );
-        let foreground = theme.resolve(
-            artty_vt::ansi::Color::Named(artty_vt::ansi::NamedColor::Foreground),
-            colors,
-        );
+        let background = theme
+            .resolve(artty_vt::ansi::Color::Named(artty_vt::ansi::NamedColor::Background), colors);
+        let foreground = theme
+            .resolve(artty_vt::ansi::Color::Named(artty_vt::ansi::NamedColor::Foreground), colors);
 
         let screen_lines = term.screen_lines();
         let mut lines = vec![FrameLine::default(); screen_lines];
@@ -163,7 +163,7 @@ impl Frame {
                 continue;
             }
             match &mut builder {
-                Some((current, _)) if *current == line => {}
+                Some((current, _)) if *current == line => {},
                 _ => {
                     if let Some((done, b)) = builder.take() {
                         lines[done] = b.finish();
@@ -171,7 +171,7 @@ impl Frame {
                     builder = Some((line, LineBuilder::default()));
                     placeholders = PlaceholderLine::default();
                     last_placeholder = None;
-                }
+                },
             }
             let (_, b) = builder.as_mut().unwrap();
             let selected =
@@ -192,7 +192,11 @@ impl Frame {
                 if let Some((placeholder, image)) =
                     decoded.and_then(|p| Some((p, term.placeholder_image(p.image)?)))
                 {
-                    let tile = ImageTile { image, column: placeholder.column as u16, row: placeholder.row as u16 };
+                    let tile = ImageTile {
+                        image,
+                        column: placeholder.column as u16,
+                        row: placeholder.row as u16,
+                    };
                     b.image(column, &tile);
                     images.entry(tile.image.id).or_insert_with(|| tile.image.clone());
                 }
@@ -226,11 +230,23 @@ impl Frame {
                 let Some(frame_line) = lines.get_mut(line) else { continue };
                 let first = if grid_line == start.line.0 { start.column.0 } else { 0 };
                 let last = if grid_line == end.line.0 { end.column.0 } else { columns - 1 };
-                frame_line.matches.push(FrameRect { column: first, width: last + 1 - first, color: theme.search_match });
+                frame_line.matches.push(FrameRect {
+                    column: first,
+                    width: last + 1 - first,
+                    color: theme.search_match,
+                });
             }
         }
 
-        Frame { columns, lines, cursor, display_offset, background, foreground, images: images.into_values().collect() }
+        Frame {
+            columns,
+            lines,
+            cursor,
+            display_offset,
+            background,
+            foreground,
+            images: images.into_values().collect(),
+        }
     }
 }
 
@@ -252,7 +268,7 @@ impl LineBuilder {
                     && usize::from(span.tile_column) + span.cells == usize::from(tile.column) =>
             {
                 span.cells += 1;
-            }
+            },
             _ => self.line.images.push(FrameImage {
                 column,
                 cells: 1,
@@ -301,7 +317,7 @@ impl LineBuilder {
             match self.line.backgrounds.last_mut() {
                 Some(rect) if rect.color == bg && rect.column + rect.width == column => {
                     rect.width += width;
-                }
+                },
                 _ => self.line.backgrounds.push(FrameRect { column, width, color: bg }),
             }
         }
@@ -310,20 +326,26 @@ impl LineBuilder {
         if let Some(style) = UnderlineStyle::of(flags) {
             let color = cell.underline_color().map_or(fg, |color| theme.resolve(color, colors));
             match self.line.underlines.last_mut() {
-                Some(u) if u.style == style && u.color == color && u.column + u.width == column => u.width += width,
+                Some(u) if u.style == style && u.color == color && u.column + u.width == column => {
+                    u.width += width
+                },
                 _ => self.line.underlines.push(FrameUnderline { column, width, style, color }),
             }
         }
 
         // Placeholders (kitty's, for images in tmux) show an image, not a glyph.
-        if cell.c == ' ' && cell.zerowidth().is_none() || flags.contains(Flags::HIDDEN) || cell.c == PLACEHOLDER {
+        if cell.c == ' ' && cell.zerowidth().is_none()
+            || flags.contains(Flags::HIDDEN)
+            || cell.c == PLACEHOLDER
+        {
             // Blank cells only matter as a gap: end the run unless it can absorb
             // the space and stay on the grid.
             if let Some((run, _)) = &mut self.run
-                && run.column + run.text.len() == column {
-                    run.text.push(' ');
-                    return;
-                }
+                && run.column + run.text.len() == column
+            {
+                run.text.push(' ');
+                return;
+            }
             self.flush();
             return;
         }
@@ -336,15 +358,14 @@ impl LineBuilder {
         };
         let ascii = cell.c.is_ascii() && cell.zerowidth().is_none();
 
-        if ascii
-            && let Some((run, run_style)) = &mut self.run {
-                // `text.len()` equals the cell count only for all-ASCII runs,
-                // which are the only runs we ever extend.
-                if *run_style == style && run.column + run.text.len() == column {
-                    run.text.push(cell.c);
-                    return;
-                }
+        if ascii && let Some((run, run_style)) = &mut self.run {
+            // `text.len()` equals the cell count only for all-ASCII runs,
+            // which are the only runs we ever extend.
+            if *run_style == style && run.column + run.text.len() == column {
+                run.text.push(cell.c);
+                return;
             }
+        }
 
         self.flush();
         let mut text = String::from(cell.c);
@@ -426,7 +447,11 @@ mod tests {
                 .as_bytes(),
         );
         let spans = |line: usize| {
-            frame.lines[line].images.iter().map(|i| (i.column, i.cells, i.tile_column, i.tile_row)).collect::<Vec<_>>()
+            frame.lines[line]
+                .images
+                .iter()
+                .map(|i| (i.column, i.cells, i.tile_column, i.tile_row))
+                .collect::<Vec<_>>()
         };
         assert_eq!(spans(0), vec![(0, 2, 0, 0)]);
         assert_eq!(spans(1), vec![(0, 2, 0, 1)]);
@@ -441,18 +466,27 @@ mod tests {
              \x1b[38;5;7m\u{10eeee}\u{305}\u{10eeee}\u{10eeee}"
                 .as_bytes(),
         );
-        assert_eq!(frame.lines[0].images.iter().map(|i| (i.column, i.cells)).collect::<Vec<_>>(), vec![(0, 3)]);
+        assert_eq!(
+            frame.lines[0].images.iter().map(|i| (i.column, i.cells)).collect::<Vec<_>>(),
+            vec![(0, 3)]
+        );
     }
 
     #[test]
     fn underlines_keep_their_style_and_color() {
         // Curly in red (as editors mark errors), then a double underline (4:2),
         // then a plain one across spaces.
-        let frame = frame_for(b"\x1b[4:3;58:2::255:0:0mab\x1b[0m \x1b[4:2mc\x1b[0m \x1b[4m  \x1b[0m");
-        let underlines: Vec<_> = frame.lines[0].underlines.iter().map(|u| (u.column, u.width, u.style)).collect();
+        let frame =
+            frame_for(b"\x1b[4:3;58:2::255:0:0mab\x1b[0m \x1b[4:2mc\x1b[0m \x1b[4m  \x1b[0m");
+        let underlines: Vec<_> =
+            frame.lines[0].underlines.iter().map(|u| (u.column, u.width, u.style)).collect();
         assert_eq!(
             underlines,
-            vec![(0, 2, UnderlineStyle::Curly), (3, 1, UnderlineStyle::Double), (5, 2, UnderlineStyle::Single)]
+            vec![
+                (0, 2, UnderlineStyle::Curly),
+                (3, 1, UnderlineStyle::Double),
+                (5, 2, UnderlineStyle::Single)
+            ]
         );
         assert_eq!(frame.lines[0].underlines[0].color, Rgb { r: 255, g: 0, b: 0 });
         // Without a color of its own, an underline takes the text's.
@@ -477,14 +511,19 @@ mod tests {
     #[test]
     fn flags_and_emoji_sequences_are_single_runs() {
         let frame = frame_for("🇰🇷🇯🇵 👨\u{200d}👩\u{200d}👧!".as_bytes());
-        let runs: Vec<_> = frame.lines[0].runs.iter().map(|r| (r.column, r.cells, r.text.as_str())).collect();
-        assert_eq!(runs, vec![(0, 2, "🇰🇷"), (2, 2, "🇯🇵"), (5, 2, "👨\u{200d}👩\u{200d}👧"), (7, 1, "!")]);
+        let runs: Vec<_> =
+            frame.lines[0].runs.iter().map(|r| (r.column, r.cells, r.text.as_str())).collect();
+        assert_eq!(
+            runs,
+            vec![(0, 2, "🇰🇷"), (2, 2, "🇯🇵"), (5, 2, "👨\u{200d}👩\u{200d}👧"), (7, 1, "!")]
+        );
     }
 
     #[test]
     fn only_non_default_backgrounds_are_reported() {
         let frame = frame_for(b"x\x1b[44mbg\x1b[0my");
-        let rects: Vec<_> = frame.lines[0].backgrounds.iter().map(|r| (r.column, r.width)).collect();
+        let rects: Vec<_> =
+            frame.lines[0].backgrounds.iter().map(|r| (r.column, r.width)).collect();
         assert_eq!(rects, vec![(1, 2)]);
     }
 
@@ -496,7 +535,8 @@ mod tests {
         let size = TerminalSize { columns: 20, lines: 3, cell_width: 8, cell_height: 16 };
         let mut term = Term::new(Config::default(), &size, VoidListener);
         Processor::<artty_vt::ansi::StdSyncHandler>::new().advance(&mut term, b"hello world");
-        let mut selection = Selection::new(SelectionType::Simple, Point::new(Line(0), Column(1)), Side::Left);
+        let mut selection =
+            Selection::new(SelectionType::Simple, Point::new(Line(0), Column(1)), Side::Left);
         selection.update(Point::new(Line(0), Column(4)), Side::Right);
         term.selection = Some(selection);
 

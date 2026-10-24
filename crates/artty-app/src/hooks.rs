@@ -95,7 +95,10 @@ impl Status {
 }
 
 pub fn agent(id: &str) -> Result<&'static Agent, String> {
-    AGENTS.iter().find(|agent| agent.id == id).ok_or_else(|| format!("unknown agent {id} (claude, codex or gemini)"))
+    AGENTS
+        .iter()
+        .find(|agent| agent.id == id)
+        .ok_or_else(|| format!("unknown agent {id} (claude, codex or gemini)"))
 }
 
 fn home() -> Result<PathBuf, String> {
@@ -111,12 +114,22 @@ impl Agent {
     /// The hooks to add, keyed by event. They do nothing outside artty.
     pub fn entries(&self) -> Value {
         let command = |state: &str| {
-            let report = format!("[ -n \"$ARTTY_SOCKET\" ] && artty status {state} --hook --agent {}", self.id);
-            if self.json_output { format!("{report} >/dev/null; echo '{{}}'") } else { format!("{report} || true") }
+            let report = format!(
+                "[ -n \"$ARTTY_SOCKET\" ] && artty status {state} --hook --agent {}",
+                self.id
+            );
+            if self.json_output {
+                format!("{report} >/dev/null; echo '{{}}'")
+            } else {
+                format!("{report} || true")
+            }
         };
         let mut hooks = Map::new();
         for (event, state) in self.events {
-            hooks.insert((*event).to_owned(), json!([{ "hooks": [{ "type": "command", "command": command(state) }] }]));
+            hooks.insert(
+                (*event).to_owned(),
+                json!([{ "hooks": [{ "type": "command", "command": command(state) }] }]),
+            );
         }
         Value::Object(hooks)
     }
@@ -147,8 +160,13 @@ impl Agent {
         let mut found = 0;
         let mut current = true;
         for (event, entries) in wanted {
-            let installed: Vec<&Value> =
-                hooks.and_then(|h| h.get(event)).and_then(Value::as_array).into_iter().flatten().filter(|e| ours(e)).collect();
+            let installed: Vec<&Value> = hooks
+                .and_then(|h| h.get(event))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|e| ours(e))
+                .collect();
             found += installed.len();
             current &= installed.iter().copied().eq(entries.as_array().unwrap().iter());
         }
@@ -174,13 +192,18 @@ impl Agent {
         }
         let path = self.path_in(home);
         let mut settings = read(&path)?;
-        let root = settings.as_object_mut().ok_or(format!("{} is not a JSON object", path.display()))?;
+        let root =
+            settings.as_object_mut().ok_or(format!("{} is not a JSON object", path.display()))?;
         let hooks = root.entry("hooks").or_insert_with(|| json!({}));
-        let hooks = hooks.as_object_mut().ok_or(format!("{}: \"hooks\" is not an object", path.display()))?;
+        let hooks = hooks
+            .as_object_mut()
+            .ok_or(format!("{}: \"hooks\" is not an object", path.display()))?;
         remove_ours(hooks);
         for (event, entries) in self.entries().as_object().unwrap() {
             let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
-            let list = list.as_array_mut().ok_or(format!("{}: hooks.{event} is not a list", path.display()))?;
+            let list = list
+                .as_array_mut()
+                .ok_or(format!("{}: hooks.{event} is not a list", path.display()))?;
             list.extend(entries.as_array().unwrap().iter().cloned());
         }
         let backup = write(&path, &settings)?;
@@ -205,7 +228,9 @@ impl Agent {
         }
         let path = self.path_in(home);
         let mut settings = read(&path)?;
-        let Some(root) = settings.as_object_mut() else { return Err(format!("{} is not a JSON object", path.display())) };
+        let Some(root) = settings.as_object_mut() else {
+            return Err(format!("{} is not a JSON object", path.display()));
+        };
         if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
             remove_ours(hooks);
             if hooks.is_empty() {
@@ -271,16 +296,25 @@ pub fn install(ids: &[&str]) -> Result<String, String> {
     if agents.is_empty() {
         return Err("no supported agent found (~/.claude, ~/.codex or ~/.gemini)".into());
     }
-    Ok(agents.iter().map(|agent| agent.install().unwrap_or_else(|err| err)).collect::<Vec<_>>().join("\n"))
+    Ok(agents
+        .iter()
+        .map(|agent| agent.install().unwrap_or_else(|err| err))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 /// Uninstall from the named agents, or wherever artty's hooks are.
 pub fn uninstall(ids: &[&str]) -> Result<String, String> {
-    let agents = select(ids, |agent| matches!(agent.status(), Status::Installed | Status::Outdated))?;
+    let agents =
+        select(ids, |agent| matches!(agent.status(), Status::Installed | Status::Outdated))?;
     if agents.is_empty() {
         return Ok("no artty hooks are installed".into());
     }
-    Ok(agents.iter().map(|agent| agent.uninstall().unwrap_or_else(|err| err)).collect::<Vec<_>>().join("\n"))
+    Ok(agents
+        .iter()
+        .map(|agent| agent.uninstall().unwrap_or_else(|err| err))
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 #[cfg(test)]
@@ -288,7 +322,8 @@ mod tests {
     use super::*;
 
     fn scratch_home(name: &str) -> PathBuf {
-        let home = std::env::temp_dir().join(format!("artty-hooks-test-{name}-{}", std::process::id()));
+        let home =
+            std::env::temp_dir().join(format!("artty-hooks-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         home
@@ -298,7 +333,10 @@ mod tests {
     fn commands_are_guarded_and_named() {
         let claude = agent("claude").unwrap().entries();
         let command = claude["Notification"][0]["hooks"][0]["command"].as_str().unwrap();
-        assert_eq!(command, "[ -n \"$ARTTY_SOCKET\" ] && artty status waiting --hook --agent claude || true");
+        assert_eq!(
+            command,
+            "[ -n \"$ARTTY_SOCKET\" ] && artty status waiting --hook --agent claude || true"
+        );
         let gemini = agent("gemini").unwrap().entries();
         let command = gemini["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap();
         assert!(command.ends_with(">/dev/null; echo '{}'"), "{command}");
@@ -322,7 +360,10 @@ mod tests {
 
         claude.uninstall_in(&home).unwrap();
         assert_eq!(claude.status_in(&home), Status::NotInstalled);
-        let back: Value = serde_json::from_str(&std::fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
+        let back: Value = serde_json::from_str(
+            &std::fs::read_to_string(home.join(".claude/settings.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(back, mine, "uninstall leaves exactly the user's settings");
         let _ = std::fs::remove_dir_all(home);
     }

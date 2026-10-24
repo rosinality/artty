@@ -43,8 +43,19 @@ pub fn protocol_version() -> u32 {
         backgrounds: vec![FrameRect { column: 6, width: 7, color: Rgb { r: 8, g: 9, b: 10 } }],
         selection: vec![FrameRect { column: 11, width: 12, color: Rgb { r: 13, g: 14, b: 15 } }],
         matches: vec![FrameRect { column: 16, width: 17, color: Rgb { r: 18, g: 19, b: 20 } }],
-        images: vec![FrameImage { column: 21, cells: 22, image: 23, tile_column: 24, tile_row: 25 }],
-        underlines: vec![FrameUnderline { column: 26, width: 27, style: UnderlineStyle::Dashed, color: Rgb { r: 28, g: 29, b: 30 } }],
+        images: vec![FrameImage {
+            column: 21,
+            cells: 22,
+            image: 23,
+            tile_column: 24,
+            tile_row: 25,
+        }],
+        underlines: vec![FrameUnderline {
+            column: 26,
+            width: 27,
+            style: UnderlineStyle::Dashed,
+            color: Rgb { r: 28, g: 29, b: 30 },
+        }],
     };
     let update = FrameUpdate {
         columns: 31,
@@ -63,7 +74,8 @@ pub fn protocol_version() -> u32 {
         foreground: Rgb { r: 43, g: 44, b: 45 },
         mode: 46,
     };
-    let tab = TabLayout { title: Some("t".into()), root: Node::Pane(47), focused: 48, zoomed: true };
+    let tab =
+        TabLayout { title: Some("t".into()), root: Node::Pane(47), focused: 48, zoomed: true };
     let workspace = WorkspaceLayout {
         id: 49,
         name: Some("n".into()),
@@ -100,7 +112,12 @@ pub fn protocol_version() -> u32 {
             layout: WindowLayout { workspaces: vec![workspace], active: 59, hidden: 60 },
         }),
         postcard::to_stdvec(&ServerMessage::Panes {
-            panes: vec![PaneState { info, icon: "z".into(), progress: Some(61), agent: Some("a".into()) }],
+            panes: vec![PaneState {
+                info,
+                icon: "z".into(),
+                progress: Some(61),
+                agent: Some("a".into()),
+            }],
         }),
         postcard::to_stdvec(&ServerMessage::Image(ImageData {
             id: 62,
@@ -117,13 +134,25 @@ pub fn protocol_version() -> u32 {
         }),
         postcard::to_stdvec(&ClientMessage::AttachWindow {
             window: Some(73),
-            spec: PaneSpec { command: Some(vec!["c".into()]), cwd: Some("/w".into()), title: Some("t".into()) },
-            bounds: Some(SavedWindow { x: 74., y: 75., width: 76., height: 77., maximized: true, fullscreen: true }),
+            spec: PaneSpec {
+                command: Some(vec!["c".into()]),
+                cwd: Some("/w".into()),
+                title: Some("t".into()),
+            },
+            bounds: Some(SavedWindow {
+                x: 74.,
+                y: 75.,
+                width: 76.,
+                height: 77.,
+                maximized: true,
+                fullscreen: true,
+            }),
         }),
     ];
     // FNV-1a: the same in every build.
     let mut hash: u32 = 0x811c_9dc5;
-    let bytes = samples.iter().flat_map(|sample| sample.as_deref().unwrap_or_default().iter().copied());
+    let bytes =
+        samples.iter().flat_map(|sample| sample.as_deref().unwrap_or_default().iter().copied());
     for byte in PROTOCOL_VERSION.to_le_bytes().into_iter().chain(bytes) {
         hash = (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193);
     }
@@ -146,7 +175,8 @@ pub type WindowId = u64;
 pub type WorkspaceId = u64;
 
 /// Colors a workspace can have; the app picks the shades.
-pub const WORKSPACE_COLORS: [&str; 8] = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
+pub const WORKSPACE_COLORS: [&str; 8] =
+    ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
 
 /// Largest message accepted, against corrupt length prefixes.
 const MAX_MESSAGE: usize = 64 << 20;
@@ -164,8 +194,17 @@ pub struct PaneSpec {
 pub enum SelectionOp {
     /// Start at a viewport cell: kind (0 simple, 1 word, 2 line), line, column,
     /// and whether the point is in the right half of the cell.
-    Start { kind: u8, line: usize, column: usize, right: bool },
-    Update { line: usize, column: usize, right: bool },
+    Start {
+        kind: u8,
+        line: usize,
+        column: usize,
+        right: bool,
+    },
+    Update {
+        line: usize,
+        column: usize,
+        right: bool,
+    },
     Clear,
 }
 
@@ -173,76 +212,191 @@ pub enum SelectionOp {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// Attach a window: `None` opens a new one with a tab from `spec`.
-    AttachWindow { window: Option<WindowId>, spec: PaneSpec, bounds: Option<SavedWindow> },
+    AttachWindow {
+        window: Option<WindowId>,
+        spec: PaneSpec,
+        bounds: Option<SavedWindow>,
+    },
     /// The window closed; its tabs keep running.
-    DetachWindow { window: WindowId },
-    WindowBounds { window: WindowId, bounds: SavedWindow },
+    DetachWindow {
+        window: WindowId,
+    },
+    WindowBounds {
+        window: WindowId,
+        bounds: SavedWindow,
+    },
     /// The window gained or lost focus (for notifications and focus reports).
-    WindowFocused { window: WindowId, focused: bool },
+    WindowFocused {
+        window: WindowId,
+        focused: bool,
+    },
 
     /// A tab at the end of `workspace`, or of the window's active one.
-    NewTab { window: WindowId, workspace: Option<WorkspaceId>, spec: PaneSpec },
-    Split { pane: PaneId, axis: Axis, spec: PaneSpec },
-    ClosePane { pane: PaneId },
+    NewTab {
+        window: WindowId,
+        workspace: Option<WorkspaceId>,
+        spec: PaneSpec,
+    },
+    Split {
+        pane: PaneId,
+        axis: Axis,
+        spec: PaneSpec,
+    },
+    ClosePane {
+        pane: PaneId,
+    },
     /// Tabs are numbered from 0 within their workspace.
-    CloseTab { workspace: WorkspaceId, tab: usize },
-    SelectTab { workspace: WorkspaceId, tab: usize },
-    FocusPane { pane: PaneId },
+    CloseTab {
+        workspace: WorkspaceId,
+        tab: usize,
+    },
+    SelectTab {
+        workspace: WorkspaceId,
+        tab: usize,
+    },
+    FocusPane {
+        pane: PaneId,
+    },
     /// Move a tab, possibly into another workspace, to index `to` there.
-    MoveTab { workspace: WorkspaceId, from: usize, to_workspace: WorkspaceId, to: usize },
-    RenameTab { workspace: WorkspaceId, tab: usize, title: Option<String> },
+    MoveTab {
+        workspace: WorkspaceId,
+        from: usize,
+        to_workspace: WorkspaceId,
+        to: usize,
+    },
+    RenameTab {
+        workspace: WorkspaceId,
+        tab: usize,
+        title: Option<String>,
+    },
     /// A workspace with one tab from `spec`, after the window's others.
-    NewWorkspace { window: WindowId, name: Option<String>, spec: PaneSpec },
-    RenameWorkspace { workspace: WorkspaceId, name: Option<String> },
+    NewWorkspace {
+        window: WindowId,
+        name: Option<String>,
+        spec: PaneSpec,
+    },
+    RenameWorkspace {
+        workspace: WorkspaceId,
+        name: Option<String>,
+    },
     /// Close every tab in it.
-    CloseWorkspace { workspace: WorkspaceId },
+    CloseWorkspace {
+        workspace: WorkspaceId,
+    },
     /// Fold a workspace's section in the sidebar.
-    SetCollapsed { workspace: WorkspaceId, collapsed: bool },
+    SetCollapsed {
+        workspace: WorkspaceId,
+        collapsed: bool,
+    },
     /// Move a workspace to index `to` among `window`'s (possibly another
     /// window's).
-    MoveWorkspace { workspace: WorkspaceId, window: WindowId, to: usize },
+    MoveWorkspace {
+        workspace: WorkspaceId,
+        window: WindowId,
+        to: usize,
+    },
     /// Move a tab into a new workspace right after its own.
-    TabToNewWorkspace { workspace: WorkspaceId, tab: usize },
+    TabToNewWorkspace {
+        workspace: WorkspaceId,
+        tab: usize,
+    },
     /// Show a workspace in `window`, or bring forward the window already
     /// showing it.
-    OpenWorkspace { workspace: WorkspaceId, window: WindowId },
+    OpenWorkspace {
+        workspace: WorkspaceId,
+        window: WindowId,
+    },
     /// Take a workspace out of its window; it keeps running, hidden.
-    HideWorkspace { workspace: WorkspaceId },
+    HideWorkspace {
+        workspace: WorkspaceId,
+    },
     /// Move a workspace into a window of its own (the server asks the app to
     /// open it with [`AppCommand::OpenWindow`]).
-    WorkspaceToNewWindow { workspace: WorkspaceId },
+    WorkspaceToNewWindow {
+        workspace: WorkspaceId,
+    },
     /// One of [`WORKSPACE_COLORS`], or none.
-    SetWorkspaceColor { workspace: WorkspaceId, color: Option<String> },
+    SetWorkspaceColor {
+        workspace: WorkspaceId,
+        color: Option<String>,
+    },
     /// Where its new tabs start (unless the current pane is inside it).
-    SetWorkspaceRoot { workspace: WorkspaceId, root: Option<PathBuf> },
+    SetWorkspaceRoot {
+        workspace: WorkspaceId,
+        root: Option<PathBuf>,
+    },
     /// The app let go of these images; send them again if they're shown.
-    ForgetImages { ids: Vec<u64> },
-    ToggleZoom { window: WindowId },
-    SetRatio { window: WindowId, path: Vec<bool>, ratio: f32 },
+    ForgetImages {
+        ids: Vec<u64>,
+    },
+    ToggleZoom {
+        window: WindowId,
+    },
+    SetRatio {
+        window: WindowId,
+        path: Vec<bool>,
+        ratio: f32,
+    },
 
-    Input { pane: PaneId, bytes: Vec<u8> },
-    Resize { pane: PaneId, size: TerminalSize },
-    Scroll { pane: PaneId, lines: i32 },
-    Selection { pane: PaneId, op: SelectionOp },
-    Search { id: u64, pane: PaneId, query: String, older: bool, restart: bool },
-    EndSearch { pane: PaneId },
-    ClearBuffer { pane: PaneId },
+    Input {
+        pane: PaneId,
+        bytes: Vec<u8>,
+    },
+    Resize {
+        pane: PaneId,
+        size: TerminalSize,
+    },
+    Scroll {
+        pane: PaneId,
+        lines: i32,
+    },
+    Selection {
+        pane: PaneId,
+        op: SelectionOp,
+    },
+    Search {
+        id: u64,
+        pane: PaneId,
+        query: String,
+        older: bool,
+        restart: bool,
+    },
+    EndSearch {
+        pane: PaneId,
+    },
+    ClearBuffer {
+        pane: PaneId,
+    },
 
     /// Questions with an answer in [`ServerMessage::Reply`].
-    Query { id: u64, query: Query },
+    Query {
+        id: u64,
+        query: Query,
+    },
     /// A control request (JSON of a [`Request`]), answered in
     /// [`ServerMessage::Control`]. JSON because `Request` is internally
     /// tagged, which postcard can't decode.
-    Control { id: u64, request: String },
+    Control {
+        id: u64,
+        request: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Query {
     /// Windows with no app attached.
     DetachedWindows,
-    LinkSpan { pane: PaneId, line: usize, column: usize },
-    SelectionText { pane: PaneId },
-    Cwd { pane: PaneId },
+    LinkSpan {
+        pane: PaneId,
+        line: usize,
+        column: usize,
+    },
+    SelectionText {
+        pane: PaneId,
+    },
+    Cwd {
+        pane: PaneId,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -316,7 +470,9 @@ impl WindowLayout {
 
     /// Every tab, workspace by workspace, with where it is.
     pub fn tabs(&self) -> impl Iterator<Item = (WorkspaceId, usize, &TabLayout)> {
-        self.workspaces.iter().flat_map(|w| w.tabs.iter().enumerate().map(move |(i, tab)| (w.id, i, tab)))
+        self.workspaces
+            .iter()
+            .flat_map(|w| w.tabs.iter().enumerate().map(move |(i, tab)| (w.id, i, tab)))
     }
 }
 
@@ -385,11 +541,17 @@ impl FrameUpdate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AppCommand {
     /// Bring a window forward (`artty focus`).
-    Activate { window: WindowId },
+    Activate {
+        window: WindowId,
+    },
     /// Open a view of a server window that has none.
-    OpenWindow { window: WindowId },
+    OpenWindow {
+        window: WindowId,
+    },
     /// Show the Activity view in a window (`artty activity`).
-    ShowActivity { window: WindowId },
+    ShowActivity {
+        window: WindowId,
+    },
     OpenSettings,
     /// Quit and reopen the app (sessions keep running).
     Restart,
@@ -398,25 +560,54 @@ pub enum AppCommand {
 /// Server → app.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMessage {
-    Welcome { version: u32, server_version: String },
+    Welcome {
+        version: u32,
+        server_version: String,
+    },
     /// A window is attached (also the reply to `AttachWindow`).
-    Attached { window: WindowId, bounds: Option<SavedWindow> },
-    Layout { window: WindowId, layout: WindowLayout },
+    Attached {
+        window: WindowId,
+        bounds: Option<SavedWindow>,
+    },
+    Layout {
+        window: WindowId,
+        layout: WindowLayout,
+    },
     /// The window's last tab closed.
-    WindowClosed { window: WindowId },
-    Frame { pane: PaneId, update: FrameUpdate },
-    Panes { panes: Vec<PaneState> },
-    Bell { pane: PaneId },
+    WindowClosed {
+        window: WindowId,
+    },
+    Frame {
+        pane: PaneId,
+        update: FrameUpdate,
+    },
+    Panes {
+        panes: Vec<PaneState>,
+    },
+    Bell {
+        pane: PaneId,
+    },
     /// Show a desktop notification (the app can post native ones).
-    Notify { title: String, body: String },
+    Notify {
+        title: String,
+        body: String,
+    },
     /// Something for the app to do, from the `artty` command.
     App(AppCommand),
-    Reply { id: u64, reply: Reply },
+    Reply {
+        id: u64,
+        reply: Reply,
+    },
     /// JSON of a [`Response`].
-    Control { id: u64, response: String },
+    Control {
+        id: u64,
+        response: String,
+    },
     /// The server is exiting: sessions ended (`artty server stop`), or it's
     /// restarting and a new server will reopen them.
-    Stopping { restart: bool },
+    Stopping {
+        restart: bool,
+    },
     /// An image that frames show (by id), sent before the first of them.
     Image(ImageData),
 }
@@ -442,7 +633,8 @@ pub fn encode_request(request: &Request) -> String {
 
 /// Decode a [`ServerMessage::Control`] response.
 pub fn decode_response(response: &str) -> Response {
-    serde_json::from_str(response).unwrap_or_else(|err| Response::error(format!("bad response: {err}")))
+    serde_json::from_str(response)
+        .unwrap_or_else(|err| Response::error(format!("bad response: {err}")))
 }
 
 /// Write one length-prefixed message.
@@ -495,7 +687,11 @@ mod tests {
 
     #[test]
     fn diffs_send_changed_lines_only() {
-        let before = Frame { columns: 10, lines: vec![line("a"), line("b"), line("c")], ..Default::default() };
+        let before = Frame {
+            columns: 10,
+            lines: vec![line("a"), line("b"), line("c")],
+            ..Default::default()
+        };
         let mut after = before.clone();
         after.lines[1] = line("B");
         let update = FrameUpdate::diff(Some(&before), &after, 0);
@@ -548,11 +744,14 @@ mod tests {
         let layout = WindowLayout { workspaces: vec![workspace], active: 0, hidden: 2 };
         let mut buffer = Vec::new();
         write_message(&mut buffer, &ServerMessage::Panes { panes: vec![state.clone()] }).unwrap();
-        write_message(&mut buffer, &ServerMessage::Layout { window: 1, layout: layout.clone() }).unwrap();
+        write_message(&mut buffer, &ServerMessage::Layout { window: 1, layout: layout.clone() })
+            .unwrap();
         let mut reader = &buffer[..];
         let ServerMessage::Panes { panes } = read_message(&mut reader).unwrap() else { panic!() };
         assert_eq!(panes, vec![state]);
-        let ServerMessage::Layout { layout: back, .. } = read_message(&mut reader).unwrap() else { panic!() };
+        let ServerMessage::Layout { layout: back, .. } = read_message(&mut reader).unwrap() else {
+            panic!()
+        };
         assert_eq!(back, layout);
     }
 
@@ -570,10 +769,21 @@ mod tests {
         let message = ClientMessage::Input { pane: 7, bytes: b"ls\r".to_vec() };
         write_message(&mut buffer, &message).unwrap();
         let frame = Frame { columns: 4, lines: vec![line("hi")], ..Default::default() };
-        write_message(&mut buffer, &ServerMessage::Frame { pane: 7, update: FrameUpdate::diff(None, &frame, 5) }).unwrap();
+        write_message(
+            &mut buffer,
+            &ServerMessage::Frame { pane: 7, update: FrameUpdate::diff(None, &frame, 5) },
+        )
+        .unwrap();
         let mut reader = &buffer[..];
-        assert!(matches!(read_message::<ClientMessage>(&mut reader).unwrap(), ClientMessage::Input { pane: 7, .. }));
-        let ServerMessage::Frame { update, .. } = read_message::<ServerMessage>(&mut reader).unwrap() else { panic!() };
+        assert!(matches!(
+            read_message::<ClientMessage>(&mut reader).unwrap(),
+            ClientMessage::Input { pane: 7, .. }
+        ));
+        let ServerMessage::Frame { update, .. } =
+            read_message::<ServerMessage>(&mut reader).unwrap()
+        else {
+            panic!()
+        };
         assert_eq!(update.mode, 5);
         assert_eq!(update.lines[0].1, line("hi"));
     }

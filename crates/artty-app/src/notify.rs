@@ -16,7 +16,8 @@ pub fn post(title: &str, body: &str) {
         return;
     }
     let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
+    let script =
+        format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
     let _ = std::process::Command::new("osascript")
         .args(["-e", &script])
         .stdout(std::process::Stdio::null())
@@ -105,13 +106,16 @@ mod native {
         content.setBody(&NSString::from_str(body));
         content.setSound(Some(&UNNotificationSound::defaultSound()));
         let id = NSString::from_str(&format!("artty-{}-{}", std::process::id(), now_micros()));
-        let request = UNNotificationRequest::requestWithIdentifier_content_trigger(&id, &content, None);
+        let request =
+            UNNotificationRequest::requestWithIdentifier_content_trigger(&id, &content, None);
         UNUserNotificationCenter::currentNotificationCenter()
             .addNotificationRequest_withCompletionHandler(&request, None);
     }
 
     fn now_micros() -> u128 {
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros())
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros())
     }
 
     /// Language and region codes, e.g. `("ko", Some("GB"))`.

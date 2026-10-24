@@ -1,5 +1,5 @@
-use artty_vt::term::color::Colors;
 use artty_vt::ansi::{Color, NamedColor, Rgb};
+use artty_vt::term::color::Colors;
 
 /// Default colors, used wherever the running program has not overridden them.
 #[derive(Clone, Debug)]
@@ -56,7 +56,7 @@ impl Theme {
             Color::Named(name) => overrides[name].unwrap_or_else(|| self.named(name)),
             Color::Indexed(index) => {
                 overrides[index as usize].unwrap_or_else(|| self.indexed(index as usize))
-            }
+            },
         }
     }
 
@@ -87,9 +87,7 @@ impl Theme {
             | NamedColor::DimBlue
             | NamedColor::DimMagenta
             | NamedColor::DimCyan
-            | NamedColor::DimWhite => {
-                dim(self.ansi[name as usize - NamedColor::DimBlack as usize])
-            }
+            | NamedColor::DimWhite => dim(self.ansi[name as usize - NamedColor::DimBlack as usize]),
             _ => self.ansi[name as usize],
         }
     }
@@ -102,11 +100,11 @@ impl Theme {
                 let i = index - 16;
                 let level = |v: usize| if v == 0 { 0 } else { (v * 40 + 55) as u8 };
                 Rgb { r: level(i / 36), g: level(i / 6 % 6), b: level(i % 6) }
-            }
+            },
             _ => {
                 let v = (8 + (index.min(255) - 232) * 10) as u8;
                 Rgb { r: v, g: v, b: v }
-            }
+            },
         }
     }
 }

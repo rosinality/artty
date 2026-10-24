@@ -7,8 +7,8 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use artty_core::layout::{self, Axis, Direction, Divider, PaneId, Rect};
 use artty_core::control::{Request, Response, WorkspaceInfo};
+use artty_core::layout::{self, Axis, Direction, Divider, PaneId, Rect};
 use artty_core::protocol::{
     ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp, TabLayout, WORKSPACE_COLORS,
     WindowId, WindowLayout, WorkspaceId,
@@ -324,11 +324,20 @@ fn bounds(rect: Rect) -> Bounds<Pixels> {
 }
 
 fn layout_of(tab: &TabLayout, area: Rect) -> (Vec<(PaneId, Rect)>, Vec<Divider>) {
-    if tab.zoomed { (vec![(tab.focused, area)], Vec::new()) } else { tab.root.layout(area, SPLIT_GAP) }
+    if tab.zoomed {
+        (vec![(tab.focused, area)], Vec::new())
+    } else {
+        tab.root.layout(area, SPLIT_GAP)
+    }
 }
 
 impl WindowView {
-    pub fn new(config: Config, config_error: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        config: Config,
+        config_error: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let every = |interval: Duration, f: fn(&mut Self, &mut Context<Self>)| {
             cx.spawn(async move |this, cx| {
                 loop {
@@ -348,7 +357,10 @@ impl WindowView {
             // ⌘-Tab away and back: the key-up went elsewhere.
             this.command_held = false;
             if let Some(id) = this.window {
-                app_state::send(ClientMessage::WindowFocused { window: id, focused: this.window_active }, cx);
+                app_state::send(
+                    ClientMessage::WindowFocused { window: id, focused: this.window_active },
+                    cx,
+                );
             }
             cx.notify();
         });
@@ -416,7 +428,12 @@ impl WindowView {
     }
 
     /// The server attached this view to its window `window`.
-    pub fn attached(&mut self, window: WindowId, _bounds: Option<SavedWindow>, cx: &mut Context<Self>) {
+    pub fn attached(
+        &mut self,
+        window: WindowId,
+        _bounds: Option<SavedWindow>,
+        cx: &mut Context<Self>,
+    ) {
         self.window = Some(window);
         self.sizes.clear();
         app_state::send(ClientMessage::WindowFocused { window, focused: self.window_active }, cx);
@@ -425,7 +442,12 @@ impl WindowView {
 
     pub fn set_layout(&mut self, layout: WindowLayout, cx: &mut Context<Self>) {
         if layout != self.layout {
-            let shown = |layout: &WindowLayout| (layout.active_workspace().map(|w| (w.id, w.active)), layout.active_tab().map(|t| t.focused));
+            let shown = |layout: &WindowLayout| {
+                (
+                    layout.active_workspace().map(|w| (w.id, w.active)),
+                    layout.active_tab().map(|t| t.focused),
+                )
+            };
             if shown(&layout) != shown(&self.layout) {
                 self.reset_input_state();
                 // Something opened or switched tabs: show it.
@@ -435,9 +457,14 @@ impl WindowView {
             }
             self.tabs = layout.tabs().map(|(_, _, tab)| tab.clone()).collect();
             self.places = layout.tabs().map(|(workspace, index, _)| (workspace, index)).collect();
-            let before: usize = layout.workspaces.iter().take(layout.active).map(|w| w.tabs.len()).sum();
+            let before: usize =
+                layout.workspaces.iter().take(layout.active).map(|w| w.tabs.len()).sum();
             self.active = before + layout.active_workspace().map_or(0, |w| w.active);
-            let new = layout.workspaces.iter().map(|w| w.id).find(|id| !self.layout.workspaces.iter().any(|w| w.id == *id));
+            let new = layout
+                .workspaces
+                .iter()
+                .map(|w| w.id)
+                .find(|id| !self.layout.workspaces.iter().any(|w| w.id == *id));
             let first = self.layout.workspaces.is_empty();
             self.layout = layout;
             if let Some(id) = new.filter(|_| self.naming_new_workspace && !first) {
@@ -456,14 +483,22 @@ impl WindowView {
     /// What this window shows: its workspace's name, or its tab's title.
     pub fn title(&self, cx: &App) -> String {
         match self.layout.active_workspace() {
-            Some(workspace) if workspace.name.is_some() => workspace.name.clone().unwrap_or_default(),
-            _ => self.layout.active_tab().map(|tab| self.tab_title(tab, cx).to_string()).unwrap_or_default(),
+            Some(workspace) if workspace.name.is_some() => {
+                workspace.name.clone().unwrap_or_default()
+            },
+            _ => self
+                .layout
+                .active_tab()
+                .map(|tab| self.tab_title(tab, cx).to_string())
+                .unwrap_or_default(),
         }
     }
 
     /// Whether this window shows `pane` right now.
     pub fn shows(&self, pane: PaneId) -> bool {
-        self.tabs.get(self.active).is_some_and(|tab| layout_of(tab, self.area).0.iter().any(|(id, _)| *id == pane))
+        self.tabs
+            .get(self.active)
+            .is_some_and(|tab| layout_of(tab, self.area).0.iter().any(|(id, _)| *id == pane))
     }
 
     fn send(&self, message: ClientMessage, cx: &App) {
@@ -534,7 +569,11 @@ impl WindowView {
     fn tab_title(&self, tab: &TabLayout, cx: &App) -> SharedString {
         match &tab.title {
             Some(title) => title.clone().into(),
-            None => self.pane_state(tab.focused, cx).map(|p| p.info.title.clone()).unwrap_or_else(|| "shell".into()).into(),
+            None => self
+                .pane_state(tab.focused, cx)
+                .map(|p| p.info.title.clone())
+                .unwrap_or_else(|| "shell".into())
+                .into(),
         }
     }
 
@@ -553,7 +592,10 @@ impl WindowView {
     fn new_workspace(&mut self, cx: &mut Context<Self>) {
         if let Some(window) = self.window {
             self.naming_new_workspace = true;
-            self.send(ClientMessage::NewWorkspace { window, name: None, spec: PaneSpec::default() }, cx);
+            self.send(
+                ClientMessage::NewWorkspace { window, name: None, spec: PaneSpec::default() },
+                cx,
+            );
         }
     }
 
@@ -565,7 +607,8 @@ impl WindowView {
         }
         let target = (self.layout.active as isize + offset).rem_euclid(count) as usize;
         let workspace = &self.layout.workspaces[target];
-        if let Some(index) = self.places.iter().position(|&p| p == (workspace.id, workspace.active)) {
+        if let Some(index) = self.places.iter().position(|&p| p == (workspace.id, workspace.active))
+        {
             self.select(index, cx);
         }
     }
@@ -581,7 +624,12 @@ impl WindowView {
     fn workspace_title(&self, position: usize) -> SharedString {
         let workspace = &self.layout.workspaces[position];
         let automatic = Some(workspace.title.clone()).filter(|t| !t.is_empty());
-        workspace.name.clone().or(automatic).unwrap_or_else(|| format!("Workspace {}", position + 1)).into()
+        workspace
+            .name
+            .clone()
+            .or(automatic)
+            .unwrap_or_else(|| format!("Workspace {}", position + 1))
+            .into()
     }
 
     /// The color of the workspace holding tab `index`, as RGB.
@@ -604,7 +652,12 @@ impl WindowView {
         let answer = app_state::query(Query::Cwd { pane }, cx);
         cx.spawn(async move |_, cx| {
             if let Ok(Reply::Path(Some(root))) = answer.await {
-                let _ = cx.update(|cx| app_state::send(ClientMessage::SetWorkspaceRoot { workspace, root: Some(root) }, cx));
+                let _ = cx.update(|cx| {
+                    app_state::send(
+                        ClientMessage::SetWorkspaceRoot { workspace, root: Some(root) },
+                        cx,
+                    )
+                });
             }
         })
         .detach();
@@ -622,7 +675,10 @@ impl WindowView {
             let Ok(Response::Workspaces { workspaces }) = answer.await else { return };
             let _ = this.update(cx, |this, cx| {
                 // Hidden ones first: those are what you're likely after.
-                let mut items: Vec<WorkspaceInfo> = workspaces.into_iter().filter(|w| w.window.is_none() || w.window != here).collect();
+                let mut items: Vec<WorkspaceInfo> = workspaces
+                    .into_iter()
+                    .filter(|w| w.window.is_none() || w.window != here)
+                    .collect();
                 items.sort_by_key(|w| w.attached);
                 this.marked_text = None;
                 this.picker = Some(Picker { query: String::new(), items, selected: 0 });
@@ -652,7 +708,7 @@ impl WindowView {
             "backspace" => {
                 picker.query.pop();
                 picker.selected = 0;
-            }
+            },
             // Text arrives through the input handler.
             _ => return,
         }
@@ -674,7 +730,11 @@ impl WindowView {
                     (Some(_), false) => "closed window".to_owned(),
                     (Some(_), true) => format!("window {}", workspace.window_number),
                 };
-                let tabs = if workspace.tabs == 1 { "1 tab".to_owned() } else { format!("{} tabs", workspace.tabs) };
+                let tabs = if workspace.tabs == 1 {
+                    "1 tab".to_owned()
+                } else {
+                    format!("{} tabs", workspace.tabs)
+                };
                 // Statuses (`working`, ...) as the sidebar's icons (`busy`, ...).
                 let icon = match workspace.status.as_str() {
                     "working" | "running" => "busy",
@@ -693,8 +753,19 @@ impl WindowView {
                     .when(i == picker.selected, |d| d.bg(rgba(0x3478f6ff)))
                     .when(i != picker.selected, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
                     .child(self.icon(icon))
-                    .child(Self::one_line(workspace.title.clone()).flex_1().min_w_0().text_color(rgba(0xffffffee)))
-                    .child(div().flex_none().text_size(px(11.5)).text_color(rgba(0xffffff80)).child(format!("{tabs} · {place}")))
+                    .child(
+                        Self::one_line(workspace.title.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(rgba(0xffffffee)),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .text_color(rgba(0xffffff80))
+                            .child(format!("{tabs} · {place}")),
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(picker) = this.picker.as_mut() {
                             picker.selected = i;
@@ -729,7 +800,11 @@ impl WindowView {
                     .mb(px(4.))
                     .rounded(px(6.))
                     .bg(rgba(0x0000004d))
-                    .text_color(if picker.query.is_empty() && marked.is_empty() { rgba(0xffffff60) } else { rgba(0xffffffee) })
+                    .text_color(if picker.query.is_empty() && marked.is_empty() {
+                        rgba(0xffffff60)
+                    } else {
+                        rgba(0xffffffee)
+                    })
                     .child(if picker.query.is_empty() && marked.is_empty() {
                         "Open workspace…".to_owned()
                     } else {
@@ -738,7 +813,13 @@ impl WindowView {
             )
             .children(rows)
             .when(empty, |d| {
-                d.child(div().px(px(10.)).py(px(6.)).text_color(rgba(0xffffff70)).child("No other workspaces"))
+                d.child(
+                    div()
+                        .px(px(10.))
+                        .py(px(6.))
+                        .text_color(rgba(0xffffff70))
+                        .child("No other workspaces"),
+                )
             });
         let backdrop = div()
             .id("picker-backdrop")
@@ -754,11 +835,17 @@ impl WindowView {
         Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
     }
 
-    fn open_sidebar_menu(&mut self, target: MenuTarget, position: Point<Pixels>, cx: &mut Context<Self>) {
+    fn open_sidebar_menu(
+        &mut self,
+        target: MenuTarget,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
         if self.renaming.is_some() {
             self.finish_rename(true, cx);
         }
-        self.context_menu = Some(ContextMenu { position, target, link: None, has_selection: false });
+        self.context_menu =
+            Some(ContextMenu { position, target, link: None, has_selection: false });
         cx.notify();
     }
 
@@ -803,14 +890,22 @@ impl WindowView {
         let Some(tab) = self.tabs.get(self.active) else { return };
         let panes = tab.root.panes();
         let Some(index) = panes.iter().position(|&id| id == tab.focused) else { return };
-        let next = if forward { (index + 1) % panes.len() } else { (index + panes.len() - 1) % panes.len() };
+        let next = if forward {
+            (index + 1) % panes.len()
+        } else {
+            (index + panes.len() - 1) % panes.len()
+        };
         self.focus_pane(panes[next], cx);
     }
 
     /// Move a tab to where tab `to` is; across a section boundary, it joins
     /// the neighboring workspace at the near end.
     fn move_tab(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
-        let (Some(&(workspace, from_index)), Some(&(to_workspace, to_index))) = (self.places.get(from), self.places.get(to)) else { return };
+        let (Some(&(workspace, from_index)), Some(&(to_workspace, to_index))) =
+            (self.places.get(from), self.places.get(to))
+        else {
+            return;
+        };
         let to = if to_workspace != workspace && to < from { to_index + 1 } else { to_index };
         self.renaming = None;
         self.send(ClientMessage::MoveTab { workspace, from: from_index, to_workspace, to }, cx);
@@ -826,7 +921,9 @@ impl WindowView {
     }
 
     fn start_workspace_rename(&mut self, workspace: WorkspaceId, cx: &mut Context<Self>) {
-        let Some(position) = self.layout.workspaces.iter().position(|w| w.id == workspace) else { return };
+        let Some(position) = self.layout.workspaces.iter().position(|w| w.id == workspace) else {
+            return;
+        };
         let text = self.layout.workspaces[position].name.clone().unwrap_or_default();
         self.close_search(cx);
         self.marked_text = None;
@@ -844,8 +941,10 @@ impl WindowView {
                     if let Some(&(workspace, tab)) = self.places.get(index) {
                         self.send(ClientMessage::RenameTab { workspace, tab, title: name }, cx);
                     }
-                }
-                RenameTarget::Workspace(workspace) => self.send(ClientMessage::RenameWorkspace { workspace, name }, cx),
+                },
+                RenameTarget::Workspace(workspace) => {
+                    self.send(ClientMessage::RenameWorkspace { workspace, name }, cx)
+                },
             }
         }
         self.marked_text = None;
@@ -861,7 +960,7 @@ impl WindowView {
                     renaming.text.pop();
                 }
                 cx.notify();
-            }
+            },
             // Text arrives through the input handler.
             _ => return,
         }
@@ -879,51 +978,77 @@ impl WindowView {
             };
             let has_selection = matches!(selection.await, Ok(Reply::Text(Some(_))));
             let _ = this.update(cx, |this, cx| {
-                this.context_menu = Some(ContextMenu { position, target: MenuTarget::Pane(pane), link, has_selection });
+                this.context_menu = Some(ContextMenu {
+                    position,
+                    target: MenuTarget::Pane(pane),
+                    link,
+                    has_selection,
+                });
                 cx.notify();
             });
         })
         .detach();
     }
 
-    fn run_menu_command(&mut self, command: MenuCommand, window: &mut Window, cx: &mut Context<Self>) {
+    fn run_menu_command(
+        &mut self,
+        command: MenuCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(menu) = self.context_menu.take() else { return };
         let place = |index: usize| self.places.get(index).copied();
         match menu.target {
             MenuTarget::Tab(index) => {
                 match (command, place(index)) {
                     (MenuCommand::RenameTab, _) => self.start_rename(index, cx),
-                    (MenuCommand::CloseTab, Some((workspace, tab))) => self.send(ClientMessage::CloseTab { workspace, tab }, cx),
+                    (MenuCommand::CloseTab, Some((workspace, tab))) => {
+                        self.send(ClientMessage::CloseTab { workspace, tab }, cx)
+                    },
                     (MenuCommand::TabToNewWorkspace, Some((workspace, tab))) => {
                         self.send(ClientMessage::TabToNewWorkspace { workspace, tab }, cx)
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
                 return cx.notify();
-            }
+            },
             MenuTarget::Workspace(workspace) => {
                 match command {
                     MenuCommand::NewTabInWorkspace => self.open_tab_in(Some(workspace), cx),
                     MenuCommand::RenameWorkspace => self.start_workspace_rename(workspace, cx),
                     MenuCommand::ToggleCollapsed => self.toggle_collapsed(workspace, cx),
-                    MenuCommand::CloseWorkspace => self.send(ClientMessage::CloseWorkspace { workspace }, cx),
-                    MenuCommand::HideWorkspace => self.send(ClientMessage::HideWorkspace { workspace }, cx),
-                    MenuCommand::MoveToNewWindow => self.send(ClientMessage::WorkspaceToNewWindow { workspace }, cx),
+                    MenuCommand::CloseWorkspace => {
+                        self.send(ClientMessage::CloseWorkspace { workspace }, cx)
+                    },
+                    MenuCommand::HideWorkspace => {
+                        self.send(ClientMessage::HideWorkspace { workspace }, cx)
+                    },
+                    MenuCommand::MoveToNewWindow => {
+                        self.send(ClientMessage::WorkspaceToNewWindow { workspace }, cx)
+                    },
                     MenuCommand::SetColor(color) => {
-                        let color = color.and_then(|i| WORKSPACE_COLORS.get(i)).map(|c| (*c).to_owned());
+                        let color =
+                            color.and_then(|i| WORKSPACE_COLORS.get(i)).map(|c| (*c).to_owned());
                         self.send(ClientMessage::SetWorkspaceColor { workspace, color }, cx);
-                    }
-                    MenuCommand::ClearRoot => self.send(ClientMessage::SetWorkspaceRoot { workspace, root: None }, cx),
-                    MenuCommand::RootFromCurrentDirectory => self.root_from_current_directory(workspace, cx),
+                    },
+                    MenuCommand::ClearRoot => {
+                        self.send(ClientMessage::SetWorkspaceRoot { workspace, root: None }, cx)
+                    },
+                    MenuCommand::RootFromCurrentDirectory => {
+                        self.root_from_current_directory(workspace, cx)
+                    },
                     MenuCommand::MoveToWindow(window) => {
-                        self.send(ClientMessage::MoveWorkspace { workspace, window, to: usize::MAX }, cx);
+                        self.send(
+                            ClientMessage::MoveWorkspace { workspace, window, to: usize::MAX },
+                            cx,
+                        );
                         app_state::activate(window, cx);
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
                 return cx.notify();
-            }
-            MenuTarget::Pane(_) => {}
+            },
+            MenuTarget::Pane(_) => {},
         }
         let MenuTarget::Pane(pane) = menu.target else { return };
         match command {
@@ -933,22 +1058,22 @@ impl WindowView {
                 if let Some(link) = &menu.link {
                     let _ = std::process::Command::new("open").arg(link).spawn();
                 }
-            }
+            },
             MenuCommand::CopyLink => {
                 if let Some(link) = menu.link {
                     cx.write_to_clipboard(ClipboardItem::new_string(link));
                 }
-            }
+            },
             MenuCommand::SplitRight => self.split(Some(pane), Axis::Horizontal, cx),
             MenuCommand::SplitDown => self.split(Some(pane), Axis::Vertical, cx),
             MenuCommand::RenameTab => {
                 if let Some(index) = self.tabs.iter().position(|t| t.root.contains(pane)) {
                     self.start_rename(index, cx);
                 }
-            }
+            },
             MenuCommand::ClearBuffer => self.send(ClientMessage::ClearBuffer { pane }, cx),
             MenuCommand::ClosePane => self.send(ClientMessage::ClosePane { pane }, cx),
-            _ => {}
+            _ => {},
         }
         cx.notify();
     }
@@ -956,7 +1081,8 @@ impl WindowView {
     fn jump_to_attention(&mut self, cx: &mut Context<Self>) {
         // Every pane in tab order, starting after the focused one.
         let all: Vec<PaneId> = self.tabs.iter().flat_map(|tab| tab.root.panes()).collect();
-        let start = self.focused_id().and_then(|id| all.iter().position(|&p| p == id)).map_or(0, |i| i + 1);
+        let start =
+            self.focused_id().and_then(|id| all.iter().position(|&p| p == id)).map_or(0, |i| i + 1);
         let order: Vec<PaneId> = all.iter().cycle().skip(start).take(all.len()).copied().collect();
         let state = |id: &PaneId| self.pane_state(*id, cx);
         let target = order
@@ -996,7 +1122,8 @@ impl WindowView {
         let panes: Vec<PaneId> = self.tabs.iter().flat_map(|t| t.root.panes()).collect();
         let shared = cx.global::<Shared>();
         let busy = panes.iter().any(|id| shared.panes.get(id).is_some_and(|s| s.icon == "busy"));
-        let flashing = panes.iter().any(|id| shared.flashes.get(id).is_some_and(|at| at.elapsed() <= FLASH));
+        let flashing =
+            panes.iter().any(|id| shared.flashes.get(id).is_some_and(|at| at.elapsed() <= FLASH));
         if busy {
             self.spinner_frame = (self.spinner_frame + 1) % SPINNER.len();
         }
@@ -1107,7 +1234,9 @@ impl WindowView {
             return;
         }
         let Some(pane) = self.focused_id() else { return };
-        if let Some(bytes) = keys::to_esc(keystroke, self.mode(pane, cx), self.config.option_as_meta) {
+        if let Some(bytes) =
+            keys::to_esc(keystroke, self.mode(pane, cx), self.config.option_as_meta)
+        {
             self.input(bytes, cx);
             cx.stop_propagation();
         }
@@ -1141,7 +1270,7 @@ impl WindowView {
                         Ok(found) => {
                             search.found = (!search.query.is_empty()).then_some(found);
                             search.error = None;
-                        }
+                        },
                         Err(error) => search.error = Some(error),
                     }
                     cx.notify();
@@ -1157,17 +1286,17 @@ impl WindowView {
             "escape" => {
                 self.close_search(cx);
                 cx.notify();
-            }
+            },
             "enter" => self.run_search(!keystroke.modifiers.shift, false, cx),
             "backspace" => {
                 if let Some(search) = self.search.as_mut() {
                     search.query.pop();
                 }
                 self.run_search(true, true, cx);
-            }
+            },
             // Text arrives through the input handler.
             _ if !keystroke.modifiers.control && !keystroke.modifiers.alt => return,
-            _ => {}
+            _ => {},
         }
         cx.stop_propagation();
     }
@@ -1181,7 +1310,15 @@ impl WindowView {
         (mode.intersects(TermMode::MOUSE_MODE) && !modifiers.shift).then_some(mode)
     }
 
-    fn report_mouse(&mut self, id: PaneId, button: Button, action: Action, position: Point<Pixels>, modifiers: &Modifiers, cx: &App) {
+    fn report_mouse(
+        &mut self,
+        id: PaneId,
+        button: Button,
+        action: Action,
+        position: Point<Pixels>,
+        modifiers: &Modifiers,
+        cx: &App,
+    ) {
         let Some(mode) = self.mouse_reporting(id, modifiers, cx) else { return };
         let (line, column, _) = self.cell_at(id, position);
         if action == Action::Motion && self.last_mouse_cell == Some((line, column)) {
@@ -1215,8 +1352,11 @@ impl WindowView {
             .detach();
             return;
         }
-        let menu_click = event.button == MouseButton::Right || (event.button == MouseButton::Left && event.modifiers.control);
-        if menu_click && (self.mouse_reporting(id, &event.modifiers, cx).is_none() || event.modifiers.control) {
+        let menu_click = event.button == MouseButton::Right
+            || (event.button == MouseButton::Left && event.modifiers.control);
+        if menu_click
+            && (self.mouse_reporting(id, &event.modifiers, cx).is_none() || event.modifiers.control)
+        {
             self.open_context_menu(id, event.position, cx);
             return;
         }
@@ -1250,7 +1390,12 @@ impl WindowView {
         self.mouse_position = Some(event.position);
         self.update_hover_link(event.modifiers.platform, cx);
         if let Some(divider) = &self.drag {
-            let ratio = layout::drag_ratio(divider, event.position.x.into(), event.position.y.into(), SPLIT_GAP);
+            let ratio = layout::drag_ratio(
+                divider,
+                event.position.x.into(),
+                event.position.y.into(),
+                SPLIT_GAP,
+            );
             let path = divider.path.clone();
             // Move the divider right away; the server confirms with a layout.
             if let Some(tab) = self.tabs.get_mut(self.active) {
@@ -1272,7 +1417,13 @@ impl WindowView {
         if self.selecting && event.pressed_button == Some(MouseButton::Left) {
             if let Some(id) = self.mouse_pane {
                 let (line, column, right) = self.cell_at(id, event.position);
-                self.send(ClientMessage::Selection { pane: id, op: SelectionOp::Update { line, column, right } }, cx);
+                self.send(
+                    ClientMessage::Selection {
+                        pane: id,
+                        op: SelectionOp::Update { line, column, right },
+                    },
+                    cx,
+                );
                 if self.overflow(id, event.position) != 0 {
                     self.start_autoscroll(cx);
                 }
@@ -1281,7 +1432,14 @@ impl WindowView {
             && let Some((id, _)) = self.pane_at(event.position)
             && Some(id) == self.focused_id()
         {
-            self.report_mouse(id, Button::None, Action::Motion, event.position, &event.modifiers, cx);
+            self.report_mouse(
+                id,
+                Button::None,
+                Action::Motion,
+                event.position,
+                &event.modifiers,
+                cx,
+            );
         }
     }
 
@@ -1333,7 +1491,10 @@ impl WindowView {
         self.send(ClientMessage::Scroll { pane: id, lines }, cx);
         // The edge line, now showing what scrolled in.
         let (line, column, right) = self.cell_at(id, position);
-        self.send(ClientMessage::Selection { pane: id, op: SelectionOp::Update { line, column, right } }, cx);
+        self.send(
+            ClientMessage::Selection { pane: id, op: SelectionOp::Update { line, column, right } },
+            cx,
+        );
         true
     }
 
@@ -1359,9 +1520,11 @@ impl WindowView {
                 };
                 let _ = this.update(cx, |this, cx| match text {
                     Some(text) if copy => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-                    Some(_) => {}
+                    Some(_) => {},
                     // A plain click selects nothing; drop the empty selection.
-                    None => this.send(ClientMessage::Selection { pane, op: SelectionOp::Clear }, cx),
+                    None => {
+                        this.send(ClientMessage::Selection { pane, op: SelectionOp::Clear }, cx)
+                    },
                 });
             })
             .detach();
@@ -1376,7 +1539,7 @@ impl WindowView {
                 let whole = self.scroll_remainder.trunc();
                 self.scroll_remainder -= whole;
                 whole
-            }
+            },
         } as i32;
         // Scroll the pane under the pointer, focused or not.
         let Some((id, _)) = self.pane_at(event.position) else { return };
@@ -1397,7 +1560,10 @@ impl WindowView {
                 (false, true) => b"\x1bOB",
                 (false, false) => b"\x1b[B",
             };
-            self.send(ClientMessage::Input { pane: id, bytes: key.repeat(lines.unsigned_abs() as usize) }, cx);
+            self.send(
+                ClientMessage::Input { pane: id, bytes: key.repeat(lines.unsigned_abs() as usize) },
+                cx,
+            );
         } else {
             self.send(ClientMessage::Scroll { pane: id, lines }, cx);
         }
@@ -1459,7 +1625,9 @@ impl WindowView {
             .flex_none()
             .flex()
             .justify_center()
-            .when_some(icon, |d, (icon, color, size)| d.text_color(color).text_size(px(size)).child(icon))
+            .when_some(icon, |d, (icon, color, size)| {
+                d.text_color(color).text_size(px(size)).child(icon)
+            })
     }
 
     /// What a sidebar row shows at its right: the command or agent (not
@@ -1494,11 +1662,17 @@ impl WindowView {
         div().overflow_hidden().line_clamp(1).text_ellipsis().child(text.into())
     }
 
-    fn tab_row(&self, index: usize, tab: &TabLayout, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn tab_row(
+        &self,
+        index: usize,
+        tab: &TabLayout,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let selected = index == self.active && !self.showing_activity();
         let ids = tab.root.panes();
         let split = ids.len() > 1;
-        let states: Vec<Option<&PaneState>> = ids.iter().map(|id| self.pane_state(*id, cx)).collect();
+        let states: Vec<Option<&PaneState>> =
+            ids.iter().map(|id| self.pane_state(*id, cx)).collect();
         let focused = self.pane_state(tab.focused, cx);
         // The row shows the most urgent pane, preferring the focused one.
         let summary = ids
@@ -1508,9 +1682,14 @@ impl WindowView {
             .and_then(|(_, state)| *state)
             .or(focused);
         let attention = states.iter().flatten().any(|s| s.info.needs_attention);
-        let label: SharedString = if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
+        let label: SharedString =
+            if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
         let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
-        let detail = if split { None } else { focused.and_then(|state| Self::short_detail(&self.tab_title(tab, cx), state)) };
+        let detail = if split {
+            None
+        } else {
+            focused.and_then(|state| Self::short_detail(&self.tab_title(tab, cx), state))
+        };
         let group: SharedString = format!("tab-row-{index}").into();
 
         // One line: icon, title, then what it's doing on the right, and a
@@ -1672,22 +1851,36 @@ impl WindowView {
                 cx.new(|_| dragged.clone())
             })
             .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
-            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| this.move_tab(dragged.index, index, cx)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
+                this.move_tab(dragged.index, index, cx)
+            }))
             .child(header)
             .children(pane_rows.into_iter().flatten())
     }
 
     /// A section header: fold arrow, name, what its tabs are doing, and a
     /// button for a new tab there.
-    fn workspace_header(&self, position: usize, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn workspace_header(
+        &self,
+        position: usize,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let workspace = &self.layout.workspaces[position];
         let id = workspace.id;
         let active = position == self.layout.active;
         let title = self.workspace_title(position);
-        let states: Vec<&PaneState> =
-            workspace.tabs.iter().flat_map(|t| t.root.panes()).filter_map(|pane| self.pane_state(pane, cx)).collect();
+        let states: Vec<&PaneState> = workspace
+            .tabs
+            .iter()
+            .flat_map(|t| t.root.panes())
+            .filter_map(|pane| self.pane_state(pane, cx))
+            .collect();
         // The most urgent state, and how many panes share it.
-        let top = states.iter().copied().max_by_key(|s| Self::urgency(Some(s))).filter(|s| Self::urgency(Some(s)) > 0);
+        let top = states
+            .iter()
+            .copied()
+            .max_by_key(|s| Self::urgency(Some(s)))
+            .filter(|s| Self::urgency(Some(s)) > 0);
         let count = top.map_or(0, |top| states.iter().filter(|s| s.icon == top.icon).count());
         let attention = states.iter().any(|s| s.info.needs_attention);
         let renaming = self.renaming.as_ref().filter(|r| r.target == RenameTarget::Workspace(id));
@@ -1703,7 +1896,7 @@ impl WindowView {
                     .border_color(rgba(0x8fb4ff99))
                     .text_color(rgba(0xffffffee))
                     .child(format!("{}{marked}▏", renaming.text))
-            }
+            },
             None => Self::one_line(title.clone())
                 .flex_1()
                 .min_w_0()
@@ -1715,7 +1908,11 @@ impl WindowView {
         let group: SharedString = format!("workspace-header-{id}").into();
         let closing = self.closing_workspace == Some(id);
         // Hovering tells what it uses (and where it's rooted).
-        let mut usage = format!("CPU {:.1}% · Memory {}", workspace.cpu_percent, crate::cli::bytes(workspace.memory_bytes));
+        let mut usage = format!(
+            "CPU {:.1}% · Memory {}",
+            workspace.cpu_percent,
+            crate::cli::bytes(workspace.memory_bytes)
+        );
         if let Some(root) = &workspace.root {
             usage.push_str(&format!(" · Root {}", root.display()));
         }
@@ -1848,7 +2045,13 @@ impl WindowView {
             }))
     }
 
-    fn banner(id: &'static str, title: &'static str, hint: &'static str, button: &'static str, action: fn(&mut App)) -> gpui::Div {
+    fn banner(
+        id: &'static str,
+        title: &'static str,
+        hint: &'static str,
+        button: &'static str,
+        action: fn(&mut App),
+    ) -> gpui::Div {
         div()
             .mt_2()
             .mx_1()
@@ -1911,7 +2114,11 @@ impl WindowView {
                     .text_size(px(11.5))
                     .text_color(rgba(0xffffff70))
                     .hover(|d| d.bg(rgba(0xffffff0a)).text_color(rgba(0xffffffc0)))
-                    .child(if hidden == 1 { "1 more workspace…".to_owned() } else { format!("{hidden} more workspaces…") })
+                    .child(if hidden == 1 {
+                        "1 more workspace…".to_owned()
+                    } else {
+                        format!("{hidden} more workspaces…")
+                    })
                     .on_click(cx.listener(|this, _, _, cx| this.open_picker(cx)))
                     .into_any_element(),
             );
@@ -2003,14 +2210,19 @@ impl WindowView {
     }
 
     /// The right-click menu, over a backdrop that dismisses it.
-    fn context_menu_overlay(&self, viewport: gpui::Size<Pixels>, cx: &mut Context<Self>) -> Option<gpui::Div> {
+    fn context_menu_overlay(
+        &self,
+        viewport: gpui::Size<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
         const WIDTH: f32 = 220.;
         const ITEM: f32 = 24.;
         const SEPARATOR: f32 = 9.;
         let menu = self.context_menu.as_ref()?;
-        let item = |label: &'static str, keys: &'static str, enabled: bool, command: MenuCommand| {
-            Some((SharedString::from(label), keys, enabled, command))
-        };
+        let item =
+            |label: &'static str, keys: &'static str, enabled: bool, command: MenuCommand| {
+                Some((SharedString::from(label), keys, enabled, command))
+            };
         let items = match menu.target {
             MenuTarget::Pane(_) => {
                 let mut items = vec![
@@ -2019,7 +2231,11 @@ impl WindowView {
                     None,
                 ];
                 if menu.link.is_some() {
-                    items.extend([item("Open Link", "", true, MenuCommand::OpenLink), item("Copy Link", "", true, MenuCommand::CopyLink), None]);
+                    items.extend([
+                        item("Open Link", "", true, MenuCommand::OpenLink),
+                        item("Copy Link", "", true, MenuCommand::CopyLink),
+                        None,
+                    ]);
                 }
                 items.extend([
                     item("Split Right", "⌘D", true, MenuCommand::SplitRight),
@@ -2031,49 +2247,80 @@ impl WindowView {
                     item("Close Pane", "⌘W", true, MenuCommand::ClosePane),
                 ]);
                 items
-            }
+            },
             MenuTarget::Tab(index) => {
                 // A workspace's only tab is a workspace already.
-                let alone = self.places.get(index).and_then(|&(w, _)| self.layout.workspaces.iter().find(|ws| ws.id == w)).is_some_and(|w| w.tabs.len() < 2);
+                let alone = self
+                    .places
+                    .get(index)
+                    .and_then(|&(w, _)| self.layout.workspaces.iter().find(|ws| ws.id == w))
+                    .is_some_and(|w| w.tabs.len() < 2);
                 vec![
                     item("Rename Tab…", "", true, MenuCommand::RenameTab),
                     item("Move to New Workspace", "", !alone, MenuCommand::TabToNewWorkspace),
                     None,
                     item("Close Tab", "⇧⌘W", true, MenuCommand::CloseTab),
                 ]
-            }
+            },
             MenuTarget::Workspace(workspace) => {
-                let collapsed = self.layout.workspaces.iter().find(|w| w.id == workspace).is_some_and(|w| w.collapsed);
+                let collapsed = self
+                    .layout
+                    .workspaces
+                    .iter()
+                    .find(|w| w.id == workspace)
+                    .is_some_and(|w| w.collapsed);
                 let alone = self.layout.workspaces.len() < 2;
                 let mut items = vec![
                     item("New Tab Here", "", true, MenuCommand::NewTabInWorkspace),
                     item("Rename Workspace…", "", true, MenuCommand::RenameWorkspace),
-                    item(if collapsed { "Expand" } else { "Collapse" }, "", true, MenuCommand::ToggleCollapsed),
+                    item(
+                        if collapsed { "Expand" } else { "Collapse" },
+                        "",
+                        true,
+                        MenuCommand::ToggleCollapsed,
+                    ),
                     None,
                     item("Move to New Window", "", !alone, MenuCommand::MoveToNewWindow),
                 ];
                 for (window, title) in app_state::other_windows(self.window, cx) {
-                    let label = format!("Move to “{}”", if title.is_empty() { "window" } else { &title });
+                    let label =
+                        format!("Move to “{}”", if title.is_empty() { "window" } else { &title });
                     items.push(Some((label.into(), "", true, MenuCommand::MoveToWindow(window))));
                 }
-                let has_root = self.layout.workspaces.iter().find(|w| w.id == workspace).is_some_and(|w| w.root.is_some());
+                let has_root = self
+                    .layout
+                    .workspaces
+                    .iter()
+                    .find(|w| w.id == workspace)
+                    .is_some_and(|w| w.root.is_some());
                 items.extend([
                     item("Hide Workspace", "", true, MenuCommand::HideWorkspace),
                     None,
-                    item("Use This Directory as Root", "", true, MenuCommand::RootFromCurrentDirectory),
+                    item(
+                        "Use This Directory as Root",
+                        "",
+                        true,
+                        MenuCommand::RootFromCurrentDirectory,
+                    ),
                 ]);
                 if has_root {
                     items.push(item("Clear Root", "", true, MenuCommand::ClearRoot));
                 }
-                items.extend([None, item("Close Workspace", "", true, MenuCommand::CloseWorkspace)]);
                 items
-            }
+                    .extend([None, item("Close Workspace", "", true, MenuCommand::CloseWorkspace)]);
+                items
+            },
         };
 
         // A workspace's menu ends with its colors.
         let color_row = match menu.target {
             MenuTarget::Workspace(workspace) => {
-                let current = self.layout.workspaces.iter().find(|w| w.id == workspace).and_then(|w| w.color.clone());
+                let current = self
+                    .layout
+                    .workspaces
+                    .iter()
+                    .find(|w| w.id == workspace)
+                    .and_then(|w| w.color.clone());
                 let swatch = |i: usize, fill: Option<u32>, chosen: bool| {
                     div()
                         .id(("menu-color", i))
@@ -2097,10 +2344,14 @@ impl WindowView {
                 let mut row = div().flex().items_center().justify_between().h(px(ITEM)).px(px(9.));
                 row = row.child(swatch(0, None, current.is_none()));
                 for (i, name) in WORKSPACE_COLORS.iter().enumerate() {
-                    row = row.child(swatch(i + 1, workspace_color(name), current.as_deref() == Some(*name)));
+                    row = row.child(swatch(
+                        i + 1,
+                        workspace_color(name),
+                        current.as_deref() == Some(*name),
+                    ));
                 }
                 Some(row)
-            }
+            },
             _ => None,
         };
 
@@ -2128,8 +2379,9 @@ impl WindowView {
                 .rounded(px(5.))
                 .text_color(if enabled { rgba(0xffffffee) } else { rgba(0xffffff4d) })
                 .when(enabled, |d| {
-                    d.hover(|d| d.bg(rgba(0x3478f6ff)))
-                        .on_click(cx.listener(move |this, _, window, cx| this.run_menu_command(command, window, cx)))
+                    d.hover(|d| d.bg(rgba(0x3478f6ff))).on_click(cx.listener(
+                        move |this, _, window, cx| this.run_menu_command(command, window, cx),
+                    ))
                 })
                 .child(label)
                 .child(div().text_color(rgba(0xffffff66)).child(keys))
@@ -2164,7 +2416,9 @@ impl WindowView {
             .shadow_lg()
             .text_size(px(13.))
             .children(rows)
-            .when_some(color_row, |d, row| d.child(div().h(px(1.)).mx(px(9.)).my(px(4.)).bg(rgba(0xffffff1a))).child(row));
+            .when_some(color_row, |d, row| {
+                d.child(div().h(px(1.)).mx(px(9.)).my(px(4.)).bg(rgba(0xffffff1a))).child(row)
+            });
         Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
     }
 
@@ -2214,7 +2468,11 @@ impl WindowView {
 
     /// Hit areas for dragging dividers. Positions are relative to the
     /// terminal area's container at `origin`.
-    fn divider_handles(&self, origin: Point<Pixels>, cx: &mut Context<Self>) -> Vec<impl IntoElement> {
+    fn divider_handles(
+        &self,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Vec<impl IntoElement> {
         self.dividers
             .iter()
             .enumerate()
@@ -2286,7 +2544,8 @@ fn saved_window(bounds: WindowBounds) -> SavedWindow {
 
 /// Window bounds to open with, from a saved window.
 pub fn window_bounds(saved: &SavedWindow) -> WindowBounds {
-    let rect = Bounds::new(point(px(saved.x), px(saved.y)), size(px(saved.width), px(saved.height)));
+    let rect =
+        Bounds::new(point(px(saved.x), px(saved.y)), size(px(saved.width), px(saved.height)));
     if saved.fullscreen {
         WindowBounds::Fullscreen(rect)
     } else if saved.maximized {
@@ -2337,7 +2596,8 @@ impl Render for WindowView {
         }
 
         // Lay out the active tab and keep the server's pane sizes in step.
-        let (rects, dividers) = self.tabs.get(self.active).map(|tab| layout_of(tab, self.area)).unwrap_or_default();
+        let (rects, dividers) =
+            self.tabs.get(self.active).map(|tab| layout_of(tab, self.area)).unwrap_or_default();
         for (id, rect) in &rects {
             let size = self.size_for(*rect);
             if self.sizes.get(id) != Some(&size) {
@@ -2356,28 +2616,50 @@ impl Render for WindowView {
             .iter()
             .filter_map(|&(id, rect)| {
                 let screen = shared.screens.get(&id)?;
-                let link = self.hover_link.as_ref().filter(|(pane, ..)| *pane == id).map(|(_, line, span)| (*line, span.clone()));
-                let flash = shared.flashes.get(&id).map_or(0., |at| 1. - (at.elapsed().as_secs_f32() / FLASH.as_secs_f32()).min(1.));
-                Some(PaneView { rect, frame: screen.frame.clone(), focused: Some(id) == focused_id, link, flash })
+                let link = self
+                    .hover_link
+                    .as_ref()
+                    .filter(|(pane, ..)| *pane == id)
+                    .map(|(_, line, span)| (*line, span.clone()));
+                let flash = shared.flashes.get(&id).map_or(0., |at| {
+                    1. - (at.elapsed().as_secs_f32() / FLASH.as_secs_f32()).min(1.)
+                });
+                Some(PaneView {
+                    rect,
+                    frame: screen.frame.clone(),
+                    focused: Some(id) == focused_id,
+                    link,
+                    flash,
+                })
             })
             .collect();
         self.cursor = views.iter().find(|view| view.focused).and_then(|view| view.frame.cursor);
 
         let window_focused = self.focus.is_focused(window) && self.window_active;
-        let typing =
-            window_focused && self.search.is_none() && self.renaming.is_none() && self.picker.is_none() && !self.showing_activity();
-        self.blink_enabled = typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
+        let typing = window_focused
+            && self.search.is_none()
+            && self.renaming.is_none()
+            && self.picker.is_none()
+            && !self.showing_activity();
+        self.blink_enabled =
+            typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
         let title = match self.showing_activity() {
             true => "Activity".into(),
-            false => self.tabs.get(self.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default(),
+            false => {
+                self.tabs.get(self.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default()
+            },
         };
         window.set_window_title(&title);
 
-        let tint = Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
+        let tint =
+            Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
         let divider_color: Hsla = rgba(0xffffff1c).into();
         let metrics = self.metrics.clone();
-        let marked_text = self.marked_text.clone().filter(|_| self.search.is_none() && self.renaming.is_none() && self.picker.is_none());
+        let marked_text = self
+            .marked_text
+            .clone()
+            .filter(|_| self.search.is_none() && self.renaming.is_none() && self.picker.is_none());
         let cursor_visible = self.cursor_visible;
         let focused_rect = focused_id.and_then(|id| self.rect_of(id));
         let divider_lines: Vec<Bounds<Pixels>> = self
@@ -2386,8 +2668,12 @@ impl Render for WindowView {
             .map(|divider| {
                 let r = divider.rect;
                 match divider.axis {
-                    Axis::Horizontal => bounds(Rect { x: r.x + (r.width / 2.).floor(), width: 1., ..r }),
-                    Axis::Vertical => bounds(Rect { y: r.y + (r.height / 2.).floor(), height: 1., ..r }),
+                    Axis::Horizontal => {
+                        bounds(Rect { x: r.x + (r.width / 2.).floor(), width: 1., ..r })
+                    },
+                    Axis::Vertical => {
+                        bounds(Rect { y: r.y + (r.height / 2.).floor(), height: 1., ..r })
+                    },
                 }
             })
             .collect();
@@ -2410,7 +2696,9 @@ impl Render for WindowView {
                 }
             }))
             .on_action(cx.listener(|this, _: &NextWorkspace, _, cx| this.cycle_workspace(1, cx)))
-            .on_action(cx.listener(|this, _: &PreviousWorkspace, _, cx| this.cycle_workspace(-1, cx)))
+            .on_action(
+                cx.listener(|this, _: &PreviousWorkspace, _, cx| this.cycle_workspace(-1, cx)),
+            )
             .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
                 if let Some(pane) = this.focused_id() {
                     this.send(ClientMessage::ClosePane { pane }, cx);
@@ -2429,12 +2717,26 @@ impl Render for WindowView {
                 let count = this.tabs.len().max(1);
                 this.select((this.active + count - 1) % count, cx);
             }))
-            .on_action(cx.listener(|this, _: &SplitRight, _, cx| this.split(None, Axis::Horizontal, cx)))
-            .on_action(cx.listener(|this, _: &SplitDown, _, cx| this.split(None, Axis::Vertical, cx)))
-            .on_action(cx.listener(|this, _: &FocusLeft, _, cx| this.focus_direction(Direction::Left, cx)))
-            .on_action(cx.listener(|this, _: &FocusRight, _, cx| this.focus_direction(Direction::Right, cx)))
-            .on_action(cx.listener(|this, _: &FocusUp, _, cx| this.focus_direction(Direction::Up, cx)))
-            .on_action(cx.listener(|this, _: &FocusDown, _, cx| this.focus_direction(Direction::Down, cx)))
+            .on_action(
+                cx.listener(|this, _: &SplitRight, _, cx| this.split(None, Axis::Horizontal, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SplitDown, _, cx| this.split(None, Axis::Vertical, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusLeft, _, cx| this.focus_direction(Direction::Left, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusRight, _, cx| {
+                    this.focus_direction(Direction::Right, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusUp, _, cx| this.focus_direction(Direction::Up, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &FocusDown, _, cx| this.focus_direction(Direction::Down, cx)),
+            )
             .on_action(cx.listener(|this, _: &NextPane, _, cx| this.cycle_pane(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousPane, _, cx| this.cycle_pane(false, cx)))
             .on_action(cx.listener(|this, _: &ToggleZoom, _, cx| {
@@ -2477,13 +2779,15 @@ impl Render for WindowView {
                 this.set_font_size(this.config.font_size, window, cx)
             }))
             .on_mouse_move(cx.listener(Self::mouse_move))
-            .on_modifiers_changed(cx.listener(|this, event: &gpui::ModifiersChangedEvent, _, cx| {
-                if this.command_held != event.modifiers.platform {
-                    this.command_held = event.modifiers.platform;
-                    cx.notify();
-                }
-                this.update_hover_link(event.modifiers.platform, cx);
-            }))
+            .on_modifiers_changed(cx.listener(
+                |this, event: &gpui::ModifiersChangedEvent, _, cx| {
+                    if this.command_held != event.modifiers.platform {
+                        this.command_held = event.modifiers.platform;
+                        cx.notify();
+                    }
+                    this.update_hover_link(event.modifiers.platform, cx);
+                },
+            ))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Middle, cx.listener(Self::mouse_up))
             .on_mouse_up(MouseButton::Right, cx.listener(Self::mouse_up))
@@ -2511,51 +2815,75 @@ impl Render for WindowView {
                             .text_color(rgba(0xffffffb8))
                             .child(Self::one_line(title).min_w_0()),
                     )
-                    .when(self.showing_activity(), |d| d.child(div().flex_1().min_h_0().child(self.activity_view(cx))))
-                    .when(!self.showing_activity(), |d| d.child(
-                        div()
-                            .id("terminal")
-                            .relative()
-                            .flex_1()
-                            .min_h_0()
-                            .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
-                            .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
-                            .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
-                            .on_scroll_wheel(cx.listener(Self::scroll))
-                            .when(self.hover_link.is_some(), |d| d.cursor_pointer())
-                            .child(
-                                canvas(
-                                    |_, _, _| {},
-                                    move |_, _, window, cx| {
-                                        let paint_started = Instant::now();
-                                        let build_time = Duration::ZERO;
-                                        if let Some(rect) = focused_rect {
-                                            window.handle_input(&focus, ElementInputHandler::new(bounds(rect), entity), cx);
-                                        }
-                                        for view in &views {
-                                            let state = terminal::PaintState {
-                                                focused: view.focused && typing,
-                                                cursor_visible,
-                                                marked_text: marked_text.as_deref().filter(|_| view.focused),
-                                                fade: if split && !view.focused { UNFOCUSED_FADE } else { 0. },
-                                                link: view.link.clone(),
-                                                flash: view.flash,
-                                            };
-                                            terminal::paint(bounds(view.rect), &view.frame, &metrics, state, window, cx);
-                                        }
-                                        for line in &divider_lines {
-                                            window.paint_quad(fill(*line, divider_color));
-                                        }
-                                        if crate::profile::enabled() {
-                                            crate::profile::record(build_time, paint_started.elapsed());
-                                        }
-                                    },
+                    .when(self.showing_activity(), |d| {
+                        d.child(div().flex_1().min_h_0().child(self.activity_view(cx)))
+                    })
+                    .when(!self.showing_activity(), |d| {
+                        d.child(
+                            div()
+                                .id("terminal")
+                                .relative()
+                                .flex_1()
+                                .min_h_0()
+                                .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+                                .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
+                                .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
+                                .on_scroll_wheel(cx.listener(Self::scroll))
+                                .when(self.hover_link.is_some(), |d| d.cursor_pointer())
+                                .child(
+                                    canvas(
+                                        |_, _, _| {},
+                                        move |_, _, window, cx| {
+                                            let paint_started = Instant::now();
+                                            let build_time = Duration::ZERO;
+                                            if let Some(rect) = focused_rect {
+                                                window.handle_input(
+                                                    &focus,
+                                                    ElementInputHandler::new(bounds(rect), entity),
+                                                    cx,
+                                                );
+                                            }
+                                            for view in &views {
+                                                let state = terminal::PaintState {
+                                                    focused: view.focused && typing,
+                                                    cursor_visible,
+                                                    marked_text: marked_text
+                                                        .as_deref()
+                                                        .filter(|_| view.focused),
+                                                    fade: if split && !view.focused {
+                                                        UNFOCUSED_FADE
+                                                    } else {
+                                                        0.
+                                                    },
+                                                    link: view.link.clone(),
+                                                    flash: view.flash,
+                                                };
+                                                terminal::paint(
+                                                    bounds(view.rect),
+                                                    &view.frame,
+                                                    &metrics,
+                                                    state,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                            for line in &divider_lines {
+                                                window.paint_quad(fill(*line, divider_color));
+                                            }
+                                            if crate::profile::enabled() {
+                                                crate::profile::record(
+                                                    build_time,
+                                                    paint_started.elapsed(),
+                                                );
+                                            }
+                                        },
+                                    )
+                                    .size_full(),
                                 )
-                                .size_full(),
-                            )
-                            .children(self.divider_handles(container, cx))
-                            .children(self.search_bar(container)),
-                    )),
+                                .children(self.divider_handles(container, cx))
+                                .children(self.search_bar(container)),
+                        )
+                    }),
             )
             .children(self.context_menu_overlay(window.viewport_size(), cx))
             .children(self.picker_overlay(cx))
@@ -2573,7 +2901,8 @@ impl EntityInputHandler for WindowView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<String> {
-        let marked: Vec<u16> = self.marked_text.as_deref().unwrap_or_default().encode_utf16().collect();
+        let marked: Vec<u16> =
+            self.marked_text.as_deref().unwrap_or_default().encode_utf16().collect();
         let range = range.start.min(marked.len())..range.end.min(marked.len());
         *adjusted_range = Some(range.clone());
         Some(String::from_utf16_lossy(&marked[range]))
@@ -2589,7 +2918,11 @@ impl EntityInputHandler for WindowView {
         Some(UTF16Selection { range: end..end, reversed: false })
     }
 
-    fn marked_text_range(&self, _window: &mut Window, _cx: &mut Context<Self>) -> Option<Range<usize>> {
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
         self.marked_text.as_deref().map(|text| 0..text.encode_utf16().count())
     }
 

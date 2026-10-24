@@ -65,7 +65,9 @@ fn parent_pid(pid: i32) -> Option<i32> {
     let mut bsd = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
     let size = size_of::<libc::proc_bsdinfo>() as i32;
     // SAFETY: `bsd` is valid for `size` bytes.
-    if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, bsd.as_mut_ptr().cast(), size) } != size {
+    if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, bsd.as_mut_ptr().cast(), size) }
+        != size
+    {
         return None;
     }
     // SAFETY: filled by the kernel.
@@ -155,7 +157,9 @@ pub fn processes() -> Vec<ProcessSample> {
     let mut timebase = libc::mach_timebase_info { numer: 1, denom: 1 };
     // SAFETY: fills the struct.
     unsafe { libc::mach_timebase_info(&mut timebase) };
-    let to_ns = |ticks: u64| (ticks as u128 * timebase.numer as u128 / timebase.denom.max(1) as u128) as u64;
+    let to_ns = |ticks: u64| {
+        (ticks as u128 * timebase.numer as u128 / timebase.denom.max(1) as u128) as u64
+    };
 
     // SAFETY: a size query, then a buffer of that size.
     let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
@@ -174,7 +178,10 @@ pub fn processes() -> Vec<ProcessSample> {
         let mut bsd = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
         let size = size_of::<libc::proc_bsdinfo>() as i32;
         // SAFETY: `bsd` is valid for `size` bytes.
-        if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, bsd.as_mut_ptr().cast(), size) } != size {
+        if unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, bsd.as_mut_ptr().cast(), size)
+        } != size
+        {
             continue;
         }
         // SAFETY: filled by the kernel.
@@ -185,14 +192,16 @@ pub fn processes() -> Vec<ProcessSample> {
         let mut task = MaybeUninit::<libc::proc_taskinfo>::zeroed();
         let size = size_of::<libc::proc_taskinfo>() as i32;
         // SAFETY: `task` is valid for `size` bytes.
-        let (cpu_ns, memory) =
-            if unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, task.as_mut_ptr().cast(), size) } == size {
-                // SAFETY: filled by the kernel.
-                let task = unsafe { task.assume_init() };
-                (to_ns(task.pti_total_user + task.pti_total_system), task.pti_resident_size)
-            } else {
-                (0, 0)
-            };
+        let (cpu_ns, memory) = if unsafe {
+            libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, task.as_mut_ptr().cast(), size)
+        } == size
+        {
+            // SAFETY: filled by the kernel.
+            let task = unsafe { task.assume_init() };
+            (to_ns(task.pti_total_user + task.pti_total_system), task.pti_resident_size)
+        } else {
+            (0, 0)
+        };
         let name = process_name(pid).unwrap_or_default();
         let name = script_name(pid, &name).unwrap_or(name);
         samples.push(ProcessSample {
@@ -243,7 +252,8 @@ fn script_name(pid: i32, name: &str) -> Option<String> {
     // `node /usr/lib/node_modules/x/dist/index.js`: the package is the name.
     if matches!(file, "index" | "main" | "cli") {
         let parts: Vec<&str> = script.split('/').collect();
-        let package = parts.iter().rposition(|p| *p == "node_modules").and_then(|i| parts.get(i + 1))?;
+        let package =
+            parts.iter().rposition(|p| *p == "node_modules").and_then(|i| parts.get(i + 1))?;
         return Some(package.trim_start_matches('@').rsplit('/').next()?.to_owned());
     }
     Some(file.to_owned())
@@ -255,12 +265,25 @@ fn process_args(pid: i32) -> Option<Vec<String>> {
     let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
     let mut size: libc::size_t = 0;
     // SAFETY: a size query with a null buffer.
-    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+    if unsafe {
+        libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0)
+    } != 0
+    {
         return None;
     }
     let mut buf = vec![0u8; size];
     // SAFETY: `buf` is valid for `size` bytes.
-    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+    if unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    } != 0
+    {
         return None;
     }
     buf.truncate(size);
@@ -274,7 +297,12 @@ fn process_args(pid: i32) -> Option<Vec<String>> {
 #[cfg(target_os = "linux")]
 fn process_args(pid: i32) -> Option<Vec<String>> {
     let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    Some(raw.split(|&b| b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect())
+    Some(
+        raw.split(|&b| b == 0)
+            .filter(|a| !a.is_empty())
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect(),
+    )
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -323,7 +351,10 @@ mod tests {
 
     #[test]
     fn file_urls() {
-        assert_eq!(path_from_file_url("file://host/Users/me/a%20b"), Some(PathBuf::from("/Users/me/a b")));
+        assert_eq!(
+            path_from_file_url("file://host/Users/me/a%20b"),
+            Some(PathBuf::from("/Users/me/a b"))
+        );
         assert_eq!(path_from_file_url("file:///tmp"), Some(PathBuf::from("/tmp")));
         assert_eq!(path_from_file_url("http://x/y"), None);
     }
@@ -349,7 +380,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let script = dir.join("my-agent.py");
         std::fs::write(&script, "import time\ntime.sleep(5)\n").unwrap();
-        let Ok(mut child) = std::process::Command::new("python3").arg(&script).spawn() else { return };
+        let Ok(mut child) = std::process::Command::new("python3").arg(&script).spawn() else {
+            return;
+        };
         std::thread::sleep(std::time::Duration::from_millis(300));
         let pid = child.id() as i32;
         let name = process_name(pid).unwrap_or_default();

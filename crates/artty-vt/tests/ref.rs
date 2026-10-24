@@ -6,13 +6,13 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
+use artty_vt::ansi;
 use artty_vt::event::{Event, EventListener};
 use artty_vt::grid::{Dimensions, Grid};
 use artty_vt::index::{Column, Line};
 use artty_vt::term::cell::Cell;
 use artty_vt::term::test::TermSize;
 use artty_vt::term::{Config, Term};
-use artty_vt::ansi;
 
 macro_rules! ref_tests {
     ($($name:ident)*) => {

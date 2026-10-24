@@ -53,7 +53,12 @@ fn dir() -> io::Result<PathBuf> {
 
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -86,11 +91,17 @@ pub(crate) fn read(path: &Path) -> io::Result<(Header, HashMap<u64, TermSnapshot
     let mut snapshots = HashMap::new();
     for pane in &header.panes {
         let file = snapshot_path(dir, pane.session.id);
-        match std::fs::read(&file).map_err(io::Error::other).and_then(|b| postcard::from_bytes(&b).map_err(io::Error::other)) {
+        match std::fs::read(&file)
+            .map_err(io::Error::other)
+            .and_then(|b| postcard::from_bytes(&b).map_err(io::Error::other))
+        {
             Ok(snapshot) => {
                 snapshots.insert(pane.session.id, snapshot);
-            }
-            Err(err) => log::warn!("pane {}: its screen didn't carry over ({err}); it will redraw", pane.session.id),
+            },
+            Err(err) => log::warn!(
+                "pane {}: its screen didn't carry over ({err}); it will redraw",
+                pane.session.id
+            ),
         }
         let _ = std::fs::remove_file(file);
     }

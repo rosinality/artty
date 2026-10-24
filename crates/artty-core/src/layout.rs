@@ -84,7 +84,7 @@ impl Node {
             Node::Split { first, second, .. } => {
                 first.collect(out);
                 second.collect(out);
-            }
+            },
         }
     }
 
@@ -107,9 +107,11 @@ impl Node {
                     second: Box::new(Node::Pane(new)),
                 };
                 true
-            }
+            },
             Node::Pane(_) => false,
-            Node::Split { first, second, .. } => first.split(target, new, axis) || second.split(target, new, axis),
+            Node::Split { first, second, .. } => {
+                first.split(target, new, axis) || second.split(target, new, axis)
+            },
         }
     }
 
@@ -119,12 +121,17 @@ impl Node {
         match self {
             Node::Pane(id) if id == target => None,
             Node::Pane(_) => Some(self),
-            Node::Split { axis, ratio, first, second } => match (first.without(target), second.without(target)) {
-                (Some(first), Some(second)) => {
-                    Some(Node::Split { axis, ratio, first: Box::new(first), second: Box::new(second) })
+            Node::Split { axis, ratio, first, second } => {
+                match (first.without(target), second.without(target)) {
+                    (Some(first), Some(second)) => Some(Node::Split {
+                        axis,
+                        ratio,
+                        first: Box::new(first),
+                        second: Box::new(second),
+                    }),
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
                 }
-                (Some(only), None) | (None, Some(only)) => Some(only),
-                (None, None) => None,
             },
         }
     }
@@ -133,9 +140,13 @@ impl Node {
         match (self, path.split_first()) {
             (Node::Split { ratio, .. }, None) => *ratio = value.clamp(MIN_RATIO, 1. - MIN_RATIO),
             (Node::Split { first, second, .. }, Some((&go_second, rest))) => {
-                if go_second { second.set_ratio(rest, value) } else { first.set_ratio(rest, value) }
-            }
-            (Node::Pane(_), _) => {}
+                if go_second {
+                    second.set_ratio(rest, value)
+                } else {
+                    first.set_ratio(rest, value)
+                }
+            },
+            (Node::Pane(_), _) => {},
         }
     }
 
@@ -148,7 +159,14 @@ impl Node {
         (panes, dividers)
     }
 
-    fn layout_into(&self, area: Rect, gap: f32, path: &mut Vec<bool>, panes: &mut Vec<(PaneId, Rect)>, dividers: &mut Vec<Divider>) {
+    fn layout_into(
+        &self,
+        area: Rect,
+        gap: f32,
+        path: &mut Vec<bool>,
+        panes: &mut Vec<(PaneId, Rect)>,
+        dividers: &mut Vec<Divider>,
+    ) {
         match self {
             Node::Pane(id) => panes.push((*id, area)),
             Node::Split { axis, ratio, first, second } => {
@@ -157,16 +175,24 @@ impl Node {
                         let first_width = ((area.width - gap) * ratio).round().max(0.);
                         let a = Rect { width: first_width, ..area };
                         let divider = Rect { x: area.x + first_width, width: gap, ..area };
-                        let b = Rect { x: divider.right(), width: (area.width - first_width - gap).max(0.), ..area };
+                        let b = Rect {
+                            x: divider.right(),
+                            width: (area.width - first_width - gap).max(0.),
+                            ..area
+                        };
                         (a, divider, b)
-                    }
+                    },
                     Axis::Vertical => {
                         let first_height = ((area.height - gap) * ratio).round().max(0.);
                         let a = Rect { height: first_height, ..area };
                         let divider = Rect { y: area.y + first_height, height: gap, ..area };
-                        let b = Rect { y: divider.bottom(), height: (area.height - first_height - gap).max(0.), ..area };
+                        let b = Rect {
+                            y: divider.bottom(),
+                            height: (area.height - first_height - gap).max(0.),
+                            ..area
+                        };
                         (a, divider, b)
-                    }
+                    },
                 };
                 dividers.push(Divider { path: path.clone(), axis: *axis, rect: divider, area });
                 path.push(false);
@@ -175,7 +201,7 @@ impl Node {
                 path.push(true);
                 second.layout_into(b, gap, path, panes, dividers);
                 path.pop();
-            }
+            },
         }
     }
 }
@@ -200,18 +226,22 @@ pub fn neighbor(panes: &[(PaneId, Rect)], from: PaneId, direction: Direction) ->
         .filter(|(id, _)| *id != from)
         .filter_map(|(id, rect)| {
             let (distance, shared) = match direction {
-                Direction::Right if rect.x >= origin.right() - EPSILON => {
-                    (rect.x - origin.right(), overlap(rect.y, rect.bottom(), origin.y, origin.bottom()))
-                }
-                Direction::Left if rect.right() <= origin.x + EPSILON => {
-                    (origin.x - rect.right(), overlap(rect.y, rect.bottom(), origin.y, origin.bottom()))
-                }
-                Direction::Down if rect.y >= origin.bottom() - EPSILON => {
-                    (rect.y - origin.bottom(), overlap(rect.x, rect.right(), origin.x, origin.right()))
-                }
-                Direction::Up if rect.bottom() <= origin.y + EPSILON => {
-                    (origin.y - rect.bottom(), overlap(rect.x, rect.right(), origin.x, origin.right()))
-                }
+                Direction::Right if rect.x >= origin.right() - EPSILON => (
+                    rect.x - origin.right(),
+                    overlap(rect.y, rect.bottom(), origin.y, origin.bottom()),
+                ),
+                Direction::Left if rect.right() <= origin.x + EPSILON => (
+                    origin.x - rect.right(),
+                    overlap(rect.y, rect.bottom(), origin.y, origin.bottom()),
+                ),
+                Direction::Down if rect.y >= origin.bottom() - EPSILON => (
+                    rect.y - origin.bottom(),
+                    overlap(rect.x, rect.right(), origin.x, origin.right()),
+                ),
+                Direction::Up if rect.bottom() <= origin.y + EPSILON => (
+                    origin.y - rect.bottom(),
+                    overlap(rect.x, rect.right(), origin.x, origin.right()),
+                ),
                 _ => return None,
             };
             (shared > 0.).then_some((*id, distance, shared))
@@ -257,12 +287,15 @@ mod tests {
     #[test]
     fn removing_promotes_the_sibling() {
         let root = three().without(2).unwrap();
-        assert_eq!(root, Node::Split {
-            axis: Axis::Horizontal,
-            ratio: 0.5,
-            first: Box::new(Node::Pane(1)),
-            second: Box::new(Node::Pane(3)),
-        });
+        assert_eq!(
+            root,
+            Node::Split {
+                axis: Axis::Horizontal,
+                ratio: 0.5,
+                first: Box::new(Node::Pane(1)),
+                second: Box::new(Node::Pane(3)),
+            }
+        );
         assert_eq!(Node::Pane(1).without(1), None);
     }
 

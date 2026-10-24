@@ -86,7 +86,8 @@ fn paint_lines(arms: Arms, cell: Bounds<Pixels>, color: Hsla, window: &mut Windo
     let light = light_width(cell);
     let (left, top) = (cell.origin.x, cell.origin.y);
     let (right, bottom) = (left + cell.size.width, top + cell.size.height);
-    let center = point(left + (cell.size.width / 2.).floor(), top + (cell.size.height / 2.).floor());
+    let center =
+        point(left + (cell.size.width / 2.).floor(), top + (cell.size.height / 2.).floor());
     // The thickest arm crossing the center, so perpendicular arms meet it fully.
     let max = |a: Weight, b: Weight| {
         [a, b].into_iter().map(|w| width_of(w, light)).fold(px(0.), Pixels::max)
@@ -105,7 +106,8 @@ fn paint_lines(arms: Arms, cell: Bounds<Pixels>, color: Hsla, window: &mut Windo
             let bounds = match index {
                 // Up / down arms: vertical strokes reaching past the center.
                 0 | 2 => {
-                    let x = center.x + shift - (if weight == Weight::Double { light } else { w }) / 2.;
+                    let x =
+                        center.x + shift - (if weight == Weight::Double { light } else { w }) / 2.;
                     let stroke = if weight == Weight::Double { light } else { w };
                     let (y0, y1) = if index == 0 {
                         (top, center.y + horizontal / 2.)
@@ -113,10 +115,11 @@ fn paint_lines(arms: Arms, cell: Bounds<Pixels>, color: Hsla, window: &mut Windo
                         (center.y - horizontal / 2., bottom)
                     };
                     Bounds::new(point(x, y0), size(stroke, y1 - y0))
-                }
+                },
                 // Right / left arms: horizontal strokes.
                 _ => {
-                    let y = center.y + shift - (if weight == Weight::Double { light } else { w }) / 2.;
+                    let y =
+                        center.y + shift - (if weight == Weight::Double { light } else { w }) / 2.;
                     let stroke = if weight == Weight::Double { light } else { w };
                     let (x0, x1) = if index == 1 {
                         (center.x - vertical / 2., right)
@@ -124,7 +127,7 @@ fn paint_lines(arms: Arms, cell: Bounds<Pixels>, color: Hsla, window: &mut Windo
                         (left, center.x + vertical / 2.)
                     };
                     Bounds::new(point(x0, y), size(x1 - x0, stroke))
-                }
+                },
             };
             window.paint_quad(fill(bounds, color));
         }
@@ -191,12 +194,12 @@ fn paint_block(c: char, cell: Bounds<Pixels>, color: Hsla, window: &mut Window) 
         '\u{2581}'..='\u{2587}' => {
             let n = c as u32 - 0x2580;
             paint(rect(0., 1. - eighths(n), 1., 1.), 1.);
-        }
+        },
         // Left eighths: ▉▊▋▌▍▎▏ (7/8 down to 1/8)
         '\u{2589}'..='\u{258f}' => {
             let n = 8 - (c as u32 - 0x2588);
             paint(rect(0., 0., eighths(n), 1.), 1.);
-        }
+        },
         // Quadrants.
         '▖' | '▗' | '▘' | '▝' | '▙' | '▚' | '▛' | '▜' | '▞' | '▟' => {
             // Bits: upper-left, upper-right, lower-left, lower-right.
@@ -218,7 +221,7 @@ fn paint_block(c: char, cell: Bounds<Pixels>, color: Hsla, window: &mut Window) 
                     paint(rect(x, y, x + 0.5, y + 0.5), 1.);
                 }
             }
-        }
+        },
         _ => return false,
     }
     true

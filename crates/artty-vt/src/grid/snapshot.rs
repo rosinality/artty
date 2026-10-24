@@ -35,7 +35,8 @@ impl Grid<Cell> {
             .rev()
             .map(|line| {
                 let row = &self[Line(line)];
-                let mut cells: Vec<Cell> = (0..self.columns).map(|column| row[Column(column)].clone()).collect();
+                let mut cells: Vec<Cell> =
+                    (0..self.columns).map(|column| row[Column(column)].clone()).collect();
                 while cells.last() == Some(&blank) {
                     cells.pop();
                 }
@@ -55,8 +56,16 @@ impl Grid<Cell> {
     }
 
     pub fn from_snapshot(snapshot: GridSnapshot) -> Self {
-        let GridSnapshot { columns, lines, max_scroll_limit, display_offset, lines_scrolled, rows, cursor, saved_cursor } =
-            snapshot;
+        let GridSnapshot {
+            columns,
+            lines,
+            max_scroll_limit,
+            display_offset,
+            lines_scrolled,
+            rows,
+            cursor,
+            saved_cursor,
+        } = snapshot;
         let mut grid = Grid::new(lines, columns, max_scroll_limit);
         let mut rows: Vec<Row<Cell>> = rows
             .into_iter()

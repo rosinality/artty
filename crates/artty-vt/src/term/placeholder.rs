@@ -14,6 +14,7 @@ pub const PLACEHOLDER: char = '\u{10eeee}';
 
 /// The marks for 0, 1, 2, ...: combining characters of class 230 from
 /// Unicode 6.0.0, as the protocol defines them (rowcolumn-diacritics.txt).
+#[rustfmt::skip]
 const DIACRITICS: [char; 297] = [
     '\u{305}', '\u{30d}', '\u{30e}', '\u{310}', '\u{312}', '\u{33d}', '\u{33e}', '\u{33f}',
     '\u{346}', '\u{34a}', '\u{34b}', '\u{34c}', '\u{350}', '\u{351}', '\u{352}', '\u{357}',
@@ -81,7 +82,9 @@ impl PlaceholderLine {
     /// previous one if `adjacent`.
     pub fn decode(&mut self, fg: Color, marks: &[char], adjacent: bool) -> Option<Placeholder> {
         let low = match fg {
-            Color::Spec(rgb) => (u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b),
+            Color::Spec(rgb) => {
+                (u32::from(rgb.r) << 16) | (u32::from(rgb.g) << 8) | u32::from(rgb.b)
+            },
             Color::Indexed(index) => u32::from(index),
             Color::Named(_) => {
                 self.previous = None;
@@ -92,7 +95,9 @@ impl PlaceholderLine {
         let previous = self.previous.filter(|(color, ..)| adjacent && *color == fg);
         let (row, column, high) = match (values.as_slice(), previous) {
             ([row, column, high, ..], _) => (*row, *column, *high),
-            ([row, column], Some((_, prow, pcolumn, phigh))) if *row == prow && *column == pcolumn + 1 => {
+            ([row, column], Some((_, prow, pcolumn, phigh)))
+                if *row == prow && *column == pcolumn + 1 =>
+            {
                 (*row, *column, phigh)
             },
             ([row, column], _) => (*row, *column, 0),
@@ -121,8 +126,14 @@ mod tests {
         let mut line = PlaceholderLine::default();
         let id = Color::Indexed(42);
         // Row 0, columns 0 and 1, spelled out.
-        assert_eq!(line.decode(id, &['\u{305}', '\u{305}'], true), Some(Placeholder { image: 42, row: 0, column: 0 }));
-        assert_eq!(line.decode(id, &['\u{305}', '\u{30d}'], true), Some(Placeholder { image: 42, row: 0, column: 1 }));
+        assert_eq!(
+            line.decode(id, &['\u{305}', '\u{305}'], true),
+            Some(Placeholder { image: 42, row: 0, column: 0 })
+        );
+        assert_eq!(
+            line.decode(id, &['\u{305}', '\u{30d}'], true),
+            Some(Placeholder { image: 42, row: 0, column: 1 })
+        );
         // Then nothing: the next column on the same row.
         assert_eq!(line.decode(id, &[], true), Some(Placeholder { image: 42, row: 0, column: 2 }));
         // A third mark gives the id's high byte; 24-bit colors the low bits.

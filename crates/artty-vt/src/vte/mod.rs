@@ -387,9 +387,7 @@ impl Parser {
                 self.reset_params();
                 self.state = State::Escape
             },
-            0x3B => {
-                self.action_osc_put_param()
-            },
+            0x3B => self.action_osc_put_param(),
             _ => self.action_osc_put(byte),
         }
     }
@@ -822,5 +820,3 @@ pub trait Perform {
         false
     }
 }
-
-

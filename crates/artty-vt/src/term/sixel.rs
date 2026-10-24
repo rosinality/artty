@@ -45,7 +45,11 @@ pub(crate) struct Decoded {
 /// HLS (hue 0–360, lightness and saturation 0–100) as sixel defines it:
 /// hue 0 is blue, not red.
 fn hls(h: u16, l: u16, s: u16) -> [u8; 3] {
-    let (h, l, s) = (((f32::from(h) + 240.) % 360.) / 360., f32::from(l.min(100)) / 100., f32::from(s.min(100)) / 100.);
+    let (h, l, s) = (
+        ((f32::from(h) + 240.) % 360.) / 360.,
+        f32::from(l.min(100)) / 100.,
+        f32::from(s.min(100)) / 100.,
+    );
     if s == 0. {
         let v = (l * 255.).round() as u8;
         return [v, v, v];
@@ -85,7 +89,11 @@ pub(crate) fn decode(data: &[u8], transparent: bool) -> Option<Decoded> {
         while *i < data.len() && data[*i].is_ascii_digit() {
             *i += 1;
         }
-        std::str::from_utf8(&data[start..*i]).ok()?.parse::<u32>().ok().map(|n| n.min(u32::from(u16::MAX)) as u16)
+        std::str::from_utf8(&data[start..*i])
+            .ok()?
+            .parse::<u32>()
+            .ok()
+            .map(|n| n.min(u32::from(u16::MAX)) as u16)
     };
     let numbers = |i: &mut usize| -> Vec<u16> {
         let mut values = vec![number(i).unwrap_or(0)];
@@ -97,18 +105,20 @@ pub(crate) fn decode(data: &[u8], transparent: bool) -> Option<Decoded> {
     };
 
     // Grow the canvas to `w` × `h` (keeping what's drawn).
-    let grow = |pixels: &mut Vec<u16>, width: &mut usize, height: &mut usize, w: usize, h: usize| {
-        let (w, h) = (w.min(MAX_SIDE).max(*width), h.min(MAX_SIDE).max(*height));
-        if (w, h) == (*width, *height) {
-            return;
-        }
-        let mut grown = vec![0u16; w * h];
-        for row in 0..*height {
-            grown[row * w..row * w + *width].copy_from_slice(&pixels[row * *width..(row + 1) * *width]);
-        }
-        *pixels = grown;
-        (*width, *height) = (w, h);
-    };
+    let grow =
+        |pixels: &mut Vec<u16>, width: &mut usize, height: &mut usize, w: usize, h: usize| {
+            let (w, h) = (w.min(MAX_SIDE).max(*width), h.min(MAX_SIDE).max(*height));
+            if (w, h) == (*width, *height) {
+                return;
+            }
+            let mut grown = vec![0u16; w * h];
+            for row in 0..*height {
+                grown[row * w..row * w + *width]
+                    .copy_from_slice(&pixels[row * *width..(row + 1) * *width]);
+            }
+            *pixels = grown;
+            (*width, *height) = (w, h);
+        };
 
     while i < data.len() {
         match data[i] {
@@ -172,7 +182,8 @@ pub(crate) fn decode(data: &[u8], transparent: bool) -> Option<Decoded> {
     if width == 0 || height == 0 {
         return None;
     }
-    let background = [palette[0][0], palette[0][1], palette[0][2], if transparent { 0 } else { 255 }];
+    let background =
+        [palette[0][0], palette[0][1], palette[0][2], if transparent { 0 } else { 255 }];
     let rgba = pixels
         .iter()
         .flat_map(|&p| match p {
@@ -193,7 +204,13 @@ impl<T: EventListener> Term<T> {
         let Some(image) = decode(data, transparent) else { return };
         let cell = (f32::from(self.cell_size.0), f32::from(self.cell_size.1));
         let size = (image.width as f32 / cell.0, image.height as f32 / cell.1);
-        let image = Image::new(ImageFormat::Rgba, image.rgba.into(), (image.width as u32, image.height as u32), size, 0);
+        let image = Image::new(
+            ImageFormat::Rgba,
+            image.rgba.into(),
+            (image.width as u32, image.height as u32),
+            size,
+            0,
+        );
         self.place_image(image, true);
     }
 }

@@ -136,7 +136,8 @@ impl<T: EventListener> Term<T> {
         if !inline || payload.len() > MAX_ENCODED {
             return;
         }
-        let payload: Vec<u8> = payload.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+        let payload: Vec<u8> =
+            payload.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
         let Ok(data) = BASE64.decode(&payload) else {
             log::warn!("inline image: bad base64");
             return;
@@ -151,8 +152,21 @@ impl<T: EventListener> Term<T> {
         }
         let cell = (f32::from(self.cell_size.0), f32::from(self.cell_size.1));
         let terminal = (cell.0 * self.columns() as f32, cell.1 * self.screen_lines() as f32);
-        let (w, h) = display_size((pixel_w as f32, pixel_h as f32), width, height, keep_aspect, cell, terminal);
-        let image = Image::new(ImageFormat::Encoded, data.into(), (pixel_w, pixel_h), (w / cell.0, h / cell.1), 0);
+        let (w, h) = display_size(
+            (pixel_w as f32, pixel_h as f32),
+            width,
+            height,
+            keep_aspect,
+            cell,
+            terminal,
+        );
+        let image = Image::new(
+            ImageFormat::Encoded,
+            data.into(),
+            (pixel_w, pixel_h),
+            (w / cell.0, h / cell.1),
+            0,
+        );
         self.place_image(image, true);
     }
 
@@ -175,7 +189,8 @@ impl<T: EventListener> Term<T> {
                 if at >= self.columns() {
                     break;
                 }
-                let tile = ImageTile { image: image.clone(), column: column as u16, row: row as u16 };
+                let tile =
+                    ImageTile { image: image.clone(), column: column as u16, row: row as u16 };
                 self.grid[line][Column(at)].set_image(tile);
             }
             if row + 1 < rows {
@@ -211,11 +226,40 @@ mod tests {
         assert_eq!(display_size((100., 50.), auto, auto, true, cell, term), (100., 50.));
         assert_eq!(display_size((1600., 400.), auto, auto, true, cell, term), (800., 200.));
         // Cells, pixels and percentages, keeping the aspect ratio.
-        assert_eq!(display_size((100., 50.), Dimension::parse("20"), auto, true, cell, term), (200., 100.));
-        assert_eq!(display_size((100., 50.), auto, Dimension::parse("10px"), true, cell, term), (20., 10.));
-        assert_eq!(display_size((100., 50.), Dimension::parse("50%"), auto, true, cell, term), (400., 200.));
+        assert_eq!(
+            display_size((100., 50.), Dimension::parse("20"), auto, true, cell, term),
+            (200., 100.)
+        );
+        assert_eq!(
+            display_size((100., 50.), auto, Dimension::parse("10px"), true, cell, term),
+            (20., 10.)
+        );
+        assert_eq!(
+            display_size((100., 50.), Dimension::parse("50%"), auto, true, cell, term),
+            (400., 200.)
+        );
         // Both given: fit inside, unless told not to keep the ratio.
-        assert_eq!(display_size((100., 50.), Dimension::parse("20"), Dimension::parse("2"), true, cell, term), (80., 40.));
-        assert_eq!(display_size((100., 50.), Dimension::parse("20"), Dimension::parse("2"), false, cell, term), (200., 40.));
+        assert_eq!(
+            display_size(
+                (100., 50.),
+                Dimension::parse("20"),
+                Dimension::parse("2"),
+                true,
+                cell,
+                term
+            ),
+            (80., 40.)
+        );
+        assert_eq!(
+            display_size(
+                (100., 50.),
+                Dimension::parse("20"),
+                Dimension::parse("2"),
+                false,
+                cell,
+                term
+            ),
+            (200., 40.)
+        );
     }
 }

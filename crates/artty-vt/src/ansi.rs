@@ -6,10 +6,6 @@
 
 //! ANSI Terminal Stream Parsing.
 
-
-use std::borrow::ToOwned;
-use std::string::{String, ToString};
-use std::vec::Vec;
 use core::convert::TryFrom;
 use core::fmt::{self, Display, Formatter, Write};
 use core::ops::Mul;
@@ -17,7 +13,10 @@ use core::ops::{Add, Sub};
 use core::str::FromStr;
 use core::time::Duration;
 use core::{iter, mem, str};
+use std::borrow::ToOwned;
+use std::string::{String, ToString};
 use std::time::Instant;
+use std::vec::Vec;
 
 use bitflags::bitflags;
 #[doc(inline)]
@@ -844,7 +843,9 @@ pub enum KeyboardModesApplyBehavior {
 }
 
 /// Terminal cursor configuration.
-#[derive(Default, Debug, Eq, PartialEq, Copy, Clone, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Default, Debug, Eq, PartialEq, Copy, Clone, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct CursorStyle {
     pub shape: CursorShape,
     pub blinking: bool,

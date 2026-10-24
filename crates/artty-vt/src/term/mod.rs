@@ -13,6 +13,11 @@ use bitflags::bitflags;
 use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
+use crate::ansi::{
+    self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
+    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Progress,
+    Rgb, ShellMark, StandardCharset,
+};
 use crate::event::{Event, EventListener};
 use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
@@ -20,18 +25,13 @@ use crate::selection::{Selection, SelectionRange, SelectionType};
 use crate::term::cell::{Cell, Flags, LineLength};
 use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
-use crate::ansi::{
-    self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Progress, Rgb, ShellMark,
-    StandardCharset,
-};
 
 pub mod cell;
 pub mod color;
-pub mod placeholder;
-pub mod search;
 mod image;
 mod kitty;
+pub mod placeholder;
+pub mod search;
 mod sixel;
 mod snapshot;
 
@@ -50,7 +50,6 @@ const TITLE_STACK_MAX_DEPTH: usize = 4096;
 
 /// Default semantic escape characters.
 pub const SEMANTIC_ESCAPE_CHARS: &str = ",│`|:\"' ()[]{}<>\t";
-
 
 /// Regional indicators: in pairs, they spell a flag.
 fn is_regional_indicator(c: char) -> bool {
@@ -1004,7 +1003,8 @@ impl<T> Term<T> {
             return;
         }
         let base = &self.grid[point.line][point.column - 1];
-        let plain = !base.flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER) && base.zerowidth().is_none();
+        let plain = !base.flags.intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+            && base.zerowidth().is_none();
         if plain && [base.c, VARIATION_SELECTOR_16].iter().collect::<String>().width() == 2 {
             self.widen_previous();
         }
@@ -1018,7 +1018,9 @@ impl<T> Term<T> {
             return false;
         }
         let cell = &self.grid[point.line][point.column - 1];
-        is_regional_indicator(cell.c) && cell.zerowidth().is_none() && !cell.flags.contains(Flags::WIDE_CHAR)
+        is_regional_indicator(cell.c)
+            && cell.zerowidth().is_none()
+            && !cell.flags.contains(Flags::WIDE_CHAR)
     }
 
     /// Make the one-cell character before the cursor two cells wide
@@ -2443,8 +2445,13 @@ impl<T: EventListener> Handler for Term<T> {
     fn termcap_query(&mut self, names: &[u8]) {
         let hex = |s: &[u8]| s.iter().map(|b| format!("{b:02X}")).collect::<String>();
         let unhex = |s: &[u8]| -> Option<Vec<u8>> {
-            s.len().is_multiple_of(2)
-                .then(|| s.chunks(2).map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()).collect())
+            s.len()
+                .is_multiple_of(2)
+                .then(|| {
+                    s.chunks(2)
+                        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+                        .collect()
+                })
                 .flatten()
         };
         for name in names.split(|&b| b == b';').filter(|n| !n.is_empty()) {
@@ -2455,7 +2462,9 @@ impl<T: EventListener> Handler for Term<T> {
                 _ => None,
             };
             let reply = match value {
-                Some(value) => format!("\x1bP1+r{}={}\x1b\\", String::from_utf8_lossy(name), hex(value)),
+                Some(value) => {
+                    format!("\x1bP1+r{}={}\x1b\\", String::from_utf8_lossy(name), hex(value))
+                },
                 None => format!("\x1bP0+r{}\x1b\\", String::from_utf8_lossy(name)),
             };
             self.event_proxy.send_event(Event::PtyWrite(reply));
@@ -2474,7 +2483,9 @@ impl<T: EventListener> Handler for Term<T> {
         let cursor = self.grid.cursor.point;
         match mark {
             ShellMark::PromptStart => {
-                self.prompt_line = Some((self.grid.lines_scrolled() as i64 + i64::from(cursor.line.0)).max(0) as u64)
+                self.prompt_line =
+                    Some((self.grid.lines_scrolled() as i64 + i64::from(cursor.line.0)).max(0)
+                        as u64)
             },
             ShellMark::CommandExecuted => self.prompt_line = None,
             _ => {},
@@ -2777,13 +2788,13 @@ mod tests {
 
     use std::mem;
 
+    use crate::ansi::{self, CharsetIndex, Handler, StandardCharset};
     use crate::event::VoidListener;
     use crate::grid::{Grid, Scroll};
     use crate::index::{Column, Point, Side};
     use crate::selection::{Selection, SelectionType};
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
-    use crate::ansi::{self, CharsetIndex, Handler, StandardCharset};
 
     #[test]
     fn scroll_display_page_up() {

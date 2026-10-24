@@ -72,7 +72,9 @@ impl ResumeCommand {
     /// The command line to run, if this agent can be resumed. Session ids are
     /// only used if they can't break out of the command.
     pub fn command(&self, session: Option<&str>) -> Option<String> {
-        let safe = |id: &&str| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        let safe = |id: &&str| {
+            !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        };
         match (session.filter(safe), &self.session) {
             (Some(id), Some(template)) => Some(template.replace("{session}", id)),
             _ => self.latest.clone(),
@@ -93,7 +95,8 @@ pub enum CursorStyle {
 }
 
 impl CursorStyle {
-    pub const ALL: [CursorStyle; 4] = [CursorStyle::Block, CursorStyle::Bar, CursorStyle::Underline, CursorStyle::Hollow];
+    pub const ALL: [CursorStyle; 4] =
+        [CursorStyle::Block, CursorStyle::Bar, CursorStyle::Underline, CursorStyle::Hollow];
 
     /// The name used in the config file.
     pub fn name(self) -> &'static str {
@@ -117,8 +120,19 @@ impl CursorStyle {
 }
 
 /// Coding agents recognized by default.
-pub const DEFAULT_AGENTS: &[&str] =
-    &["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"];
+pub const DEFAULT_AGENTS: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "aider",
+    "opencode",
+    "amp",
+    "goose",
+    "cursor-agent",
+    "qwen",
+    "crush",
+    "droid",
+];
 
 impl Default for Config {
     fn default() -> Self {
@@ -308,7 +322,10 @@ mod tests {
         assert_eq!(claude.command(Some("x; rm -rf ~")).as_deref(), Some("claude --continue"));
 
         let custom = Config::parse("[resume.codex]\nlatest = \"codex resume --last\"").unwrap();
-        assert_eq!(custom.resume["codex"].command(Some("abc")).as_deref(), Some("codex resume --last"));
+        assert_eq!(
+            custom.resume["codex"].command(Some("abc")).as_deref(),
+            Some("codex resume --last")
+        );
         assert!(custom.resume.contains_key("claude"));
     }
 

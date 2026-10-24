@@ -30,7 +30,11 @@ pub fn server_socket_path() -> PathBuf {
     // SAFETY: getuid can't fail.
     let uid = unsafe { libc::getuid() };
     let path = std::env::temp_dir().join("artty-server.sock");
-    if path.as_os_str().len() <= MAX_SOCKET_PATH { path } else { PathBuf::from(format!("/tmp/artty-server-{uid}.sock")) }
+    if path.as_os_str().len() <= MAX_SOCKET_PATH {
+        path
+    } else {
+        PathBuf::from(format!("/tmp/artty-server-{uid}.sock"))
+    }
 }
 
 /// Socket path for the app process `pid`.
@@ -83,30 +87,54 @@ pub enum Request {
     /// build) starts in its place and reopens them.
     RestartServer,
     /// Processes and resource use of panes (all, or `tab`).
-    Processes { tab: Option<SessionId> },
+    Processes {
+        tab: Option<SessionId>,
+    },
     /// Terminate a pane's foreground program (`signal`, default TERM), or the
     /// whole pane with `pane: true`.
-    Kill { tab: SessionId, signal: Option<i32>, pane: bool },
+    Kill {
+        tab: SessionId,
+        signal: Option<i32>,
+        pane: bool,
+    },
     /// Send a signal (default SIGTERM) to one process; only processes running
     /// in artty's panes.
-    Signal { pid: i32, signal: Option<i32> },
+    Signal {
+        pid: i32,
+        signal: Option<i32>,
+    },
     /// Hand every session to the server build at `executable` without
     /// ending them (it takes over this process).
-    HandOver { executable: PathBuf },
+    HandOver {
+        executable: PathBuf,
+    },
     /// Every workspace, shown or not.
     Workspaces,
     /// A workspace with one tab, in the frontmost window.
-    NewWorkspace { name: Option<String>, cwd: Option<PathBuf>, command: Vec<String> },
+    NewWorkspace {
+        name: Option<String>,
+        cwd: Option<PathBuf>,
+        command: Vec<String>,
+    },
     /// Workspaces are named by id or by name. An empty name goes back to
     /// automatic.
-    RenameWorkspace { workspace: String, name: String },
+    RenameWorkspace {
+        workspace: String,
+        name: String,
+    },
     /// End every tab in it.
-    CloseWorkspace { workspace: String },
+    CloseWorkspace {
+        workspace: String,
+    },
     /// Show it: in the frontmost window, or bring forward the window
     /// already showing it.
-    OpenWorkspace { workspace: String },
+    OpenWorkspace {
+        workspace: String,
+    },
     /// Take it out of its window; it keeps running, hidden.
-    HideWorkspace { workspace: String },
+    HideWorkspace {
+        workspace: String,
+    },
     /// Change a workspace's defaults: where new tabs start, its color (or
     /// `none`), and environment variables for new panes.
     ConfigureWorkspace {
@@ -123,9 +151,16 @@ pub enum Request {
         unset_env: Vec<String>,
     },
     /// Text from a tab.
-    Read { tab: Option<SessionId>, source: ReadSource },
+    Read {
+        tab: Option<SessionId>,
+        source: ReadSource,
+    },
     /// Type text into a tab.
-    Send { tab: Option<SessionId>, text: String, enter: bool },
+    Send {
+        tab: Option<SessionId>,
+        text: String,
+        enter: bool,
+    },
     /// Open a tab running the shell, or `command`; with `split`, open a pane
     /// next to `target` (default: the focused pane) instead.
     New {
@@ -142,15 +177,30 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<String>,
     },
-    Focus { tab: SessionId },
+    Focus {
+        tab: SessionId,
+    },
     /// Name the tab holding pane `tab`; an empty title goes back to automatic.
-    Rename { tab: Option<SessionId>, title: String },
-    Close { tab: SessionId },
+    Rename {
+        tab: Option<SessionId>,
+        title: String,
+    },
+    Close {
+        tab: SessionId,
+    },
     /// Run a command in a tab's shell and wait for it to finish. Needs shell
     /// integration in that shell.
-    Run { tab: Option<SessionId>, command: String, timeout_secs: Option<u64> },
+    Run {
+        tab: Option<SessionId>,
+        command: String,
+        timeout_secs: Option<u64>,
+    },
     /// Show a notification for a tab.
-    Notify { tab: Option<SessionId>, title: Option<String>, body: String },
+    Notify {
+        tab: Option<SessionId>,
+        title: Option<String>,
+        body: String,
+    },
     /// Report what an agent in a tab is doing (used by agent hooks).
     Status {
         tab: Option<SessionId>,
@@ -200,20 +250,39 @@ pub enum AgentState {
 #[serde(tag = "result", rename_all = "kebab-case")]
 pub enum Response {
     Ok,
-    Error { message: String },
-    Tabs { tabs: Vec<TabInfo> },
-    Text { text: String },
-    Tab { id: SessionId },
-    Command { command: Option<String>, output: String, exit: Option<i32>, truncated: bool },
-    Server { info: ServerInfo },
+    Error {
+        message: String,
+    },
+    Tabs {
+        tabs: Vec<TabInfo>,
+    },
+    Text {
+        text: String,
+    },
+    Tab {
+        id: SessionId,
+    },
+    Command {
+        command: Option<String>,
+        output: String,
+        exit: Option<i32>,
+        truncated: bool,
+    },
+    Server {
+        info: ServerInfo,
+    },
     Processes {
         panes: Vec<PaneProcesses>,
         /// The server's own use.
         #[serde(default)]
         server: Option<ServerUsage>,
     },
-    Workspaces { workspaces: Vec<WorkspaceInfo> },
-    Workspace { id: u64 },
+    Workspaces {
+        workspaces: Vec<WorkspaceInfo>,
+    },
+    Workspace {
+        id: u64,
+    },
 }
 
 /// A workspace, for `artty workspace list` and the app's picker.
@@ -353,11 +422,18 @@ mod tests {
 
     #[test]
     fn wire_format() {
-        let request: Request =
-            serde_json::from_str(r#"{"cmd":"read","tab":3,"source":{"kind":"scrollback","lines":50}}"#).unwrap();
-        assert!(matches!(request, Request::Read { tab: Some(3), source: ReadSource::Scrollback { lines: 50 } }));
-        let status: Request =
-            serde_json::from_str(r#"{"cmd":"status","tab":null,"state":"waiting","message":"Allow Bash?"}"#).unwrap();
+        let request: Request = serde_json::from_str(
+            r#"{"cmd":"read","tab":3,"source":{"kind":"scrollback","lines":50}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::Read { tab: Some(3), source: ReadSource::Scrollback { lines: 50 } }
+        ));
+        let status: Request = serde_json::from_str(
+            r#"{"cmd":"status","tab":null,"state":"waiting","message":"Allow Bash?"}"#,
+        )
+        .unwrap();
         assert!(matches!(status, Request::Status { state: AgentState::Waiting, .. }));
         let response = serde_json::to_string(&Response::Tab { id: 7 }).unwrap();
         assert_eq!(response, r#"{"result":"tab","id":7}"#);

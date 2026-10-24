@@ -102,7 +102,10 @@ pub enum Notice {
     /// [`Session::reply_clipboard`].
     ClipboardLoad(ClipboardType, Arc<dyn Fn(&str) -> String + Sync + Send + 'static>),
     /// The program asked for a desktop notification (OSC 9 / 777 / 99).
-    Notification { title: Option<String>, body: String },
+    Notification {
+        title: Option<String>,
+        body: String,
+    },
     Progress(Progress),
     /// The shell started a command (shell integration).
     CommandStarted(Option<String>),
@@ -129,7 +132,7 @@ impl EventListener for EventProxy {
                 if let Some(pty) = self.pty.get() {
                     let _ = pty.send(Msg::Input(text.into_bytes().into()));
                 }
-            }
+            },
             event => (self.sink)(self.id, event),
         }
     }
@@ -173,7 +176,8 @@ impl Session {
         let mut term = Term::new(config, &size, proxy.clone());
         term.set_cell_size(size.cell_width, size.cell_height);
         if let Some(output) = &options.initial_output {
-            artty_vt::ansi::Processor::<artty_vt::ansi::StdSyncHandler>::new().advance(&mut term, output);
+            artty_vt::ansi::Processor::<artty_vt::ansi::StdSyncHandler>::new()
+                .advance(&mut term, output);
         }
         let term = Arc::new(FairMutex::new(term));
 
@@ -338,7 +342,11 @@ impl Session {
     pub fn resize(&mut self, size: TerminalSize) {
         // The terminal is never narrower than two columns (a wide character
         // has to fit); the shell is told the same size.
-        let size = TerminalSize { columns: size.columns.max(artty_vt::term::MIN_COLUMNS as u16), lines: size.lines.max(1), ..size };
+        let size = TerminalSize {
+            columns: size.columns.max(artty_vt::term::MIN_COLUMNS as u16),
+            lines: size.lines.max(1),
+            ..size
+        };
         if size == self.size {
             return;
         }
@@ -447,7 +455,10 @@ impl Session {
             .find(|&line| !blank(line))
             .unwrap_or(Line(0));
         let top = (bottom.0 - lines.max(1) as i32 + 1).max(term.topmost_line().0);
-        let text = term.bounds_to_string(Point::new(Line(top), Column(0)), Point::new(bottom, term.last_column()));
+        let text = term.bounds_to_string(
+            Point::new(Line(top), Column(0)),
+            Point::new(bottom, term.last_column()),
+        );
         trim_lines(text)
     }
 
@@ -470,7 +481,9 @@ impl Session {
         let (origin, direction) = match (current, older) {
             (Some(range), true) => (range.start.sub(&*term, Boundary::None, 1), Direction::Left),
             (Some(range), false) => (range.end.add(&*term, Boundary::None, 1), Direction::Right),
-            (None, true) => (Point::new(term.bottommost_line(), term.last_column()), Direction::Left),
+            (None, true) => {
+                (Point::new(term.bottommost_line(), term.last_column()), Direction::Left)
+            },
             (None, false) => (Point::new(term.topmost_line(), Column(0)), Direction::Right),
         };
         let side = if older { Side::Right } else { Side::Left };
@@ -509,9 +522,15 @@ impl Session {
         let point = viewport_point(&term, line, column);
         let row = &term.grid()[point.line];
         if let Some(link) = row[point.column].hyperlink() {
-            let same = |c: usize| row[Column(c)].hyperlink().is_some_and(|other| other.id() == link.id());
-            let start = (0..point.column.0).rev().take_while(|&c| same(c)).last().unwrap_or(point.column.0);
-            let end = (point.column.0..term.columns()).take_while(|&c| same(c)).last().unwrap_or(point.column.0) + 1;
+            let same =
+                |c: usize| row[Column(c)].hyperlink().is_some_and(|other| other.id() == link.id());
+            let start =
+                (0..point.column.0).rev().take_while(|&c| same(c)).last().unwrap_or(point.column.0);
+            let end = (point.column.0..term.columns())
+                .take_while(|&c| same(c))
+                .last()
+                .unwrap_or(point.column.0)
+                + 1;
             return Some((link.uri().to_owned(), start..end));
         }
         let text: Vec<char> = (0..term.columns()).map(|c| row[Column(c)].c).collect();
@@ -524,7 +543,7 @@ impl Session {
         match event {
             Event::Wakeup | Event::CursorBlinkingChange | Event::MouseCursorDirty => {
                 Some(Notice::Redraw)
-            }
+            },
             Event::Title(title) => Some(Notice::Title(title)),
             Event::ResetTitle => Some(Notice::ResetTitle),
             Event::Bell => Some(Notice::Bell),
@@ -534,28 +553,28 @@ impl Session {
                 let rgb = self.theme.color_for_index(index, self.term.lock().colors());
                 self.send(Msg::Input(format(rgb).into_bytes().into()));
                 None
-            }
+            },
             Event::TextAreaSizeRequest(format) => {
                 self.send(Msg::Input(format(self.size.into()).into_bytes().into()));
                 None
-            }
+            },
             Event::Exit | Event::ChildExit(_) => Some(Notice::Exited),
             Event::PtyWrite(text) => {
                 self.send(Msg::Input(text.into_bytes().into()));
                 None
-            }
+            },
             Event::ShellMark { mark, line, column } => {
                 let term = self.term.lock();
                 match self.shell.mark(mark, line, column, &term)? {
                     ShellEvent::CommandStarted(command) => Some(Notice::CommandStarted(command)),
                     ShellEvent::CommandFinished(record) => Some(Notice::CommandFinished(record)),
                 }
-            }
+            },
             Event::Notification { title, body } => Some(Notice::Notification { title, body }),
             Event::WorkingDirectory(url) => {
                 self.reported_cwd = path_from_file_url(&url);
                 None
-            }
+            },
             Event::Progress(progress) => Some(Notice::Progress(progress)),
         }
     }
@@ -599,7 +618,8 @@ fn url_at(line: &[char], column: usize) -> Option<(String, Range<usize>)> {
         return None;
     }
     let start = line[..column].iter().rposition(|&c| !is_url_char(c)).map_or(0, |i| i + 1);
-    let end = line[column..].iter().position(|&c| !is_url_char(c)).map_or(line.len(), |i| column + i);
+    let end =
+        line[column..].iter().position(|&c| !is_url_char(c)).map_or(line.len(), |i| column + i);
     let word: String = line[start..end].iter().collect();
 
     // The URL starts at a scheme inside the word (e.g. `(https://...)`).
@@ -653,7 +673,9 @@ mod tests {
             command: Some(("/usr/bin/printf".into(), vec![text.into()])),
             ..Default::default()
         };
-        let session = Session::spawn(1, options, size, Arc::new(Theme::default()), Arc::new(|_, _| {})).unwrap();
+        let session =
+            Session::spawn(1, options, size, Arc::new(Theme::default()), Arc::new(|_, _| {}))
+                .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while session.screen_text().is_empty() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -676,7 +698,10 @@ mod tests {
         assert_eq!(session.frame().lines[0].selection.first().map(|r| r.column), Some(0));
         // Every visible match is highlighted.
         let lines = session.frame().lines;
-        let matched: Vec<_> = lines.iter().map(|l| l.matches.iter().map(|r| (r.column, r.width)).collect::<Vec<_>>()).collect();
+        let matched: Vec<_> = lines
+            .iter()
+            .map(|l| l.matches.iter().map(|r| (r.column, r.width)).collect::<Vec<_>>())
+            .collect();
         assert_eq!(&matched[..3], &[vec![(0, 3)], vec![], vec![(4, 3)]]);
         assert_eq!(session.search("nothing", true), Ok(false));
         assert!(session.search("(", true).is_err());

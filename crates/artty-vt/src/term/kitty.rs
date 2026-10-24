@@ -100,10 +100,12 @@ struct Command {
 
 impl Command {
     fn parse(keys: &[u8]) -> Self {
-        let mut command = Command { action: b't', format: 32, medium: b'd', delete: b'a', ..Default::default() };
+        let mut command =
+            Command { action: b't', format: 32, medium: b'd', delete: b'a', ..Default::default() };
         for pair in keys.split(|&b| b == b',') {
             let [key, b'=', value @ ..] = pair else { continue };
-            let number = || std::str::from_utf8(value).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+            let number =
+                || std::str::from_utf8(value).ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
             let letter = value.first().copied().unwrap_or(0);
             match key {
                 b'a' => command.action = letter,
@@ -140,7 +142,11 @@ impl<T: EventListener> Term<T> {
     pub(crate) fn kitty_graphics(&mut self, command: &[u8]) {
         let split = command.iter().position(|&b| b == b';').unwrap_or(command.len());
         let (keys, payload) = (&command[..split], command.get(split + 1..).unwrap_or_default());
-        log::debug!("kitty graphics: {} ({} bytes of payload)", String::from_utf8_lossy(keys), payload.len());
+        log::debug!(
+            "kitty graphics: {} ({} bytes of payload)",
+            String::from_utf8_lossy(keys),
+            payload.len()
+        );
         let mut command = Command::parse(keys);
 
         // Later chunks of a transmission carry only `m` (and maybe `q`).
@@ -171,7 +177,9 @@ impl<T: EventListener> Term<T> {
 
         let result = match command.action {
             b't' => self.kitty_transmit(&command, &payload).map(|_| ()),
-            b'T' => self.kitty_transmit(&command, &payload).map(|stored| self.kitty_place(&command, stored)),
+            b'T' => self
+                .kitty_transmit(&command, &payload)
+                .map(|stored| self.kitty_place(&command, stored)),
             b'q' => self.kitty_load(&command, &payload).map(|_| ()),
             b'p' => match self.kitty.images.get(&command.id) {
                 Some(stored) => {
@@ -215,12 +223,14 @@ impl<T: EventListener> Term<T> {
 
     /// The image a command carries: decoded payload, checked.
     fn kitty_load(&self, command: &Command, payload: &[u8]) -> Result<Pixels, String> {
-        let payload: Vec<u8> = payload.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
+        let payload: Vec<u8> =
+            payload.iter().copied().filter(|b| !b.is_ascii_whitespace()).collect();
         let decoded = BASE64.decode(&payload).map_err(|_| "EINVAL:bad base64".to_owned())?;
         let mut data = match command.medium {
             b'd' => decoded,
             b'f' | b't' => {
-                let path = String::from_utf8(decoded).map_err(|_| "EINVAL:bad file name".to_owned())?;
+                let path =
+                    String::from_utf8(decoded).map_err(|_| "EINVAL:bad file name".to_owned())?;
                 let path = std::path::Path::new(&path);
                 // Only an ordinary file: never a device or FIFO (which could
                 // hang the reader), nor anything under /dev, /proc or /sys.
@@ -264,11 +274,17 @@ impl<T: EventListener> Term<T> {
         };
         match command.format {
             100 => {
-                let size = imagesize::blob_size(&data).map_err(|_| "EBADPNG:not an image".to_owned())?;
+                let size =
+                    imagesize::blob_size(&data).map_err(|_| "EBADPNG:not an image".to_owned())?;
                 if data.len() > MAX_IMAGE {
                     return Err("EFBIG:image too large".to_owned());
                 }
-                Ok(Pixels { format: ImageFormat::Encoded, data: data.into(), width: size.width as u32, height: size.height as u32 })
+                Ok(Pixels {
+                    format: ImageFormat::Encoded,
+                    data: data.into(),
+                    width: size.width as u32,
+                    height: size.height as u32,
+                })
             },
             32 => {
                 let wanted = pixels(4)?;
@@ -277,8 +293,10 @@ impl<T: EventListener> Term<T> {
             },
             24 => {
                 let wanted = pixels(3)?;
-                let rgba: Vec<u8> =
-                    data[..wanted].chunks_exact(3).flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255]).collect();
+                let rgba: Vec<u8> = data[..wanted]
+                    .chunks_exact(3)
+                    .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+                    .collect();
                 Ok(Pixels { format: ImageFormat::Rgba, data: rgba.into(), width, height })
             },
             _ => Err("EINVAL:format not supported".to_owned()),
@@ -297,7 +315,9 @@ impl<T: EventListener> Term<T> {
             kitty.stored += pixels.data.len();
             kitty.images.insert(command.id, Stored { pixels: pixels.clone(), age: kitty.age });
             while kitty.stored > MAX_STORED {
-                let Some((&oldest, _)) = kitty.images.iter().min_by_key(|(_, s)| s.age) else { break };
+                let Some((&oldest, _)) = kitty.images.iter().min_by_key(|(_, s)| s.age) else {
+                    break;
+                };
                 let gone = kitty.images.remove(&oldest).unwrap();
                 kitty.stored -= gone.pixels.data.len();
             }

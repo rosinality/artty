@@ -51,7 +51,8 @@ fn marks(events: &[Event]) -> Vec<(ShellMark, u64)> {
 
 #[test]
 fn shell_marks_carry_stable_lines() {
-    let (_, events) = run(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a\r\nb\r\n\x1b]133;D;0\x07", 10);
+    let (_, events) =
+        run(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a\r\nb\r\n\x1b]133;D;0\x07", 10);
     assert_eq!(
         marks(&events),
         vec![
@@ -83,13 +84,18 @@ fn exit_codes_and_options() {
     let kinds: Vec<_> = marks(&events).into_iter().map(|(m, _)| m).collect();
     assert_eq!(
         kinds,
-        vec![ShellMark::CommandFinished(Some(127)), ShellMark::CommandFinished(None), ShellMark::PromptStart]
+        vec![
+            ShellMark::CommandFinished(Some(127)),
+            ShellMark::CommandFinished(None),
+            ShellMark::PromptStart
+        ]
     );
 }
 
 #[test]
 fn notifications() {
-    let (_, events) = run(b"\x1b]9;Build done\x07\x1b]777;notify;Claude;Needs input\x1b\\\x1b]99;;Hi\x07", 5);
+    let (_, events) =
+        run(b"\x1b]9;Build done\x07\x1b]777;notify;Claude;Needs input\x1b\\\x1b]99;;Hi\x07", 5);
     let notes: Vec<_> = events
         .iter()
         .filter_map(|e| match e {
@@ -109,14 +115,17 @@ fn notifications() {
 
 #[test]
 fn progress_and_working_directory() {
-    let (_, events) = run(b"\x1b]9;4;1;42\x07\x1b]9;4;3\x07\x1b]9;4;0\x07\x1b]7;file://host/Users/me/a%20b\x07", 5);
+    let (_, events) = run(
+        b"\x1b]9;4;1;42\x07\x1b]9;4;3\x07\x1b]9;4;0\x07\x1b]7;file://host/Users/me/a%20b\x07",
+        5,
+    );
     let mut progress = Vec::new();
     let mut cwd = None;
     for event in &events {
         match event {
             Event::Progress(p) => progress.push(*p),
             Event::WorkingDirectory(url) => cwd = Some(url.clone()),
-            _ => {}
+            _ => {},
         }
     }
     assert_eq!(progress, vec![Progress::Normal(42), Progress::Indeterminate, Progress::Remove]);
@@ -192,6 +201,7 @@ fn random_input_never_panics() {
         seed ^= seed << 17;
         seed
     };
+    #[rustfmt::skip]
     const PIECES: &[&str] = &[
         "\x1b[", "\x1b]", "\x1bP", "\x1b_", "\x1b^", "\x1b\\", "\x07", "\x1b", ";", "?", ">", "<", "=", ":", "0", "1",
         "9", "99", "65535", "4294967296", "m", "H", "J", "K", "r", "h", "l", "u", "q", "t", "@", "P", "X", "L", "M", "S",
@@ -255,7 +265,11 @@ fn snapshots_carry_a_terminal_over_exactly() {
 
     let json = serde_json::to_string(&term.snapshot()).unwrap();
     let snapshot: TermSnapshot = serde_json::from_str(&json).unwrap();
-    let copy = Term::from_snapshot(Config { kitty_keyboard: true, ..Config::default() }, snapshot, Recorder::default());
+    let copy = Term::from_snapshot(
+        Config { kitty_keyboard: true, ..Config::default() },
+        snapshot,
+        Recorder::default(),
+    );
 
     assert_eq!(copy.mode(), term.mode());
     assert_eq!(copy.grid().cursor.point, term.grid().cursor.point);
@@ -263,7 +277,9 @@ fn snapshots_carry_a_terminal_over_exactly() {
     let text = |t: &Term<Recorder>| {
         let grid = t.grid();
         (grid.topmost_line().0..grid.screen_lines() as i32)
-            .map(|line| (0..grid.columns()).map(|c| grid[Line(line)][Column(c)].c).collect::<String>())
+            .map(|line| {
+                (0..grid.columns()).map(|c| grid[Line(line)][Column(c)].c).collect::<String>()
+            })
             .collect::<Vec<_>>()
     };
     assert_eq!(text(&copy), text(&term));
@@ -287,7 +303,11 @@ fn inline_images_cover_cells_and_carry_over() {
     let mut term = kitty_term();
     let mut parser = Processor::<StdSyncHandler>::new();
     // Four cells by two, not keeping the 1:1 aspect ratio, after some text.
-    parser.advance(&mut term, format!("ab\x1b]1337;File=inline=1;width=4;height=2;preserveAspectRatio=0:{PIXEL_PNG}\x07").as_bytes());
+    parser.advance(
+        &mut term,
+        format!("ab\x1b]1337;File=inline=1;width=4;height=2;preserveAspectRatio=0:{PIXEL_PNG}\x07")
+            .as_bytes(),
+    );
     let grid = term.grid();
     let tile = |line, column| grid[Line(line)][Column(column)].image().map(|t| (t.column, t.row));
     assert_eq!(tile(0, 2), Some((0, 0)));
@@ -340,7 +360,10 @@ fn kitty_graphics_transmit_place_query_delete() {
 
     // Transmit and show a 2×2 RGBA image across 4×2 cells: answered OK.
     let rgba = b64(&[255u8; 16]);
-    assert_eq!(run(&mut term, &format!("\x1b_Ga=T,f=32,s=2,v=2,i=7,c=4,r=2;{rgba}\x1b\\")), ["\x1b_Gi=7;OK\x1b\\"]);
+    assert_eq!(
+        run(&mut term, &format!("\x1b_Ga=T,f=32,s=2,v=2,i=7,c=4,r=2;{rgba}\x1b\\")),
+        ["\x1b_Gi=7;OK\x1b\\"]
+    );
     let tile = |term: &Term<Recorder>, line, column| {
         term.grid()[Line(line)][Column(column)].image().map(|t| (t.column, t.row, t.image.kitty_id))
     };
@@ -364,7 +387,10 @@ fn kitty_graphics_transmit_place_query_delete() {
 
     // A query answers without showing anything; shared memory isn't supported.
     let before = term.grid().cursor.point;
-    assert_eq!(run(&mut term, &format!("\x1b_Ga=q,f=32,s=2,v=2,i=31;{rgba}\x1b\\")), ["\x1b_Gi=31;OK\x1b\\"]);
+    assert_eq!(
+        run(&mut term, &format!("\x1b_Ga=q,f=32,s=2,v=2,i=31;{rgba}\x1b\\")),
+        ["\x1b_Gi=31;OK\x1b\\"]
+    );
     assert_eq!(term.grid().cursor.point, before);
     let shm = run(&mut term, &format!("\x1b_Ga=q,t=s,s=1,v=1,i=32;{}\x1b\\", b64(b"/x")));
     assert!(shm[0].starts_with("\x1b_Gi=32;EINVAL"), "{shm:?}");
@@ -386,7 +412,9 @@ fn sixel_images_are_shown_and_advertised() {
     // Programs learn they can send sixel (4) from the device attributes.
     assert!(replies(&events).contains(&"\x1b[?62;4;22c".to_owned()));
     // 16 × 12 pixels in 8 × 16 pixel cells: two cells by one.
-    let tile = term.grid()[Line(0)][Column(1)].image().map(|t| (t.column, t.row, t.image.width, t.image.height));
+    let tile = term.grid()[Line(0)][Column(1)]
+        .image()
+        .map(|t| (t.column, t.row, t.image.width, t.image.height));
     assert_eq!(tile, Some((1, 0, 16, 12)));
     assert!(term.grid()[Line(0)][Column(2)].image().is_none());
     // Text carries on below it.
@@ -430,7 +458,13 @@ fn narrowing_at_a_prompt_leaves_no_old_prompt_behind() {
     let text = |term: &Term<Recorder>| {
         let grid = term.grid();
         (0..grid.screen_lines() as i32)
-            .map(|line| (0..grid.columns()).map(|c| grid[Line(line)][Column(c)].c).collect::<String>().trim_end().to_owned())
+            .map(|line| {
+                (0..grid.columns())
+                    .map(|c| grid[Line(line)][Column(c)].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
             .collect::<Vec<_>>()
     };
     let prompt = format!("$ {}", "x".repeat(30));

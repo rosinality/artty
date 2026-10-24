@@ -413,11 +413,11 @@ fn is_boundary<T>(term: &Term<T>, point: Point, direction: Direction) -> bool {
 mod tests {
     use super::*;
 
+    use crate::ansi::Handler;
     use crate::event::VoidListener;
     use crate::index::{Column, Line};
     use crate::term::test::TermSize;
     use crate::term::{Config, Term};
-    use crate::ansi::Handler;
 
     fn term() -> Term<VoidListener> {
         let size = TermSize::new(20, 20);

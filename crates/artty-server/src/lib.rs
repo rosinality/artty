@@ -71,7 +71,8 @@ pub fn resume(header: &Path) -> io::Result<()> {
     serve_on(listener, server_socket_path(), Some((header, snapshots)))
 }
 
-type Handover = (handover::Header, std::collections::HashMap<u64, artty_core::vt::term::TermSnapshot>);
+type Handover =
+    (handover::Header, std::collections::HashMap<u64, artty_core::vt::term::TermSnapshot>);
 
 fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -> io::Result<()> {
     let socket = RemoveOnDrop(path.clone());
@@ -84,7 +85,9 @@ fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -
         for stream in listener.incoming().flatten() {
             let tx = accept.clone();
             let id = NEXT_CLIENT.fetch_add(1, Ordering::Relaxed);
-            let _ = std::thread::Builder::new().name("artty-connection".into()).spawn(move || serve(stream, id, tx));
+            let _ = std::thread::Builder::new()
+                .name("artty-connection".into())
+                .spawn(move || serve(stream, id, tx));
         }
     })?;
 
@@ -97,7 +100,7 @@ fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -
         let timeout = server.next_deadline().saturating_duration_since(Instant::now());
         match rx.recv_timeout(timeout.max(Duration::from_millis(1))) {
             Ok(input) => survive("handling an input", || server.handle(input)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {},
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
         // Handle everything already queued before doing per-batch work, so a
@@ -156,7 +159,7 @@ fn serve(stream: UnixStream, id: ClientId, tx: Sender<Input>) {
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) | Err(_) => return,
-            Ok(_) => {}
+            Ok(_) => {},
         }
         if line.trim().is_empty() {
             continue;
@@ -172,7 +175,7 @@ fn serve(stream: UnixStream, id: ClientId, tx: Sender<Input>) {
                 }
                 // Long-running requests (`artty run`) wait here.
                 answer.recv().unwrap_or_else(|_| Response::error("the server stopped"))
-            }
+            },
             Err(err) => Response::error(format!("bad request: {err}")),
         };
         let Ok(mut json) = serde_json::to_string(&response) else { return };
@@ -184,7 +187,12 @@ fn serve(stream: UnixStream, id: ClientId, tx: Sender<Input>) {
 }
 
 /// An attached app: binary messages both ways until it disconnects.
-fn serve_app(mut reader: BufReader<UnixStream>, mut writer: UnixStream, id: ClientId, tx: Sender<Input>) {
+fn serve_app(
+    mut reader: BufReader<UnixStream>,
+    mut writer: UnixStream,
+    id: ClientId,
+    tx: Sender<Input>,
+) {
     let (outgoing, messages) = mpsc::channel::<ServerMessage>();
     if tx.send(Input::Connected(id, outgoing)).is_err() {
         return;
@@ -257,7 +265,7 @@ pub fn upgrade(executable: &Path) -> io::Result<Upgrade> {
                 }
             }
             Err(io::Error::new(io::ErrorKind::TimedOut, "the new server build didn't answer"))
-        }
+        },
         Response::Error { message } if message.starts_with("bad request") => {
             // A server from before hand-overs: restart it.
             control(&Request::RestartServer, Duration::from_secs(5))?;
@@ -269,7 +277,7 @@ pub fn upgrade(executable: &Path) -> io::Result<Upgrade> {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Ok(Upgrade::Restarted)
-        }
+        },
         Response::Error { message } => Err(io::Error::other(message)),
         _ => Err(io::Error::other("unexpected answer")),
     }
@@ -358,6 +366,10 @@ pub fn spawn(executable: &Path, env: &[(String, String)]) -> io::Result<()> {
 /// The server's log: `~/Library/Logs/artty/server.log` on macOS.
 pub fn log_path() -> Option<PathBuf> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
-    let dir = if cfg!(target_os = "macos") { home.join("Library/Logs/artty") } else { home.join(".local/state/artty") };
+    let dir = if cfg!(target_os = "macos") {
+        home.join("Library/Logs/artty")
+    } else {
+        home.join(".local/state/artty")
+    };
     Some(dir.join("server.log"))
 }

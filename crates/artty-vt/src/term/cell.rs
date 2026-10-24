@@ -5,9 +5,9 @@ use bitflags::bitflags;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+use crate::ansi::{Color, Hyperlink as VteHyperlink, NamedColor};
 use crate::grid::{self, GridCell};
 use crate::index::Column;
-use crate::ansi::{Color, Hyperlink as VteHyperlink, NamedColor};
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -135,7 +135,8 @@ pub struct CellExtra {
 /// without.
 pub(crate) const BASE64: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
     &base64::alphabet::STANDARD,
-    base64::engine::GeneralPurposeConfig::new().with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+    base64::engine::GeneralPurposeConfig::new()
+        .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
 );
 
 /// An image shown in the grid (artty). Its data is kept once, however many
@@ -237,11 +238,16 @@ pub(crate) mod tile_serde {
         RESTORING.with(|r| r.borrow_mut().clear());
     }
 
-    pub fn serialize<S: Serializer>(tile: &Option<ImageTile>, serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        tile: &Option<ImageTile>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         tile.as_ref().map(|t| (t.image.id, t.column, t.row)).serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<ImageTile>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<ImageTile>, D::Error> {
         let tile = Option::<(u64, u16, u16)>::deserialize(deserializer)?;
         // An image that didn't come along is simply gone.
         Ok(tile.and_then(|(id, column, row)| {
@@ -303,10 +309,9 @@ impl Cell {
     pub fn set_underline_color(&mut self, color: Option<Color>) {
         // If we reset color and we don't have zerowidth we should drop extra storage.
         if color.is_none()
-            && self
-                .extra
-                .as_ref()
-                .is_none_or(|extra| extra.zerowidth.is_empty() && extra.hyperlink.is_none() && extra.image.is_none())
+            && self.extra.as_ref().is_none_or(|extra| {
+                extra.zerowidth.is_empty() && extra.hyperlink.is_none() && extra.image.is_none()
+            })
         {
             self.extra = None;
         } else {
@@ -324,12 +329,11 @@ impl Cell {
     /// Set hyperlink.
     pub fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
         let should_drop = hyperlink.is_none()
-            && self
-                .extra
-                .as_ref()
-                .is_none_or(|extra| {
-                    extra.zerowidth.is_empty() && extra.underline_color.is_none() && extra.image.is_none()
-                });
+            && self.extra.as_ref().is_none_or(|extra| {
+                extra.zerowidth.is_empty()
+                    && extra.underline_color.is_none()
+                    && extra.image.is_none()
+            });
 
         if should_drop {
             self.extra = None;
@@ -372,7 +376,8 @@ impl GridCell for Cell {
                     | Flags::WIDE_CHAR_SPACER
                     | Flags::LEADING_WIDE_CHAR_SPACER,
             )
-            && self.extra.as_ref().map(|extra| extra.zerowidth.is_empty() && extra.image.is_none()) != Some(false)
+            && self.extra.as_ref().map(|extra| extra.zerowidth.is_empty() && extra.image.is_none())
+                != Some(false)
     }
 
     #[inline]

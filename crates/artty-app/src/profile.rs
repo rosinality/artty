@@ -14,8 +14,9 @@ fn stats() -> Option<&'static Mutex<Stats>> {
     static STATS: OnceLock<Option<Mutex<Stats>>> = OnceLock::new();
     STATS
         .get_or_init(|| {
-            std::env::var_os("ARTTY_PROFILE")
-                .map(|_| Mutex::new(Stats { since: Instant::now(), build: Vec::new(), paint: Vec::new() }))
+            std::env::var_os("ARTTY_PROFILE").map(|_| {
+                Mutex::new(Stats { since: Instant::now(), build: Vec::new(), paint: Vec::new() })
+            })
         })
         .as_ref()
 }
@@ -41,7 +42,10 @@ pub fn record(build: Duration, paint: Duration) {
         let frames = stats.build.len();
         let seconds = stats.since.elapsed().as_secs_f64();
         let (build, paint) = (report(&mut stats.build), report(&mut stats.paint));
-        eprintln!("artty profile: {:.0} fps; build {build}; paint {paint}", frames as f64 / seconds);
+        eprintln!(
+            "artty profile: {:.0} fps; build {build}; paint {paint}",
+            frames as f64 / seconds
+        );
         *stats = Stats { since: Instant::now(), build: Vec::new(), paint: Vec::new() };
     }
 }

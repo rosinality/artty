@@ -15,7 +15,9 @@ impl log::Log for Stderr {
         if !self.enabled(record.metadata()) {
             return;
         }
-        let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         let line = format!("{secs} {} [{}] {}\n", record.level(), record.target(), record.args());
         let _ = std::io::stderr().lock().write_all(line.as_bytes());
     }

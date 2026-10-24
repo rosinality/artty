@@ -31,7 +31,9 @@ fn action_name(name: &str) -> String {
         .split(['-', '_'])
         .map(|word| {
             let mut chars = word.chars();
-            chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+            chars
+                .next()
+                .map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
         })
         .collect();
     format!("artty::{pascal}")
@@ -56,7 +58,8 @@ fn install(cx: &mut App, keys: &std::collections::BTreeMap<String, KeyAction>) -
             },
             KeyAction::Send { send } => Box::new(SendText { text: send.clone() }),
         };
-        match KeyBinding::load(keystrokes, action, None, false, None, cx.keyboard_mapper().as_ref()) {
+        match KeyBinding::load(keystrokes, action, None, false, None, cx.keyboard_mapper().as_ref())
+        {
             Ok(binding) => bindings.push(binding),
             Err(err) => problems.push(format!("{keystrokes}: {err}")),
         }

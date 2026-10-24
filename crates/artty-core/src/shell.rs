@@ -92,14 +92,29 @@ pub struct ShellState {
 
 impl ShellTracker {
     pub(crate) fn state(&self) -> ShellState {
-        ShellState { phase: self.phase, input_start: self.input_start, output_start: self.output_start }
+        ShellState {
+            phase: self.phase,
+            input_start: self.input_start,
+            output_start: self.output_start,
+        }
     }
 
     pub(crate) fn from_state(state: ShellState) -> Self {
-        Self { phase: state.phase, input_start: state.input_start, output_start: state.output_start, ..Self::default() }
+        Self {
+            phase: state.phase,
+            input_start: state.input_start,
+            output_start: state.output_start,
+            ..Self::default()
+        }
     }
 
-    pub(crate) fn mark<T>(&mut self, mark: ShellMark, line: u64, column: usize, term: &Term<T>) -> Option<ShellEvent> {
+    pub(crate) fn mark<T>(
+        &mut self,
+        mark: ShellMark,
+        line: u64,
+        column: usize,
+        term: &Term<T>,
+    ) -> Option<ShellEvent> {
         match mark {
             ShellMark::PromptStart => {
                 // A prompt without `D` means the command ended without a report.
@@ -107,12 +122,12 @@ impl ShellTracker {
                 self.phase = ShellPhase::Prompt;
                 self.input_start = None;
                 finished
-            }
+            },
             ShellMark::CommandStart => {
                 self.phase = ShellPhase::Prompt;
                 self.input_start = Some((line, column));
                 None
-            }
+            },
             ShellMark::CommandExecuted => {
                 let command = self.input_start.take().map(|(input_line, input_column)| {
                     let (start, _) = grid_point(term, input_line, input_column);
@@ -132,16 +147,22 @@ impl ShellTracker {
                     finished: None,
                 });
                 Some(ShellEvent::CommandStarted(command))
-            }
+            },
             ShellMark::CommandFinished(exit) => {
                 let finished = self.finish(exit, line, column, term);
                 self.phase = ShellPhase::Prompt;
                 finished
-            }
+            },
         }
     }
 
-    fn finish<T>(&mut self, exit: Option<i32>, line: u64, column: usize, term: &Term<T>) -> Option<ShellEvent> {
+    fn finish<T>(
+        &mut self,
+        exit: Option<i32>,
+        line: u64,
+        column: usize,
+        term: &Term<T>,
+    ) -> Option<ShellEvent> {
         let mut record = self.current.take()?;
         let output_start = self.output_start.take()?;
         let (start, cut) = grid_point(term, output_start, 0);
@@ -199,7 +220,8 @@ mod tests {
             let events: Vec<_> = recorder.0.lock().unwrap().drain(..).collect();
             for event in events {
                 if let Event::ShellMark { mark, line, column } = event
-                    && let Some(ShellEvent::CommandFinished(record)) = tracker.mark(mark, line, column, &term)
+                    && let Some(ShellEvent::CommandFinished(record)) =
+                        tracker.mark(mark, line, column, &term)
                 {
                     finished.push(record);
                 }
@@ -212,7 +234,10 @@ mod tests {
 
     #[test]
     fn captures_command_and_output() {
-        let records = run(&[PROMPT, b"echo hi\r\n\x1b]133;C\x07", b"hi\r\nthere\r\n\x1b]133;D;0\x07", PROMPT], 10);
+        let records = run(
+            &[PROMPT, b"echo hi\r\n\x1b]133;C\x07", b"hi\r\nthere\r\n\x1b]133;D;0\x07", PROMPT],
+            10,
+        );
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].command.as_deref(), Some("echo hi"));
         assert_eq!(records[0].output, "hi\nthere");

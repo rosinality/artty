@@ -14,8 +14,9 @@ use artty_core::control::{
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
-    AppCommand, ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp,
-    ServerMessage, TabLayout, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
+    AppCommand, ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp, ServerMessage,
+    TabLayout, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId,
+    WorkspaceLayout,
 };
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
@@ -23,8 +24,9 @@ use artty_core::vt::index::Side;
 use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
 use artty_core::{
-    Config, Frame, Notice, SavedLayout, SavedPane, SavedState, SavedTab, SavedWindow, SavedWindowState, SavedWorkspace, Session,
-    SessionOptions, ShellPhase, TerminalSize, Theme, process_tree, processes,
+    Config, Frame, Notice, SavedLayout, SavedPane, SavedState, SavedTab, SavedWindow,
+    SavedWindowState, SavedWorkspace, Session, SessionOptions, ShellPhase, TerminalSize, Theme,
+    process_tree, processes,
 };
 
 use crate::handover::{self, HandedPane};
@@ -42,7 +44,8 @@ const HISTORY: usize = 60;
 const LONG_COMMAND: Duration = Duration::from_secs(10);
 /// Shown under a restored pane's old output.
 const RESTORED_BANNER: &str = "\r\n\x1b[2m── restored ──\x1b[0m\r\n";
-const DEFAULT_SIZE: TerminalSize = TerminalSize { columns: 100, lines: 30, cell_width: 8, cell_height: 18 };
+const DEFAULT_SIZE: TerminalSize =
+    TerminalSize { columns: 100, lines: 30, cell_width: 8, cell_height: 18 };
 
 struct Tab {
     title: Option<String>,
@@ -112,7 +115,12 @@ impl Workspace {
             tabs: self
                 .tabs
                 .iter()
-                .map(|tab| TabLayout { title: tab.title.clone(), root: tab.root.clone(), focused: tab.focused, zoomed: tab.zoomed })
+                .map(|tab| TabLayout {
+                    title: tab.title.clone(),
+                    root: tab.root.clone(),
+                    focused: tab.focused,
+                    zoomed: tab.zoomed,
+                })
                 .collect(),
             active: self.active,
             collapsed: self.collapsed,
@@ -223,10 +231,15 @@ fn cli_dir() -> Option<PathBuf> {
 /// its own (`~` for home).
 fn directory_title(dir: &Path) -> String {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let repository = dir.ancestors().take_while(|d| Some(*d) != home.as_deref()).find(|d| d.join(".git").exists());
+    let repository = dir
+        .ancestors()
+        .take_while(|d| Some(*d) != home.as_deref())
+        .find(|d| d.join(".git").exists());
     match repository.or(Some(dir)) {
         Some(d) if Some(d) == home.as_deref() => "~".to_owned(),
-        Some(d) => d.file_name().map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned()),
+        Some(d) => d
+            .file_name()
+            .map_or_else(|| d.display().to_string(), |n| n.to_string_lossy().into_owned()),
         None => String::new(),
     }
 }
@@ -243,7 +256,8 @@ fn workspace_color(color: &str) -> Result<Option<String>, String> {
 
 fn osascript_notify(title: &str, body: &str) {
     let quote = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
+    let script =
+        format!("display notification \"{}\" with title \"{}\"", quote(body), quote(title));
     let _ = std::process::Command::new("osascript")
         .args(["-e", &script])
         .stdout(std::process::Stdio::null())
@@ -253,7 +267,9 @@ fn osascript_notify(title: &str, body: &str) {
 
 fn pbcopy(text: &str) {
     use std::io::Write;
-    if let Ok(mut child) = std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn() {
+    if let Ok(mut child) =
+        std::process::Command::new("pbcopy").stdin(std::process::Stdio::piped()).spawn()
+    {
         if let Some(stdin) = child.stdin.as_mut() {
             let _ = stdin.write_all(text.as_bytes());
         }
@@ -321,7 +337,8 @@ impl Server {
         let Some(mut state) = SavedState::load() else { return };
         let hidden = std::mem::take(&mut state.hidden);
         for saved in state.into_windows() {
-            let workspaces: Vec<Workspace> = saved.workspaces.into_iter().filter_map(|w| self.restore_workspace(w)).collect();
+            let workspaces: Vec<Workspace> =
+                saved.workspaces.into_iter().filter_map(|w| self.restore_workspace(w)).collect();
             if !workspaces.is_empty() {
                 self.add_window(workspaces, saved.active, saved.window);
             }
@@ -340,7 +357,12 @@ impl Server {
             let Some(root) = self.restore_layout(tab.layout, &defaults) else { continue };
             let panes = root.panes();
             let focused = panes[tab.focused.min(panes.len() - 1)];
-            tabs.push(Tab { title: tab.title, root, focused, zoomed: tab.zoomed && panes.len() > 1 });
+            tabs.push(Tab {
+                title: tab.title,
+                root,
+                focused,
+                zoomed: tab.zoomed && panes.len() > 1,
+            });
         }
         if tabs.is_empty() {
             return None;
@@ -359,17 +381,38 @@ impl Server {
         id
     }
 
-    fn add_window(&mut self, workspaces: Vec<Workspace>, active: usize, bounds: Option<SavedWindow>) -> WindowId {
-        let workspaces: Vec<WorkspaceId> = workspaces.into_iter().map(|w| self.add_workspace(w)).collect();
+    fn add_window(
+        &mut self,
+        workspaces: Vec<Workspace>,
+        active: usize,
+        bounds: Option<SavedWindow>,
+    ) -> WindowId {
+        let workspaces: Vec<WorkspaceId> =
+            workspaces.into_iter().map(|w| self.add_workspace(w)).collect();
         self.insert_window(workspaces, active, bounds)
     }
 
     /// A window of existing workspaces, detached until an app shows it.
-    fn insert_window(&mut self, workspaces: Vec<WorkspaceId>, active: usize, bounds: Option<SavedWindow>) -> WindowId {
+    fn insert_window(
+        &mut self,
+        workspaces: Vec<WorkspaceId>,
+        active: usize,
+        bounds: Option<SavedWindow>,
+    ) -> WindowId {
         let active = active.min(workspaces.len().saturating_sub(1));
         let id = self.next_window;
         self.next_window += 1;
-        self.windows.insert(id, Window { workspaces, active, bounds, client: None, focused: false, last_focus: Instant::now() });
+        self.windows.insert(
+            id,
+            Window {
+                workspaces,
+                active,
+                bounds,
+                client: None,
+                focused: false,
+                last_focus: Instant::now(),
+            },
+        );
         id
     }
 
@@ -382,13 +425,17 @@ impl Server {
     fn restore_layout(&mut self, layout: SavedLayout, defaults: &Defaults) -> Option<Node> {
         match layout {
             SavedLayout::Pane(saved) => {
-                if let Some((handed, snapshot)) = saved.pane.and_then(|id| self.handed.remove(&id)) {
+                if let Some((handed, snapshot)) = saved.pane.and_then(|id| self.handed.remove(&id))
+                {
                     return self.adopt_pane(handed, snapshot, saved).map(Node::Pane);
                 }
                 let initial_output = (!saved.scrollback.is_empty())
                     .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
                 let spec = PaneSpec { command: saved.command, cwd: saved.cwd, title: saved.title };
-                let id = self.spawn_pane(spec, None, initial_output, defaults).inspect_err(|err| log::error!("restoring: {err}")).ok()?;
+                let id = self
+                    .spawn_pane(spec, None, initial_output, defaults)
+                    .inspect_err(|err| log::error!("restoring: {err}"))
+                    .ok()?;
                 let resume = saved.agent.filter(|_| self.config.resume_agents).and_then(|agent| {
                     self.config.resume.get(&agent.name)?.command(agent.session.as_deref())
                 });
@@ -396,9 +443,12 @@ impl Server {
                     pane.type_when_ready(resume);
                 }
                 Some(Node::Pane(id))
-            }
+            },
             SavedLayout::Split { vertical, ratio, first, second } => {
-                match (self.restore_layout(*first, defaults), self.restore_layout(*second, defaults)) {
+                match (
+                    self.restore_layout(*first, defaults),
+                    self.restore_layout(*second, defaults),
+                ) {
                     (Some(first), Some(second)) => Some(Node::Split {
                         axis: if vertical { Axis::Vertical } else { Axis::Horizontal },
                         ratio,
@@ -408,7 +458,7 @@ impl Server {
                     (Some(only), None) | (None, Some(only)) => Some(only),
                     (None, None) => None,
                 }
-            }
+            },
         }
     }
 
@@ -427,7 +477,8 @@ impl Server {
         let id = self.next_pane;
         self.next_pane += 1;
         let explicit = spec.command.clone().filter(|c| !c.is_empty());
-        let mut command = explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
+        let mut command =
+            explicit.clone().or_else(|| Some(self.config.shell.clone())).filter(|c| !c.is_empty());
         let near_cwd = near.and_then(|near| self.panes.get(&near)?.session.cwd());
         let cwd = spec.cwd.or(match (&defaults.root, near_cwd) {
             (Some(root), Some(dir)) if dir.starts_with(root) => Some(dir),
@@ -435,7 +486,8 @@ impl Server {
             (None, dir) => dir,
         });
 
-        let mut env: HashMap<String, String> = defaults.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut env: HashMap<String, String> =
+            defaults.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         if self.config.shell_integration
             && let Some(dir) = &self.integration_dir
             && let Some(injection) = artty_core::integration::inject(dir, command.as_deref())
@@ -449,7 +501,8 @@ impl Server {
             let path = std::env::var("PATH").unwrap_or_default();
             env.insert("PATH".to_owned(), format!("{}:{path}", dir.display()));
         }
-        let size = near.and_then(|p| self.panes.get(&p)).map_or(DEFAULT_SIZE, |pane| pane.session.size());
+        let size =
+            near.and_then(|p| self.panes.get(&p)).map_or(DEFAULT_SIZE, |pane| pane.session.size());
         let options = SessionOptions {
             command: command.map(|mut c| (c.remove(0), c)),
             working_directory: cwd.filter(|dir| dir.is_dir()),
@@ -474,7 +527,9 @@ impl Server {
 
     /// The window showing a workspace, and the workspace's place in it.
     fn window_of_workspace(&self, workspace: WorkspaceId) -> Option<(WindowId, usize)> {
-        self.windows.iter().find_map(|(&id, window)| window.workspaces.iter().position(|&w| w == workspace).map(|i| (id, i)))
+        self.windows.iter().find_map(|(&id, window)| {
+            window.workspaces.iter().position(|&w| w == workspace).map(|i| (id, i))
+        })
     }
 
     fn window_of(&self, pane: PaneId) -> Option<WindowId> {
@@ -500,7 +555,11 @@ impl Server {
 
     fn window_layout(&self, window: &Window) -> WindowLayout {
         WindowLayout {
-            workspaces: window.workspaces.iter().filter_map(|&id| Some(self.workspaces.get(&id)?.layout(id))).collect(),
+            workspaces: window
+                .workspaces
+                .iter()
+                .filter_map(|&id| Some(self.workspaces.get(&id)?.layout(id)))
+                .collect(),
             active: window.active,
             hidden: self.workspaces.keys().filter(|&&id| !self.on_screen(id)).count(),
         }
@@ -508,13 +567,17 @@ impl Server {
 
     /// Whether a workspace is in a window the app shows.
     fn on_screen(&self, workspace: WorkspaceId) -> bool {
-        self.window_of_workspace(workspace).is_some_and(|(window, _)| self.windows[&window].client.is_some())
+        self.window_of_workspace(workspace)
+            .is_some_and(|(window, _)| self.windows[&window].client.is_some())
     }
 
     /// The window the user last used.
     fn frontmost(&self) -> Option<WindowId> {
         let attached = self.windows.iter().filter(|(_, w)| w.client.is_some());
-        attached.max_by_key(|(_, w)| w.last_focus).or_else(|| self.windows.iter().max_by_key(|(_, w)| w.last_focus)).map(|(&id, _)| id)
+        attached
+            .max_by_key(|(_, w)| w.last_focus)
+            .or_else(|| self.windows.iter().max_by_key(|(_, w)| w.last_focus))
+            .map(|(&id, _)| id)
     }
 
     fn focused_pane(&self) -> Option<PaneId> {
@@ -533,7 +596,9 @@ impl Server {
 
     /// Show a workspace's tab in its window.
     fn select_tab(&mut self, workspace: WorkspaceId, tab: usize) {
-        let Some(state) = self.workspaces.get_mut(&workspace).filter(|w| tab < w.tabs.len()) else { return };
+        let Some(state) = self.workspaces.get_mut(&workspace).filter(|w| tab < w.tabs.len()) else {
+            return;
+        };
         state.active = tab;
         if let Some((window, index)) = self.window_of_workspace(workspace) {
             self.windows.get_mut(&window).unwrap().active = index;
@@ -541,15 +606,28 @@ impl Server {
     }
 
     /// Open a tab at the end of `workspace`, or of the window's active one.
-    fn open_tab(&mut self, window: WindowId, workspace: Option<WorkspaceId>, spec: PaneSpec, focus: bool) -> Result<PaneId, String> {
+    fn open_tab(
+        &mut self,
+        window: WindowId,
+        workspace: Option<WorkspaceId>,
+        spec: PaneSpec,
+        focus: bool,
+    ) -> Result<PaneId, String> {
         let workspace = match workspace {
             Some(workspace) => workspace,
-            None => self.windows.get(&window).and_then(Window::active_workspace).ok_or("no such window")?,
+            None => self
+                .windows
+                .get(&window)
+                .and_then(Window::active_workspace)
+                .ok_or("no such window")?,
         };
         if !self.workspaces.contains_key(&workspace) {
             return Err("no such workspace".into());
         }
-        let near = self.workspaces[&workspace].active_tab().map(|t| t.focused).or_else(|| self.window_focused_pane(window));
+        let near = self.workspaces[&workspace]
+            .active_tab()
+            .map(|t| t.focused)
+            .or_else(|| self.window_focused_pane(window));
         let defaults = self.workspaces[&workspace].defaults.clone();
         let id = self.spawn_pane(spec, near, None, &defaults)?;
         let state = self.workspaces.get_mut(&workspace).unwrap();
@@ -562,7 +640,13 @@ impl Server {
     }
 
     /// A workspace with one tab, after the window's others.
-    fn new_workspace(&mut self, window: WindowId, name: Option<String>, spec: PaneSpec, focus: bool) -> Result<(WorkspaceId, PaneId), String> {
+    fn new_workspace(
+        &mut self,
+        window: WindowId,
+        name: Option<String>,
+        spec: PaneSpec,
+        focus: bool,
+    ) -> Result<(WorkspaceId, PaneId), String> {
         if !self.windows.contains_key(&window) {
             return Err("no such window".into());
         }
@@ -577,9 +661,17 @@ impl Server {
 
     /// A workspace (in no window yet) with one tab. A directory given for
     /// it becomes its root; otherwise it starts in your home directory.
-    fn create_workspace(&mut self, name: Option<String>, spec: PaneSpec) -> Result<(WorkspaceId, PaneId), String> {
-        let defaults = Defaults { root: spec.cwd.clone().filter(|dir| dir.is_dir()), env: BTreeMap::new() };
-        let spec = PaneSpec { cwd: spec.cwd.or_else(|| std::env::var_os("HOME").map(PathBuf::from)), ..spec };
+    fn create_workspace(
+        &mut self,
+        name: Option<String>,
+        spec: PaneSpec,
+    ) -> Result<(WorkspaceId, PaneId), String> {
+        let defaults =
+            Defaults { root: spec.cwd.clone().filter(|dir| dir.is_dir()), env: BTreeMap::new() };
+        let spec = PaneSpec {
+            cwd: spec.cwd.or_else(|| std::env::var_os("HOME").map(PathBuf::from)),
+            ..spec
+        };
         let pane = self.spawn_pane(spec, None, None, &defaults)?;
         let mut workspace = Workspace::new(name, vec![Tab::new(pane)], 0);
         workspace.defaults = defaults;
@@ -600,7 +692,13 @@ impl Server {
         self.workspaces.get_mut(&id).unwrap().title = title;
     }
 
-    fn split(&mut self, target: PaneId, axis: Axis, spec: PaneSpec, focus: bool) -> Result<PaneId, String> {
+    fn split(
+        &mut self,
+        target: PaneId,
+        axis: Axis,
+        spec: PaneSpec,
+        focus: bool,
+    ) -> Result<PaneId, String> {
         let (workspace, tab) = self.place_of(target).ok_or_else(|| format!("no pane {target}"))?;
         let defaults = self.workspaces[&workspace].defaults.clone();
         let id = self.spawn_pane(spec, Some(target), None, &defaults)?;
@@ -629,7 +727,8 @@ impl Server {
     /// Tell programs that track focus (vim, etc.) that it moved.
     fn report_focus_change(&self, before: Option<PaneId>) {
         let after = self.focused_pane();
-        let window_focused = self.frontmost().and_then(|w| self.windows.get(&w)).is_some_and(|w| w.focused);
+        let window_focused =
+            self.frontmost().and_then(|w| self.windows.get(&w)).is_some_and(|w| w.focused);
         if before != after && window_focused {
             self.report_focus(before, false);
             self.report_focus(after, true);
@@ -664,10 +763,10 @@ impl Server {
                     tab_state.zoomed = false;
                 }
                 tab_state.root = root;
-            }
+            },
             None => {
                 self.take_tab(workspace, tab);
-            }
+            },
         }
     }
 
@@ -729,12 +828,24 @@ impl Server {
     }
 
     /// Move a tab within its workspace or into another one, and show it.
-    fn move_tab(&mut self, workspace: WorkspaceId, from: usize, to_workspace: WorkspaceId, to: usize) {
+    fn move_tab(
+        &mut self,
+        workspace: WorkspaceId,
+        from: usize,
+        to_workspace: WorkspaceId,
+        to: usize,
+    ) {
         if !self.workspaces.contains_key(&to_workspace) {
             return;
         }
         if workspace == to_workspace {
-            let Some(state) = self.workspaces.get_mut(&workspace).filter(|w| from < w.tabs.len() && to < w.tabs.len()) else { return };
+            let Some(state) = self
+                .workspaces
+                .get_mut(&workspace)
+                .filter(|w| from < w.tabs.len() && to < w.tabs.len())
+            else {
+                return;
+            };
             let active = state.tabs[state.active].focused;
             let tab = state.tabs.remove(from);
             state.tabs.insert(to, tab);
@@ -798,18 +909,20 @@ impl Server {
     fn show_workspace(&mut self, workspace: WorkspaceId, window: WindowId) {
         let before = self.focused_pane();
         match self.window_of_workspace(workspace) {
-            Some((current, index)) if current == window || self.windows[&current].client.is_some() => {
+            Some((current, index))
+                if current == window || self.windows[&current].client.is_some() =>
+            {
                 self.windows.get_mut(&current).unwrap().active = index;
                 if current != window
                     && let Some(client) = self.windows[&current].client
                 {
                     self.send(client, ServerMessage::App(AppCommand::Activate { window: current }));
                 }
-            }
+            },
             _ => {
                 let to = self.windows.get(&window).map_or(0, |w| w.workspaces.len());
                 self.move_workspace(workspace, window, to);
-            }
+            },
         }
         self.report_focus_change(before);
     }
@@ -817,7 +930,10 @@ impl Server {
     /// Move a workspace into a window of its own, and have `client` show it.
     fn workspace_to_new_window(&mut self, workspace: WorkspaceId, client: ClientId) {
         // Already alone in its window: nothing would change.
-        if self.window_of_workspace(workspace).is_some_and(|(w, _)| self.windows[&w].workspaces.len() < 2) {
+        if self
+            .window_of_workspace(workspace)
+            .is_some_and(|(w, _)| self.windows[&w].workspaces.len() < 2)
+        {
             return;
         }
         if !self.workspaces.contains_key(&workspace) {
@@ -849,9 +965,16 @@ impl Server {
             .windows
             .iter()
             .enumerate()
-            .flat_map(|(number, (&window, w))| w.workspaces.iter().map(move |&id| (id, Some((window, number + 1)))))
+            .flat_map(|(number, (&window, w))| {
+                w.workspaces.iter().map(move |&id| (id, Some((window, number + 1))))
+            })
             .collect();
-        order.extend(self.workspaces.keys().filter(|id| self.window_of_workspace(**id).is_none()).map(|&id| (id, None)));
+        order.extend(
+            self.workspaces
+                .keys()
+                .filter(|id| self.window_of_workspace(**id).is_none())
+                .map(|&id| (id, None)),
+        );
         order
     }
 
@@ -861,15 +984,33 @@ impl Server {
             .into_iter()
             .filter_map(|(id, place)| {
                 let workspace = self.workspaces.get(&id)?;
-                let panes: Vec<&Pane> = workspace.tabs.iter().flat_map(|t| t.root.panes()).filter_map(|p| self.panes.get(&p)).collect();
+                let panes: Vec<&Pane> = workspace
+                    .tabs
+                    .iter()
+                    .flat_map(|t| t.root.panes())
+                    .filter_map(|p| self.panes.get(&p))
+                    .collect();
                 let status = panes
                     .iter()
                     .map(|p| p.status.label())
-                    .min_by_key(|label| ORDER.iter().position(|o| o == label).unwrap_or(ORDER.len()))
+                    .min_by_key(|label| {
+                        ORDER.iter().position(|o| o == label).unwrap_or(ORDER.len())
+                    })
                     .unwrap_or("idle");
-                let title = workspace.name.clone().or_else(|| Some(workspace.title.clone()).filter(|t| !t.is_empty())).unwrap_or_else(|| {
-                    workspace.active_tab().and_then(|t| t.title.clone().or_else(|| Some(self.panes.get(&t.focused)?.title()))).unwrap_or_default()
-                });
+                let title = workspace
+                    .name
+                    .clone()
+                    .or_else(|| Some(workspace.title.clone()).filter(|t| !t.is_empty()))
+                    .unwrap_or_else(|| {
+                        workspace
+                            .active_tab()
+                            .and_then(|t| {
+                                t.title
+                                    .clone()
+                                    .or_else(|| Some(self.panes.get(&t.focused)?.title()))
+                            })
+                            .unwrap_or_default()
+                    });
                 Some(WorkspaceInfo {
                     id,
                     name: workspace.name.clone(),
@@ -895,9 +1036,12 @@ impl Server {
         let front = self.frontmost().and_then(|w| self.windows.get(&w));
         let find = |matches: &dyn Fn(&Workspace) -> bool| {
             let found = |id: &WorkspaceId| self.workspaces.get(id).is_some_and(matches);
-            front.and_then(|w| w.workspaces.iter().copied().find(found)).or_else(|| self.workspaces.keys().copied().find(found))
+            front
+                .and_then(|w| w.workspaces.iter().copied().find(found))
+                .or_else(|| self.workspaces.keys().copied().find(found))
         };
-        find(&|w| w.name.as_deref() == Some(name)).or_else(|| find(&|w| w.name.is_none() && w.title == name))
+        find(&|w| w.name.as_deref() == Some(name))
+            .or_else(|| find(&|w| w.name.is_none() && w.title == name))
     }
 
     fn fail_runs(&mut self, pane: PaneId, message: &str) {
@@ -910,13 +1054,13 @@ impl Server {
         match waiter {
             Waiter::Command(reply) => {
                 let _ = reply.send(response);
-            }
+            },
             Waiter::App(client, id) => {
                 if let Some(client) = clients.get(&client) {
                     let json = serde_json::to_string(&response).unwrap_or_default();
                     let _ = client.tx.send(ServerMessage::Control { id, response: json });
                 }
-            }
+            },
         }
     }
 
@@ -940,9 +1084,13 @@ impl Server {
         let Some(pane_state) = self.panes.get(&pane) else { return };
         let pane_title = pane_state.title();
         let title = title.map_or_else(|| pane_title.clone(), |t| format!("{t} — {pane_title}"));
-        let body = if body.is_empty() { "Needs your attention".to_owned() } else { body.to_owned() };
+        let body =
+            if body.is_empty() { "Needs your attention".to_owned() } else { body.to_owned() };
         // Attached apps post native notifications; otherwise use osascript.
-        let client = self.frontmost().and_then(|w| self.windows.get(&w)?.client).or_else(|| self.clients.keys().next().copied());
+        let client = self
+            .frontmost()
+            .and_then(|w| self.windows.get(&w)?.client)
+            .or_else(|| self.clients.keys().next().copied());
         match client {
             Some(client) => self.send(client, ServerMessage::Notify { title, body }),
             None => osascript_notify(&title, &body),
@@ -955,24 +1103,45 @@ impl Server {
         match input {
             Input::Session(id, event) => self.handle_event(id, event),
             Input::Control(request, reply) => match request {
-                Request::Run { tab, command, timeout_secs } => match self.start_run(tab, &command) {
-                    Ok(pane) => {
-                        let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
-                        self.runs.push(PendingRun { pane, waiter: Waiter::Command(reply), deadline });
-                    }
-                    Err(message) => {
-                        let _ = reply.send(Response::error(message));
+                Request::Run { tab, command, timeout_secs } => {
+                    match self.start_run(tab, &command) {
+                        Ok(pane) => {
+                            let deadline =
+                                timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+                            self.runs.push(PendingRun {
+                                pane,
+                                waiter: Waiter::Command(reply),
+                                deadline,
+                            });
+                        },
+                        Err(message) => {
+                            let _ = reply.send(Response::error(message));
+                        },
                     }
                 },
                 request => {
                     let _ = reply.send(self.respond(request).unwrap_or_else(Response::error));
-                }
+                },
             },
             Input::Connected(id, tx) => {
-                let build = std::env::current_exe().map(|exe| artty_core::protocol::build_id(&exe)).unwrap_or_default();
-                let _ = tx.send(ServerMessage::Welcome { version: artty_core::protocol::protocol_version(), server_version: build });
-                self.clients.insert(id, Client { tx, sent: HashMap::new(), dirty: HashSet::new(), panes_sent: Vec::new(), images_sent: HashSet::new() });
-            }
+                let build = std::env::current_exe()
+                    .map(|exe| artty_core::protocol::build_id(&exe))
+                    .unwrap_or_default();
+                let _ = tx.send(ServerMessage::Welcome {
+                    version: artty_core::protocol::protocol_version(),
+                    server_version: build,
+                });
+                self.clients.insert(
+                    id,
+                    Client {
+                        tx,
+                        sent: HashMap::new(),
+                        dirty: HashSet::new(),
+                        panes_sent: Vec::new(),
+                        images_sent: HashSet::new(),
+                    },
+                );
+            },
             Input::Client(id, message) => self.handle_client(id, message),
             Input::Disconnected(id) => {
                 self.clients.remove(&id);
@@ -981,10 +1150,13 @@ impl Server {
                     window.client = None;
                     window.focused = false;
                 }
-                for run in self.runs.extract_if(.., |run| matches!(run.waiter, Waiter::App(client, _) if client == id)) {
+                for run in self.runs.extract_if(
+                    ..,
+                    |run| matches!(run.waiter, Waiter::App(client, _) if client == id),
+                ) {
                     drop(run);
                 }
-            }
+            },
         }
     }
 
@@ -993,12 +1165,15 @@ impl Server {
         let Some(pane) = self.panes.get_mut(&id) else { return };
         let Some(notice) = pane.session.handle(event) else { return };
         match notice {
-            Notice::Redraw => {}
+            Notice::Redraw => {},
             Notice::Title(title) => pane.set_title(Some(title)),
             Notice::ResetTitle => pane.set_title(None),
             Notice::Bell => {
                 if visible {
-                    let client = self.seen_windows().find(|&w| self.window_visible(w).contains(&id)).and_then(|w| self.windows[&w].client);
+                    let client = self
+                        .seen_windows()
+                        .find(|&w| self.window_visible(w).contains(&id))
+                        .and_then(|w| self.windows[&w].client);
                     if let Some(client) = client {
                         self.send(client, ServerMessage::Bell { pane: id });
                     }
@@ -1006,12 +1181,14 @@ impl Server {
                     pane.alert(None);
                     self.notify_user(id, None, "Bell");
                 }
-            }
+            },
             Notice::Notification { title, body } => {
                 pane.alert(Some(body.clone()).filter(|b| !b.is_empty()).or(title.clone()));
                 self.notify_user(id, title.as_deref(), &body);
-            }
-            Notice::Progress(progress) => pane.progress = (progress != Progress::Remove).then_some(progress),
+            },
+            Notice::Progress(progress) => {
+                pane.progress = (progress != Progress::Remove).then_some(progress)
+            },
             Notice::CommandStarted(command) => pane.command_started(command),
             Notice::CommandFinished(record) => {
                 pane.command_finished(record.exit);
@@ -1038,13 +1215,13 @@ impl Server {
                     }
                     self.notify_user(id, None, &message);
                 }
-            }
+            },
             Notice::ClipboardStore(_, text) => pbcopy(&text),
             Notice::ClipboardLoad(_, format) => pane.session.reply_clipboard(&format, &pbpaste()),
             Notice::Exited => {
                 self.close_pane(id);
                 return;
-            }
+            },
         }
         if let Some(pane) = self.panes.get_mut(&id) {
             pane.refresh();
@@ -1055,7 +1232,9 @@ impl Server {
     fn handle_client(&mut self, client: ClientId, message: ClientMessage) {
         match message {
             ClientMessage::AttachWindow { window, spec, bounds } => {
-                let window = match window.filter(|w| self.windows.get(w).is_some_and(|w| w.client.is_none())) {
+                let window = match window
+                    .filter(|w| self.windows.get(w).is_some_and(|w| w.client.is_none()))
+                {
                     Some(window) => window,
                     None => {
                         let near = self.focused_pane();
@@ -1064,9 +1243,9 @@ impl Server {
                             Err(err) => {
                                 log::error!("{err}");
                                 return;
-                            }
+                            },
                         }
-                    }
+                    },
                 };
                 let state = self.windows.get_mut(&window).unwrap();
                 state.client = Some(client);
@@ -1076,18 +1255,20 @@ impl Server {
                 if let Some(c) = self.clients.get_mut(&client) {
                     c.panes_sent.clear();
                 }
-            }
+            },
             ClientMessage::DetachWindow { window } => {
-                if let Some(state) = self.windows.get_mut(&window).filter(|w| w.client == Some(client)) {
+                if let Some(state) =
+                    self.windows.get_mut(&window).filter(|w| w.client == Some(client))
+                {
                     state.client = None;
                     state.focused = false;
                 }
-            }
+            },
             ClientMessage::WindowBounds { window, bounds } => {
                 if let Some(state) = self.windows.get_mut(&window) {
                     state.bounds = Some(bounds);
                 }
-            }
+            },
             ClientMessage::WindowFocused { window, focused } => {
                 let before = self.focused_pane();
                 if let Some(state) = self.windows.get_mut(&window) {
@@ -1102,111 +1283,124 @@ impl Server {
                 } else {
                     self.report_focus(self.window_focused_pane(window), false);
                 }
-            }
+            },
             ClientMessage::NewTab { window, workspace, spec } => {
                 let before = self.focused_pane();
                 if let Err(err) = self.open_tab(window, workspace, spec, true) {
                     log::error!("{err}");
                 }
                 self.report_focus_change(before);
-            }
+            },
             ClientMessage::NewWorkspace { window, name, spec } => {
                 let before = self.focused_pane();
                 if let Err(err) = self.new_workspace(window, name, spec, true) {
                     log::error!("{err}");
                 }
                 self.report_focus_change(before);
-            }
+            },
             ClientMessage::RenameWorkspace { workspace, name } => {
                 if let Some(state) = self.workspaces.get_mut(&workspace) {
                     state.name = name.map(|n| n.trim().to_owned()).filter(|n| !n.is_empty());
                 }
-            }
+            },
             ClientMessage::CloseWorkspace { workspace } => self.close_workspace(workspace),
             ClientMessage::SetCollapsed { workspace, collapsed } => {
                 if let Some(state) = self.workspaces.get_mut(&workspace) {
                     state.collapsed = collapsed;
                 }
-            }
-            ClientMessage::MoveWorkspace { workspace, window, to } => self.move_workspace(workspace, window, to),
-            ClientMessage::TabToNewWorkspace { workspace, tab } => self.tab_to_new_workspace(workspace, tab),
+            },
+            ClientMessage::MoveWorkspace { workspace, window, to } => {
+                self.move_workspace(workspace, window, to)
+            },
+            ClientMessage::TabToNewWorkspace { workspace, tab } => {
+                self.tab_to_new_workspace(workspace, tab)
+            },
             ClientMessage::ForgetImages { ids } => {
                 if let Some(c) = self.clients.get_mut(&client) {
                     for id in ids {
                         c.images_sent.remove(&id);
                     }
                 }
-            }
+            },
             ClientMessage::OpenWorkspace { workspace, window } => {
                 if self.workspaces.contains_key(&workspace) && self.windows.contains_key(&window) {
                     self.show_workspace(workspace, window);
                 }
-            }
+            },
             ClientMessage::HideWorkspace { workspace } => {
                 let before = self.focused_pane();
                 self.unlink_workspace(workspace);
                 self.report_focus_change(before);
-            }
-            ClientMessage::WorkspaceToNewWindow { workspace } => self.workspace_to_new_window(workspace, client),
+            },
+            ClientMessage::WorkspaceToNewWindow { workspace } => {
+                self.workspace_to_new_window(workspace, client)
+            },
             ClientMessage::SetWorkspaceColor { workspace, color } => {
-                if let (Some(state), Ok(color)) = (self.workspaces.get_mut(&workspace), workspace_color(color.as_deref().unwrap_or_default())) {
+                if let (Some(state), Ok(color)) = (
+                    self.workspaces.get_mut(&workspace),
+                    workspace_color(color.as_deref().unwrap_or_default()),
+                ) {
                     state.color = color;
                 }
-            }
+            },
             ClientMessage::SetWorkspaceRoot { workspace, root } => {
                 if let Some(state) = self.workspaces.get_mut(&workspace) {
                     state.defaults.root = root.filter(|dir| dir.is_dir());
                 }
                 self.refresh_title(workspace);
-            }
+            },
             ClientMessage::Split { pane, axis, spec } => {
                 if let Err(err) = self.split(pane, axis, spec, true) {
                     log::error!("{err}");
                 }
-            }
+            },
             ClientMessage::ClosePane { pane } => self.close_pane(pane),
             ClientMessage::CloseTab { workspace, tab } => self.close_tab(workspace, tab),
             ClientMessage::SelectTab { workspace, tab } => {
                 let before = self.focused_pane();
                 self.select_tab(workspace, tab);
                 self.report_focus_change(before);
-            }
+            },
             ClientMessage::FocusPane { pane } => self.focus_pane(pane),
-            ClientMessage::MoveTab { workspace, from, to_workspace, to } => self.move_tab(workspace, from, to_workspace, to),
+            ClientMessage::MoveTab { workspace, from, to_workspace, to } => {
+                self.move_tab(workspace, from, to_workspace, to)
+            },
             ClientMessage::RenameTab { workspace, tab, title } => {
-                if let Some(tab) = self.workspaces.get_mut(&workspace).and_then(|w| w.tabs.get_mut(tab)) {
+                if let Some(tab) =
+                    self.workspaces.get_mut(&workspace).and_then(|w| w.tabs.get_mut(tab))
+                {
                     tab.title = title.map(|t| t.trim().to_owned()).filter(|t| !t.is_empty());
                 }
-            }
+            },
             ClientMessage::ToggleZoom { window } => {
                 if let Some(tab) = self.active_tab_mut(window)
                     && matches!(tab.root, Node::Split { .. })
                 {
                     tab.zoomed = !tab.zoomed;
                 }
-            }
+            },
             ClientMessage::SetRatio { window, path, ratio } => {
                 if let Some(tab) = self.active_tab_mut(window) {
                     tab.root.set_ratio(&path, ratio);
                 }
-            }
+            },
             ClientMessage::Input { pane, bytes } => {
                 if let Some(pane) = self.panes.get(&pane) {
                     pane.session.write(bytes);
                 }
-            }
+            },
             ClientMessage::Resize { pane, size } => {
                 if let Some(pane) = self.panes.get_mut(&pane) {
                     pane.session.resize(size);
                 }
                 self.mark_dirty(pane);
-            }
+            },
             ClientMessage::Scroll { pane, lines } => {
                 if let Some(pane) = self.panes.get(&pane) {
                     pane.session.scroll(lines);
                 }
                 self.mark_dirty(pane);
-            }
+            },
             ClientMessage::Selection { pane, op } => {
                 if let Some(state) = self.panes.get(&pane) {
                     let side = |right: bool| if right { Side::Right } else { Side::Left };
@@ -1218,38 +1412,44 @@ impl Server {
                                 _ => SelectionType::Lines,
                             };
                             state.session.start_selection(kind, line, column, side(right));
-                        }
-                        SelectionOp::Update { line, column, right } => state.session.update_selection(line, column, side(right)),
+                        },
+                        SelectionOp::Update { line, column, right } => {
+                            state.session.update_selection(line, column, side(right))
+                        },
                         SelectionOp::Clear => state.session.clear_selection(),
                     }
                 }
                 self.mark_dirty(pane);
-            }
+            },
             ClientMessage::Search { id, pane, query, older, restart } => {
                 let result = match self.panes.get_mut(&pane) {
                     Some(state) => {
                         if restart {
                             state.session.clear_selection();
                         }
-                        if query.is_empty() { Ok(false) } else { state.session.search(&query, older) }
-                    }
+                        if query.is_empty() {
+                            Ok(false)
+                        } else {
+                            state.session.search(&query, older)
+                        }
+                    },
                     None => Err("no such pane".into()),
                 };
                 self.send(client, ServerMessage::Reply { id, reply: Reply::Search(result) });
                 self.mark_dirty(pane);
-            }
+            },
             ClientMessage::EndSearch { pane } => {
                 if let Some(state) = self.panes.get_mut(&pane) {
                     state.session.end_search();
                 }
                 self.mark_dirty(pane);
-            }
+            },
             ClientMessage::ClearBuffer { pane } => {
                 if let Some(state) = self.panes.get(&pane) {
                     state.session.clear_buffer();
                 }
                 self.mark_dirty(pane);
-            }
+            },
             ClientMessage::Query { id, query } => {
                 let reply = match query {
                     Query::DetachedWindows => Reply::Windows(
@@ -1258,7 +1458,12 @@ impl Server {
                             .filter(|(_, w)| w.client.is_none())
                             .map(|(&window, w)| WindowSummary {
                                 window,
-                                tabs: w.workspaces.iter().filter_map(|id| self.workspaces.get(id)).map(|ws| ws.tabs.len()).sum(),
+                                tabs: w
+                                    .workspaces
+                                    .iter()
+                                    .filter_map(|id| self.workspaces.get(id))
+                                    .map(|ws| ws.tabs.len())
+                                    .sum(),
                                 bounds: w.bounds,
                             })
                             .collect(),
@@ -1269,34 +1474,55 @@ impl Server {
                             .and_then(|p| p.session.link_span(line, column))
                             .map(|(url, span)| (url, span.start, span.end)),
                     ),
-                    Query::SelectionText { pane } => Reply::Text(self.panes.get(&pane).and_then(|p| p.session.selection_text())),
-                    Query::Cwd { pane } => Reply::Path(self.panes.get(&pane).and_then(|p| p.session.cwd())),
+                    Query::SelectionText { pane } => {
+                        Reply::Text(self.panes.get(&pane).and_then(|p| p.session.selection_text()))
+                    },
+                    Query::Cwd { pane } => {
+                        Reply::Path(self.panes.get(&pane).and_then(|p| p.session.cwd()))
+                    },
                 };
                 self.send(client, ServerMessage::Reply { id, reply });
-            }
+            },
             ClientMessage::Control { id, request } => {
                 let request = match serde_json::from_str::<Request>(&request) {
                     Ok(request) => request,
                     Err(err) => {
                         let response = Response::error(format!("bad request: {err}"));
-                        self.send(client, ServerMessage::Control { id, response: serde_json::to_string(&response).unwrap_or_default() });
+                        self.send(
+                            client,
+                            ServerMessage::Control {
+                                id,
+                                response: serde_json::to_string(&response).unwrap_or_default(),
+                            },
+                        );
                         return;
-                    }
+                    },
                 };
                 match request {
-                    Request::Run { tab, command, timeout_secs } => match self.start_run(tab, &command) {
-                        Ok(pane) => {
-                            let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
-                            self.runs.push(PendingRun { pane, waiter: Waiter::App(client, id), deadline });
+                    Request::Run { tab, command, timeout_secs } => {
+                        match self.start_run(tab, &command) {
+                            Ok(pane) => {
+                                let deadline =
+                                    timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+                                self.runs.push(PendingRun {
+                                    pane,
+                                    waiter: Waiter::App(client, id),
+                                    deadline,
+                                });
+                            },
+                            Err(message) => Self::answer(
+                                &self.clients,
+                                Waiter::App(client, id),
+                                Response::error(message),
+                            ),
                         }
-                        Err(message) => Self::answer(&self.clients, Waiter::App(client, id), Response::error(message)),
                     },
                     request => {
                         let response = self.respond(request).unwrap_or_else(Response::error);
                         Self::answer(&self.clients, Waiter::App(client, id), response);
-                    }
+                    },
                 }
-            }
+            },
         }
     }
 
@@ -1316,7 +1542,8 @@ impl Server {
         if !session.shell_integration() {
             return Err("this pane's shell doesn't report commands (no shell integration)".into());
         }
-        if session.shell_phase() != ShellPhase::Prompt || self.runs.iter().any(|run| run.pane == id) {
+        if session.shell_phase() != ShellPhase::Prompt || self.runs.iter().any(|run| run.pane == id)
+        {
             return Err("the pane is busy".into());
         }
         session.write(format!("{command}\r").into_bytes());
@@ -1332,14 +1559,20 @@ impl Server {
             let Some(workspace) = self.workspaces.get(&workspace_id) else { continue };
             // Shown: the window's active workspace in the frontmost window.
             let shown = place.is_some_and(|(window, _)| {
-                Some(window) == front && self.windows[&window].active_workspace() == Some(workspace_id)
+                Some(window) == front
+                    && self.windows[&window].active_workspace() == Some(workspace_id)
             });
             for (index, tab) in workspace.tabs.iter().enumerate() {
                 for id in tab.root.panes() {
                     let focused = tab.focused == id;
                     let active = shown && index == workspace.active && focused;
                     if let Some(pane) = self.panes.get(&id) {
-                        let mut info = pane.info(place.map_or(0, |(_, number)| number), index + 1, active, focused);
+                        let mut info = pane.info(
+                            place.map_or(0, |(_, number)| number),
+                            index + 1,
+                            active,
+                            focused,
+                        );
                         info.workspace = workspace_id as usize;
                         info.workspace_name = workspace.name.clone();
                         infos.push(info);
@@ -1351,7 +1584,9 @@ impl Server {
     }
 
     fn app_client(&self) -> Option<ClientId> {
-        self.frontmost().and_then(|w| self.windows.get(&w)?.client).or_else(|| self.clients.keys().next().copied())
+        self.frontmost()
+            .and_then(|w| self.windows.get(&w)?.client)
+            .or_else(|| self.clients.keys().next().copied())
     }
 
     fn respond(&mut self, request: Request) -> Result<Response, String> {
@@ -1364,7 +1599,10 @@ impl Server {
                     ReadSource::Scrollback { lines } => session.scrollback_text(lines),
                     ReadSource::LastCommand => {
                         if !session.shell_integration() {
-                            return Err("this pane's shell doesn't report commands (no shell integration)".into());
+                            return Err(
+                                "this pane's shell doesn't report commands (no shell integration)"
+                                    .into(),
+                            );
                         }
                         let last = session.last_command().ok_or("no command has finished yet")?;
                         return Ok(Response::Command {
@@ -1373,10 +1611,10 @@ impl Server {
                             exit: last.exit,
                             truncated: last.truncated,
                         });
-                    }
+                    },
                 };
                 Response::Text { text }
-            }
+            },
             Request::Send { tab, text, enter } => {
                 let session = &self.panes[&self.resolve(tab)?].session;
                 let mut bytes = text.into_bytes();
@@ -1385,11 +1623,12 @@ impl Server {
                 }
                 session.write(bytes);
                 Response::Ok
-            }
+            },
             Request::New { cwd, command, title, focus, split, target, workspace } => {
                 let command = (!command.is_empty()).then_some(command);
                 let spec = PaneSpec { command, cwd, title };
-                let named = workspace.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty());
+                let named =
+                    workspace.map(|name| name.trim().to_owned()).filter(|name| !name.is_empty());
                 let id = match split {
                     Some(direction) => {
                         let target = self.resolve(target)?;
@@ -1398,16 +1637,17 @@ impl Server {
                             SplitDirection::Down => Axis::Vertical,
                         };
                         self.split(target, axis, spec, focus)?
-                    }
+                    },
                     None => match (self.frontmost(), named) {
                         (Some(window), Some(name)) => match self.workspace_named(&name) {
                             Some(workspace) => {
                                 if focus && !self.on_screen(workspace) {
                                     self.show_workspace(workspace, window);
                                 }
-                                let window = self.window_of_workspace(workspace).map_or(window, |(w, _)| w);
+                                let window =
+                                    self.window_of_workspace(workspace).map_or(window, |(w, _)| w);
                                 self.open_tab(window, Some(workspace), spec, focus)?
-                            }
+                            },
                             None => self.new_workspace(window, Some(name), spec, focus)?.1,
                         },
                         (Some(window), None) => self.open_tab(window, None, spec, focus)?,
@@ -1416,14 +1656,14 @@ impl Server {
                             let (workspace, pane) = self.create_workspace(name, spec)?;
                             self.insert_window(vec![workspace], 0, None);
                             pane
-                        }
+                        },
                     },
                 };
                 if focus {
                     self.focus_pane(id);
                 }
                 Response::Tab { id }
-            }
+            },
             Request::Focus { tab } => {
                 let id = self.resolve(Some(tab))?;
                 // A pane out of sight comes into the frontmost window.
@@ -1440,19 +1680,20 @@ impl Server {
                     self.send(client, ServerMessage::App(AppCommand::Activate { window }));
                 }
                 Response::Ok
-            }
+            },
             Request::Close { tab } => {
                 let id = self.resolve(Some(tab))?;
                 self.close_pane(id);
                 Response::Ok
-            }
+            },
             Request::Rename { tab, title } => {
                 let id = self.resolve(tab)?;
                 let (workspace, tab) = self.place_of(id).ok_or("the pane closed")?;
                 let title = title.trim();
-                self.workspaces.get_mut(&workspace).unwrap().tabs[tab].title = (!title.is_empty()).then(|| title.to_owned());
+                self.workspaces.get_mut(&workspace).unwrap().tabs[tab].title =
+                    (!title.is_empty()).then(|| title.to_owned());
                 Response::Ok
-            }
+            },
             Request::Run { .. } => unreachable!("handled before"),
             Request::Notify { tab, title, body } => {
                 let id = self.resolve(tab)?;
@@ -1461,37 +1702,43 @@ impl Server {
                 }
                 self.notify_user(id, title.as_deref(), &body);
                 Response::Ok
-            }
+            },
             Request::Status { tab, state, message, agent_session, agent } => {
                 let id = self.resolve(tab)?;
                 let pane = self.panes.get_mut(&id).ok_or("the pane closed")?;
-                let was_waiting = matches!(pane.status, Status::Agent { state: AgentState::Waiting, .. });
+                let was_waiting =
+                    matches!(pane.status, Status::Agent { state: AgentState::Waiting, .. });
                 pane.report(state, message.clone(), agent_session, agent);
                 match state {
                     AgentState::Waiting if !was_waiting => {
                         self.notify_user(id, Some("Needs input"), message.as_deref().unwrap_or(""));
-                    }
-                    AgentState::Done => self.notify_user(id, Some("Done"), message.as_deref().unwrap_or("")),
-                    _ => {}
+                    },
+                    AgentState::Done => {
+                        self.notify_user(id, Some("Done"), message.as_deref().unwrap_or(""))
+                    },
+                    _ => {},
                 }
                 Response::Ok
-            }
+            },
             Request::Activity => {
-                let window = self.frontmost().filter(|w| self.windows[w].client.is_some()).ok_or("the artty app isn't running")?;
+                let window = self
+                    .frontmost()
+                    .filter(|w| self.windows[w].client.is_some())
+                    .ok_or("the artty app isn't running")?;
                 let client = self.windows[&window].client.unwrap();
                 self.send(client, ServerMessage::App(AppCommand::ShowActivity { window }));
                 Response::Ok
-            }
+            },
             Request::Settings => {
                 let client = self.app_client().ok_or("the artty app isn't running")?;
                 self.send(client, ServerMessage::App(AppCommand::OpenSettings));
                 Response::Ok
-            }
+            },
             Request::Restart => {
                 let client = self.app_client().ok_or("the artty app isn't running")?;
                 self.send(client, ServerMessage::App(AppCommand::Restart));
                 Response::Ok
-            }
+            },
             Request::ServerStatus => Response::Server {
                 info: ServerInfo {
                     version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -1507,22 +1754,27 @@ impl Server {
             Request::StopServer => {
                 self.stopping = true;
                 Response::Ok
-            }
+            },
             Request::RestartServer => {
                 self.stopping = true;
                 self.restarting = true;
                 Response::Ok
-            }
+            },
             Request::Processes { tab } => {
                 if self.usage.is_empty() {
                     self.sample_usage();
                 }
-                let panes: Vec<PaneProcesses> = self.usage.iter().filter(|p| tab.is_none_or(|id| id == p.id)).cloned().collect();
+                let panes: Vec<PaneProcesses> = self
+                    .usage
+                    .iter()
+                    .filter(|p| tab.is_none_or(|id| id == p.id))
+                    .cloned()
+                    .collect();
                 if tab.is_some() && panes.is_empty() {
                     return Err("no such pane".into());
                 }
                 Response::Processes { panes, server: self.server_usage.clone() }
-            }
+            },
             Request::Workspaces => Response::Workspaces { workspaces: self.workspace_infos() },
             Request::HandOver { executable } => {
                 if !executable.is_file() {
@@ -1531,7 +1783,7 @@ impl Server {
                 // After this answer goes out.
                 self.handover_to = Some(executable);
                 Response::Ok
-            }
+            },
             Request::Signal { pid, signal } => {
                 // Only what runs in a pane: never the server, the app, or
                 // anything else of yours.
@@ -1549,7 +1801,7 @@ impl Server {
                     return Err(std::io::Error::last_os_error().to_string());
                 }
                 Response::Ok
-            }
+            },
             Request::NewWorkspace { name, cwd, command } => {
                 let command = (!command.is_empty()).then_some(command);
                 let spec = PaneSpec { command, cwd, title: None };
@@ -1559,21 +1811,22 @@ impl Server {
                         let (workspace, _) = self.create_workspace(name, spec)?;
                         self.insert_window(vec![workspace], 0, None);
                         workspace
-                    }
+                    },
                 };
                 Response::Workspace { id }
-            }
+            },
             Request::RenameWorkspace { workspace, name } => {
                 let id = self.resolve_workspace(&workspace)?;
                 let name = name.trim();
-                self.workspaces.get_mut(&id).unwrap().name = (!name.is_empty()).then(|| name.to_owned());
+                self.workspaces.get_mut(&id).unwrap().name =
+                    (!name.is_empty()).then(|| name.to_owned());
                 Response::Ok
-            }
+            },
             Request::CloseWorkspace { workspace } => {
                 let id = self.resolve_workspace(&workspace)?;
                 self.close_workspace(id);
                 Response::Ok
-            }
+            },
             Request::OpenWorkspace { workspace } => {
                 let id = self.resolve_workspace(&workspace)?;
                 match self.target_window() {
@@ -1581,14 +1834,16 @@ impl Server {
                     // No windows: one of its own, shown when the app attaches.
                     None => {
                         self.insert_window(vec![id], 0, None);
-                    }
+                    },
                 }
                 Response::Ok
-            }
+            },
             Request::ConfigureWorkspace { workspace, root, clear_root, color, env, unset_env } => {
                 let id = self.resolve_workspace(&workspace)?;
                 let root = match root {
-                    Some(root) if !root.is_dir() => return Err(format!("{} isn't a directory", root.display())),
+                    Some(root) if !root.is_dir() => {
+                        return Err(format!("{} isn't a directory", root.display()));
+                    },
                     root => root,
                 };
                 let color = color.map(|c| workspace_color(&c)).transpose()?;
@@ -1608,23 +1863,26 @@ impl Server {
                 state.defaults.env.extend(env);
                 self.refresh_title(id);
                 Response::Ok
-            }
+            },
             Request::HideWorkspace { workspace } => {
                 let id = self.resolve_workspace(&workspace)?;
                 let before = self.focused_pane();
                 self.unlink_workspace(id);
                 self.report_focus_change(before);
                 Response::Ok
-            }
+            },
             Request::Kill { tab, signal, pane } => {
                 let id = self.resolve(Some(tab))?;
                 if pane {
                     self.close_pane(id);
                 } else {
-                    let group = self.panes[&id].process.foreground_group.ok_or("no foreground process")?;
+                    let group =
+                        self.panes[&id].process.foreground_group.ok_or("no foreground process")?;
                     // A pane opened with a program has no shell to protect.
                     if self.panes[&id].process.at_shell && self.panes[&id].command.is_none() {
-                        return Err("only the shell is running; use --pane to close the pane".into());
+                        return Err(
+                            "only the shell is running; use --pane to close the pane".into()
+                        );
                     }
                     // SAFETY: plain syscall.
                     if unsafe { libc::killpg(group, signal.unwrap_or(libc::SIGTERM)) } != 0 {
@@ -1632,7 +1890,7 @@ impl Server {
                     }
                 }
                 Response::Ok
-            }
+            },
         })
     }
 
@@ -1641,20 +1899,26 @@ impl Server {
     fn sample_usage(&mut self) {
         let samples = processes();
         let now = Instant::now();
-        let unix_now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0., |d| d.as_secs_f64());
-        let cpu = |previous: &HashMap<i32, (u64, Instant)>, sample: &artty_core::ProcessSample| -> f32 {
-            match previous.get(&sample.pid) {
-                // Since the last look, if recent; else the lifetime average.
-                Some(&(used, at)) if now.duration_since(at) <= Duration::from_secs(10) && sample.cpu_ns >= used => {
-                    let wall = now.duration_since(at).as_nanos().max(1) as f64;
-                    ((sample.cpu_ns - used) as f64 / wall * 100.) as f32
+        let unix_now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0., |d| d.as_secs_f64());
+        let cpu =
+            |previous: &HashMap<i32, (u64, Instant)>, sample: &artty_core::ProcessSample| -> f32 {
+                match previous.get(&sample.pid) {
+                    // Since the last look, if recent; else the lifetime average.
+                    Some(&(used, at))
+                        if now.duration_since(at) <= Duration::from_secs(10)
+                            && sample.cpu_ns >= used =>
+                    {
+                        let wall = now.duration_since(at).as_nanos().max(1) as f64;
+                        ((sample.cpu_ns - used) as f64 / wall * 100.) as f32
+                    },
+                    _ => {
+                        let alive = (unix_now - sample.started).max(0.05) * 1e9;
+                        (sample.cpu_ns as f64 / alive * 100.) as f32
+                    },
                 }
-                _ => {
-                    let alive = (unix_now - sample.started).max(0.05) * 1e9;
-                    (sample.cpu_ns as f64 / alive * 100.) as f32
-                }
-            }
-        };
+            };
         let mut usage = Vec::new();
         for info in self.pane_infos() {
             let Some(pane) = self.panes.get(&info.id) else { continue };
@@ -1674,7 +1938,8 @@ impl Server {
                 .collect();
             let cpu_percent = rows.iter().map(|r| r.cpu_percent).fold(0., |a, b| a + b);
             let memory_bytes = rows.iter().map(|r| r.memory_bytes).sum();
-            let attached = self.window_of(info.id).is_some_and(|w| self.windows[&w].client.is_some());
+            let attached =
+                self.window_of(info.id).is_some_and(|w| self.windows[&w].client.is_some());
             let history = self.history.entry(info.id).or_default();
             if history.len() == HISTORY {
                 history.pop_front();
@@ -1698,10 +1963,12 @@ impl Server {
         }
         self.history.retain(|id, _| self.panes.contains_key(id));
         for workspace in self.workspaces.values_mut() {
-            let panes: HashSet<PaneId> = workspace.tabs.iter().flat_map(|t| t.root.panes()).collect();
+            let panes: HashSet<PaneId> =
+                workspace.tabs.iter().flat_map(|t| t.root.panes()).collect();
             let mine = usage.iter().filter(|p| panes.contains(&p.id));
             // Rounded, so layouts don't change for noise.
-            let (cpu, memory) = mine.fold((0f32, 0u64), |(c, m), p| (c + p.cpu_percent, m + p.memory_bytes));
+            let (cpu, memory) =
+                mine.fold((0f32, 0u64), |(c, m), p| (c + p.cpu_percent, m + p.memory_bytes));
             workspace.usage = ((cpu * 10.).round() / 10., memory >> 20 << 20);
         }
         let pid = std::process::id();
@@ -1806,7 +2073,9 @@ impl Server {
             _ => "",
         };
         let progress = match pane.progress {
-            Some(Progress::Normal(p) | Progress::Paused(Some(p)) | Progress::Error(Some(p))) => Some(p),
+            Some(Progress::Normal(p) | Progress::Paused(Some(p)) | Progress::Error(Some(p))) => {
+                Some(p)
+            },
             _ => None,
         };
         PaneState { info, icon: icon.to_owned(), progress, agent: pane.agent_name() }
@@ -1832,7 +2101,8 @@ impl Server {
                 .filter(|info| window_panes.contains(&info.id))
                 .filter_map(|info| Some(self.pane_state(self.panes.get(&info.id)?, info.clone())))
                 .collect();
-            let visible: Vec<PaneId> = windows.iter().flat_map(|(_, _, v)| v.iter().copied()).collect();
+            let visible: Vec<PaneId> =
+                windows.iter().flat_map(|(_, _, v)| v.iter().copied()).collect();
 
             let mut frames = Vec::new();
             {
@@ -1843,7 +2113,10 @@ impl Server {
                 for &pane in &visible {
                     let due = match client.sent.get(&pane) {
                         None => true,
-                        Some((_, at)) => client.dirty.contains(&pane) && now.duration_since(*at) >= FRAME_INTERVAL,
+                        Some((_, at)) => {
+                            client.dirty.contains(&pane)
+                                && now.duration_since(*at) >= FRAME_INTERVAL
+                        },
                     };
                     if due {
                         frames.push(pane);
@@ -1898,7 +2171,9 @@ impl Server {
                 self.panes
                     .get(id)
                     .map(|p| match handover {
-                        true => SavedPane { pane: Some(*id), command: p.command.clone(), ..p.saved(0) },
+                        true => {
+                            SavedPane { pane: Some(*id), command: p.command.clone(), ..p.saved(0) }
+                        },
                         false => p.saved(self.config.restore_scrollback),
                     })
                     .unwrap_or_default(),
@@ -1951,7 +2226,12 @@ impl Server {
             .windows
             .values()
             .map(|window| {
-                let workspaces = window.workspaces.iter().filter_map(|id| self.workspaces.get(id)).map(saved_workspace).collect();
+                let workspaces = window
+                    .workspaces
+                    .iter()
+                    .filter_map(|id| self.workspaces.get(id))
+                    .map(saved_workspace)
+                    .collect();
                 SavedWindowState::new(window.bounds, window.active, workspaces)
             })
             .collect();
@@ -1982,17 +2262,18 @@ impl Server {
         let check = std::process::Command::new(&copy).args(["server", "--handover-check"]).output();
         let expected = crate::handover_check();
         match check {
-            Ok(out) if String::from_utf8_lossy(&out.stdout).trim() == expected => {}
+            Ok(out) if String::from_utf8_lossy(&out.stdout).trim() == expected => {},
             Ok(out) => {
                 let said = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-                let err = std::io::Error::other(format!("that build can't take over (it said {said:?})"));
+                let err =
+                    std::io::Error::other(format!("that build can't take over (it said {said:?})"));
                 log::error!("hand-over called off: {err}");
                 return err;
-            }
+            },
             Err(err) => {
                 log::error!("hand-over called off: {err}");
                 return err;
-            }
+            },
         }
         // Apps reconnect, to the new build.
         for client in self.clients.values() {
@@ -2037,7 +2318,11 @@ impl Server {
     }
 
     /// Start from what a previous build handed over (instead of `start`).
-    pub(crate) fn adopt(&mut self, header: handover::Header, mut snapshots: HashMap<PaneId, artty_core::vt::term::TermSnapshot>) {
+    pub(crate) fn adopt(
+        &mut self,
+        header: handover::Header,
+        mut snapshots: HashMap<PaneId, artty_core::vt::term::TermSnapshot>,
+    ) {
         self.next_pane = self.next_pane.max(header.next_pane);
         for pane in header.panes {
             let id = pane.session.id;
@@ -2046,7 +2331,8 @@ impl Server {
         let mut state = header.state;
         let hidden = std::mem::take(&mut state.hidden);
         for saved in state.into_windows() {
-            let workspaces: Vec<Workspace> = saved.workspaces.into_iter().filter_map(|w| self.restore_workspace(w)).collect();
+            let workspaces: Vec<Workspace> =
+                saved.workspaces.into_iter().filter_map(|w| self.restore_workspace(w)).collect();
             if !workspaces.is_empty() {
                 self.add_window(workspaces, saved.active, saved.window);
             }
@@ -2083,9 +2369,15 @@ impl Server {
             cursor_shape: self.config.cursor_style.shape(),
             ..Default::default()
         };
-        let session = Session::adopt(handed.session, snapshot, options, self.theme.clone(), self.sink.clone())
-            .inspect_err(|err| log::error!("taking over pane {id}: {err}"))
-            .ok()?;
+        let session = Session::adopt(
+            handed.session,
+            snapshot,
+            options,
+            self.theme.clone(),
+            self.sink.clone(),
+        )
+        .inspect_err(|err| log::error!("taking over pane {id}: {err}"))
+        .ok()?;
         let mut pane = Pane::new(session, saved.title, saved.command, self.agents.clone());
         pane.restore_meta(handed.meta);
         self.panes.insert(id, pane);
@@ -2097,7 +2389,9 @@ impl Server {
     pub(crate) fn should_exit(&self) -> bool {
         self.stopping
             || (self.panes.is_empty() && self.had_panes)
-            || (self.panes.is_empty() && self.clients.is_empty() && self.idle_since.elapsed() >= IDLE_EXIT)
+            || (self.panes.is_empty()
+                && self.clients.is_empty()
+                && self.idle_since.elapsed() >= IDLE_EXIT)
     }
 
     pub(crate) fn shutdown(&mut self) {

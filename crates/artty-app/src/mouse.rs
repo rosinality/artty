@@ -44,8 +44,10 @@ pub fn report(
     mode: TermMode,
 ) -> Option<Vec<u8>> {
     let wanted = match action {
-        Action::Press | Action::Release => mode.contains(TermMode::MOUSE_REPORT_CLICK)
-            || mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION),
+        Action::Press | Action::Release => {
+            mode.contains(TermMode::MOUSE_REPORT_CLICK)
+                || mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+        },
         Action::Motion if button == Button::None => mode.contains(TermMode::MOUSE_MOTION),
         Action::Motion => mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION),
     };
@@ -93,19 +95,20 @@ pub fn report(
 mod tests {
     use super::*;
 
-    const NONE: Modifiers = Modifiers {
-        control: false,
-        alt: false,
-        shift: false,
-        platform: false,
-        function: false,
-    };
+    const NONE: Modifiers =
+        Modifiers { control: false, alt: false, shift: false, platform: false, function: false };
 
     #[test]
     fn sgr_click() {
         let mode = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
-        assert_eq!(report(Button::Left, Action::Press, 4, 9, &NONE, mode).unwrap(), b"\x1b[<0;10;5M");
-        assert_eq!(report(Button::Left, Action::Release, 4, 9, &NONE, mode).unwrap(), b"\x1b[<0;10;5m");
+        assert_eq!(
+            report(Button::Left, Action::Press, 4, 9, &NONE, mode).unwrap(),
+            b"\x1b[<0;10;5M"
+        );
+        assert_eq!(
+            report(Button::Left, Action::Release, 4, 9, &NONE, mode).unwrap(),
+            b"\x1b[<0;10;5m"
+        );
     }
 
     #[test]
@@ -120,7 +123,10 @@ mod tests {
         let click_only = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
         assert_eq!(report(Button::Left, Action::Motion, 0, 0, &NONE, click_only), None);
         let drag = TermMode::MOUSE_DRAG | TermMode::SGR_MOUSE;
-        assert_eq!(report(Button::Left, Action::Motion, 1, 2, &NONE, drag).unwrap(), b"\x1b[<32;3;2M");
+        assert_eq!(
+            report(Button::Left, Action::Motion, 1, 2, &NONE, drag).unwrap(),
+            b"\x1b[<32;3;2M"
+        );
         assert_eq!(report(Button::None, Action::Motion, 1, 2, &NONE, drag), None);
     }
 
@@ -128,6 +134,9 @@ mod tests {
     fn wheel_and_modifiers() {
         let mode = TermMode::MOUSE_REPORT_CLICK | TermMode::SGR_MOUSE;
         let ctrl = Modifiers { control: true, ..NONE };
-        assert_eq!(report(Button::WheelDown, Action::Press, 0, 0, &ctrl, mode).unwrap(), b"\x1b[<81;1;1M");
+        assert_eq!(
+            report(Button::WheelDown, Action::Press, 0, 0, &ctrl, mode).unwrap(),
+            b"\x1b[<81;1;1M"
+        );
     }
 }

@@ -79,7 +79,7 @@ pub fn to_esc(keystroke: &Keystroke, mode: TermMode, option_as_meta: bool) -> Op
         key if meta_key && key.chars().count() == 1 => {
             let key = if m.shift { key.to_uppercase() } else { key.to_owned() };
             meta(key.as_bytes())
-        }
+        },
         _ => return None,
     };
     Some(bytes)
@@ -97,7 +97,8 @@ fn kitty(keystroke: &Keystroke, mode: TermMode, option_as_meta: bool) -> Option<
     let alt = m.alt && option_as_meta;
     let modifiers = 1 + m.shift as u8 + 2 * alt as u8 + 4 * m.control as u8;
     let csi_u = |code: u32| -> Vec<u8> {
-        if modifiers == 1 { format!("\x1b[{code}u") } else { format!("\x1b[{code};{modifiers}u") }.into_bytes()
+        if modifiers == 1 { format!("\x1b[{code}u") } else { format!("\x1b[{code};{modifiers}u") }
+            .into_bytes()
     };
 
     let key = keystroke.key.as_str();
@@ -112,7 +113,7 @@ fn kitty(keystroke: &Keystroke, mode: TermMode, option_as_meta: bool) -> Option<
             let (Some(c), None) = (chars.next(), chars.next()) else { return None };
             // Report the unshifted key; Shift is in the modifiers.
             c.to_lowercase().next()? as u32
-        }
+        },
     };
     let text_key = !matches!(key, "enter" | "tab" | "backspace");
     // Unmodified keys keep their legacy bytes, and Shift+letter stays text,

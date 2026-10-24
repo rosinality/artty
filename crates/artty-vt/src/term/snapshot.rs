@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::color::COUNT;
 use super::cell::{Image, tile_serde};
+use super::color::COUNT;
 use super::{Config, KeyboardModes, TabStops, Term, TermMode};
 use crate::ansi::{CharsetIndex, CursorStyle, Rgb};
 use crate::event::EventListener;
@@ -41,7 +41,8 @@ pub struct TermSnapshot {
 }
 
 fn read_images<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Arc<Image>>, D::Error> {
-    let images: Vec<Arc<Image>> = Vec::<Image>::deserialize(deserializer)?.into_iter().map(Arc::new).collect();
+    let images: Vec<Arc<Image>> =
+        Vec::<Image>::deserialize(deserializer)?.into_iter().map(Arc::new).collect();
     for image in &images {
         Image::reserve_id(image.id);
     }
@@ -87,7 +88,11 @@ impl<T: EventListener> Term<T> {
             title: self.title.clone(),
             title_stack: self.title_stack.clone(),
             keyboard_mode_stack: self.keyboard_mode_stack.iter().map(|m| m.bits()).collect(),
-            inactive_keyboard_mode_stack: self.inactive_keyboard_mode_stack.iter().map(|m| m.bits()).collect(),
+            inactive_keyboard_mode_stack: self
+                .inactive_keyboard_mode_stack
+                .iter()
+                .map(|m| m.bits())
+                .collect(),
             is_focused: self.is_focused,
         }
     }
@@ -116,9 +121,16 @@ impl<T: EventListener> Term<T> {
         term.cursor_style = snapshot.cursor_style;
         term.title = snapshot.title;
         term.title_stack = snapshot.title_stack;
-        term.keyboard_mode_stack = snapshot.keyboard_mode_stack.into_iter().map(KeyboardModes::from_bits_truncate).collect();
-        term.inactive_keyboard_mode_stack =
-            snapshot.inactive_keyboard_mode_stack.into_iter().map(KeyboardModes::from_bits_truncate).collect();
+        term.keyboard_mode_stack = snapshot
+            .keyboard_mode_stack
+            .into_iter()
+            .map(KeyboardModes::from_bits_truncate)
+            .collect();
+        term.inactive_keyboard_mode_stack = snapshot
+            .inactive_keyboard_mode_stack
+            .into_iter()
+            .map(KeyboardModes::from_bits_truncate)
+            .collect();
         term.is_focused = snapshot.is_focused;
         term.mark_fully_damaged();
         tile_serde::done_restoring();

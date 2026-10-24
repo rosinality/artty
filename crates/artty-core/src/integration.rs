@@ -56,7 +56,8 @@ pub fn inject(dir: &Path, command: Option<&[String]>) -> Option<Injection> {
         return None;
     }
     let name = Path::new(&program).file_name()?.to_str()?.trim_start_matches('-');
-    let mut env = HashMap::from([("ARTTY_SHELL_INTEGRATION".to_owned(), dir.display().to_string())]);
+    let mut env =
+        HashMap::from([("ARTTY_SHELL_INTEGRATION".to_owned(), dir.display().to_string())]);
     match name {
         "zsh" => {
             if let Ok(original) = std::env::var("ZDOTDIR") {
@@ -64,7 +65,7 @@ pub fn inject(dir: &Path, command: Option<&[String]>) -> Option<Injection> {
             }
             env.insert("ZDOTDIR".to_owned(), dir.join("zsh").display().to_string());
             Some(Injection { command: None, env })
-        }
+        },
         "bash" => {
             // A login shell unless started as a plain command without -l.
             let login = command.is_none() || args.iter().any(|a| a == "-l" || a == "--login");
@@ -75,9 +76,10 @@ pub fn inject(dir: &Path, command: Option<&[String]>) -> Option<Injection> {
             }
             // Started under the name `sh`, bash reads $ENV before any startup
             // file (macOS's bash 3.2 ignores ENV with --posix).
-            let command = vec![program.clone(), "-c".to_owned(), "exec -a sh \"$0\"".to_owned(), program];
+            let command =
+                vec![program.clone(), "-c".to_owned(), "exec -a sh \"$0\"".to_owned(), program];
             Some(Injection { command: Some(command), env })
-        }
+        },
         _ => None,
     }
 }
@@ -101,7 +103,10 @@ mod tests {
     #[test]
     fn bash_uses_posix_env() {
         let injection = inject(Path::new("/x"), Some(&cmd(&["/bin/bash", "--login"]))).unwrap();
-        assert_eq!(injection.command, Some(cmd(&["/bin/bash", "-c", "exec -a sh \"$0\"", "/bin/bash"])));
+        assert_eq!(
+            injection.command,
+            Some(cmd(&["/bin/bash", "-c", "exec -a sh \"$0\"", "/bin/bash"]))
+        );
         assert_eq!(injection.env["ENV"], "/x/artty.bash");
         assert!(injection.env.contains_key("ARTTY_BASH_LOGIN"));
         let plain = inject(Path::new("/x"), Some(&cmd(&["bash"]))).unwrap();

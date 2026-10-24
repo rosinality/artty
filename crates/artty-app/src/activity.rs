@@ -4,7 +4,9 @@
 
 use std::collections::HashSet;
 
-use artty_core::control::{PaneProcesses, ProcessRow, Request, Response, ServerUsage, WorkspaceInfo};
+use artty_core::control::{
+    PaneProcesses, ProcessRow, Request, Response, ServerUsage, WorkspaceInfo,
+};
 
 use super::*;
 
@@ -58,7 +60,13 @@ struct Process<'a> {
 fn tree(rows: &[ProcessRow]) -> Vec<Process<'_>> {
     let pids: HashSet<i32> = rows.iter().map(|r| r.pid).collect();
     let mut out = Vec::new();
-    fn walk<'a>(rows: &'a [ProcessRow], parent: Option<i32>, depth: usize, pids: &HashSet<i32>, out: &mut Vec<Process<'a>>) {
+    fn walk<'a>(
+        rows: &'a [ProcessRow],
+        parent: Option<i32>,
+        depth: usize,
+        pids: &HashSet<i32>,
+        out: &mut Vec<Process<'a>>,
+    ) {
         let children = rows.iter().filter(|r| match parent {
             None => !pids.contains(&r.ppid) || r.ppid == r.pid,
             Some(parent) => r.ppid == parent && r.pid != parent,
@@ -99,10 +107,12 @@ fn total_history(panes: &[&PaneProcesses]) -> Vec<(f32, u64)> {
 fn sparkline(values: &[f32], floor: f32, width: f32, height: f32, color: u32) -> gpui::Div {
     let max = values.iter().copied().fold(floor, f32::max).max(f32::EPSILON);
     let bar = width / HISTORY as f32;
-    div().flex_none().w(px(width)).h(px(height)).flex().items_end().justify_end().children(values.iter().map(|&v| {
-        let h = (v / max).clamp(0., 1.) * height;
-        div().flex_none().w(px(bar)).h(px(if v > 0. { h.max(1.) } else { 0. })).bg(rgba(color))
-    }))
+    div().flex_none().w(px(width)).h(px(height)).flex().items_end().justify_end().children(
+        values.iter().map(|&v| {
+            let h = (v / max).clamp(0., 1.) * height;
+            div().flex_none().w(px(bar)).h(px(if v > 0. { h.max(1.) } else { 0. })).bg(rgba(color))
+        }),
+    )
 }
 
 fn cpu_color(percent: f32) -> u32 {
@@ -149,14 +159,19 @@ impl WindowView {
                 let Some(activity) = this.activity.as_mut() else { return };
                 activity.loading = false;
                 match (processes, workspaces) {
-                    (Ok(Response::Processes { panes, server }), Ok(Response::Workspaces { workspaces })) => {
+                    (
+                        Ok(Response::Processes { panes, server }),
+                        Ok(Response::Workspaces { workspaces }),
+                    ) => {
                         activity.panes = panes;
                         activity.server = server;
                         activity.workspaces = workspaces;
                         activity.loaded = true;
                         activity.error = None;
-                    }
-                    (Ok(Response::Error { message }), _) | (_, Ok(Response::Error { message })) => activity.error = Some(message),
+                    },
+                    (Ok(Response::Error { message }), _) | (_, Ok(Response::Error { message })) => {
+                        activity.error = Some(message)
+                    },
                     _ => activity.error = Some("lost the artty server".into()),
                 }
                 cx.notify();
@@ -175,7 +190,7 @@ impl WindowView {
             "escape" => self.activity = None,
             "backspace" => {
                 activity.filter.pop();
-            }
+            },
             _ => match keystroke.key_char.as_deref().filter(|c| !c.chars().any(char::is_control)) {
                 Some(text) if !keystroke.modifiers.control => activity.filter.push_str(text),
                 _ => return false,
@@ -210,7 +225,9 @@ impl WindowView {
         cx.spawn(async move |this, cx| {
             let response = answer.await;
             let _ = this.update(cx, |this, cx| {
-                if let (Some(activity), Ok(Response::Error { message })) = (this.activity.as_mut(), response) {
+                if let (Some(activity), Ok(Response::Error { message })) =
+                    (this.activity.as_mut(), response)
+                {
                     activity.error = Some(message);
                 }
                 this.refresh_activity(cx);
@@ -248,7 +265,8 @@ impl WindowView {
             .iter()
             .map(|w| (w, activity.panes.iter().filter(|p| p.workspace as u64 == w.id).collect()))
             .collect();
-        let cpu = |panes: &[&PaneProcesses]| panes.iter().map(|p| p.cpu_percent).fold(0., |a, b| a + b);
+        let cpu =
+            |panes: &[&PaneProcesses]| panes.iter().map(|p| p.cpu_percent).fold(0., |a, b| a + b);
         let memory = |panes: &[&PaneProcesses]| panes.iter().map(|p| p.memory_bytes).sum::<u64>();
         for (_, panes) in &mut groups {
             match activity.sort {
@@ -270,7 +288,12 @@ impl WindowView {
         let memory_history: Vec<f32> = history.iter().map(|h| h.1 as f32).collect();
         let peak_memory = memory_history.iter().copied().fold(0., f32::max) * 1.25;
         let server = activity.server.as_ref().map(|server| {
-            format!("Server {:.1}% · {} (pid {})", server.cpu_percent, crate::cli::bytes(server.memory_bytes), server.pid)
+            format!(
+                "Server {:.1}% · {} (pid {})",
+                server.cpu_percent,
+                crate::cli::bytes(server.memory_bytes),
+                server.pid
+            )
         });
         let gauge = |label: String, graph: gpui::Div| {
             div()
@@ -284,7 +307,10 @@ impl WindowView {
             .flex()
             .items_end()
             .gap(px(20.))
-            .child(gauge(format!("CPU {:.1}%", cpu(&all)), sparkline(&cpu_history, 100., 180., 30., 0x8fb4ffcc)))
+            .child(gauge(
+                format!("CPU {:.1}%", cpu(&all)),
+                sparkline(&cpu_history, 100., 180., 30., 0x8fb4ffcc),
+            ))
             .child(gauge(
                 format!("Memory {}", crate::cli::bytes(memory(&all))),
                 sparkline(&memory_history, peak_memory, 180., 30., 0xbb9af7cc),
@@ -309,7 +335,8 @@ impl WindowView {
                     if workspace_matches || matches(&pane.title) {
                         return Some((*pane, processes));
                     }
-                    let found: Vec<Process> = processes.into_iter().filter(|p| process_matches(p.row)).collect();
+                    let found: Vec<Process> =
+                        processes.into_iter().filter(|p| process_matches(p.row)).collect();
                     (!found.is_empty()).then_some((*pane, found))
                 })
                 .collect();
@@ -325,13 +352,18 @@ impl WindowView {
             for (pane, processes) in shown {
                 let group = Group::Pane(pane.id);
                 let folded = activity.collapsed.contains(&group);
-                rows.push(self.pane_activity_row(workspace.id, pane, folded, cx).into_any_element());
+                rows.push(
+                    self.pane_activity_row(workspace.id, pane, folded, cx).into_any_element(),
+                );
                 if folded {
                     continue;
                 }
                 let agent = cx.global::<Shared>().panes.get(&pane.id).and_then(|s| s.agent.clone());
                 for process in processes {
-                    rows.push(self.process_row(&process, pane, agent.as_deref(), activity.armed, cx).into_any_element());
+                    rows.push(
+                        self.process_row(&process, pane, agent.as_deref(), activity.armed, cx)
+                            .into_any_element(),
+                    );
                 }
             }
         }
@@ -345,7 +377,8 @@ impl WindowView {
                 .when(width.is_none(), |d| d.flex_1().min_w_0())
                 .text_color(if active { rgba(0xffffffd0) } else { rgba(0xffffff70) })
                 .when_some(sort, |d, sort| {
-                    d.cursor_pointer().on_click(cx.listener(move |this, _, _, cx| this.set_sort(sort, cx)))
+                    d.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_sort(sort, cx)))
                 })
                 .child(if active { format!("{label} ↓") } else { label.to_owned() })
         };
@@ -378,7 +411,11 @@ impl WindowView {
                             .py(px(3.))
                             .rounded(px(6.))
                             .bg(rgba(0x0000004d))
-                            .text_color(if activity.filter.is_empty() { rgba(0xffffff50) } else { rgba(0xffffffee) })
+                            .text_color(if activity.filter.is_empty() {
+                                rgba(0xffffff50)
+                            } else {
+                                rgba(0xffffffee)
+                            })
                             .child(if activity.filter.is_empty() {
                                 "Type to filter".to_owned()
                             } else {
@@ -419,34 +456,58 @@ impl WindowView {
                     .overflow_y_scroll()
                     .children(rows)
                     .when(empty && activity.loaded, |d| {
-                        d.child(div().p(px(8.)).text_color(rgba(0xffffff60)).child("Nothing matches"))
+                        d.child(
+                            div().p(px(8.)).text_color(rgba(0xffffff60)).child("Nothing matches"),
+                        )
                     }),
             )
     }
 
     /// A row's CPU, memory and time cells.
-    fn figures(cpu: Option<f32>, memory: Option<u64>, time: Option<u64>) -> impl Iterator<Item = gpui::Div> {
-        let cpu_cell = div().w(px(CPU_WIDTH)).flex_none().flex().items_center().justify_end().gap(px(6.)).when_some(cpu, |d, cpu| {
-            let fill = (cpu.min(100.) / 100. * 40.).max(if cpu > 0.05 { 1. } else { 0. });
-            d.child(
-                div()
-                    .w(px(40.))
-                    .h(px(4.))
-                    .rounded(px(2.))
-                    .bg(rgba(0xffffff14))
-                    .child(div().w(px(fill)).h_full().rounded(px(2.)).bg(rgba(cpu_color(cpu)))),
-            )
-            .child(div().w(px(48.)).flex().justify_end().child(format!("{cpu:.1}%")))
-        });
-        let memory_cell =
-            div().w(px(MEMORY_WIDTH)).flex_none().flex().justify_end().when_some(memory, |d, m| d.child(crate::cli::bytes(m)));
-        let time_cell =
-            div().w(px(TIME_WIDTH)).flex_none().flex().justify_end().when_some(time, |d, t| d.child(crate::cli::duration(t)));
+    fn figures(
+        cpu: Option<f32>,
+        memory: Option<u64>,
+        time: Option<u64>,
+    ) -> impl Iterator<Item = gpui::Div> {
+        let cpu_cell =
+            div()
+                .w(px(CPU_WIDTH))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap(px(6.))
+                .when_some(cpu, |d, cpu| {
+                    let fill = (cpu.min(100.) / 100. * 40.).max(if cpu > 0.05 { 1. } else { 0. });
+                    d.child(
+                        div().w(px(40.)).h(px(4.)).rounded(px(2.)).bg(rgba(0xffffff14)).child(
+                            div().w(px(fill)).h_full().rounded(px(2.)).bg(rgba(cpu_color(cpu))),
+                        ),
+                    )
+                    .child(div().w(px(48.)).flex().justify_end().child(format!("{cpu:.1}%")))
+                });
+        let memory_cell = div()
+            .w(px(MEMORY_WIDTH))
+            .flex_none()
+            .flex()
+            .justify_end()
+            .when_some(memory, |d, m| d.child(crate::cli::bytes(m)));
+        let time_cell = div()
+            .w(px(TIME_WIDTH))
+            .flex_none()
+            .flex()
+            .justify_end()
+            .when_some(time, |d, t| d.child(crate::cli::duration(t)));
         [cpu_cell, memory_cell, time_cell].into_iter()
     }
 
     fn arrow(folded: bool) -> gpui::Div {
-        div().w(px(12.)).flex_none().text_size(px(9.)).text_color(rgba(0xffffff70)).child(if folded { "▶" } else { "▼" })
+        div()
+            .w(px(12.))
+            .flex_none()
+            .text_size(px(9.))
+            .text_color(rgba(0xffffff70))
+            .child(if folded { "▶" } else { "▼" })
     }
 
     fn workspace_activity_row(
@@ -487,14 +548,30 @@ impl WindowView {
                     .items_center()
                     .gap(px(6.))
                     .child(Self::arrow(folded))
-                    .when_some(color, |d, color| d.child(div().flex_none().size(px(7.)).rounded_full().bg(rgba(color << 8 | 0xff))))
-                    .child(Self::one_line(workspace.title.clone()).min_w_0().text_color(rgba(0xffffffe0)))
+                    .when_some(color, |d, color| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(rgba(color << 8 | 0xff)),
+                        )
+                    })
+                    .child(
+                        Self::one_line(workspace.title.clone())
+                            .min_w_0()
+                            .text_color(rgba(0xffffffe0)),
+                    )
                     .child(
                         div()
                             .flex_none()
                             .font_weight(FontWeight::NORMAL)
                             .text_color(rgba(0xffffff80))
-                            .child(format!("{} pane{}{place}", panes.len(), if panes.len() == 1 { "" } else { "s" })),
+                            .child(format!(
+                                "{} pane{}{place}",
+                                panes.len(),
+                                if panes.len() == 1 { "" } else { "s" }
+                            )),
                     ),
             )
             .child(Self::cpu_graph(&total_history(panes)))
@@ -510,7 +587,13 @@ impl WindowView {
         sparkline(&values, 100., GRAPH_WIDTH, 14., cpu_color(peak) & 0xffffff00 | 0xb0)
     }
 
-    fn pane_activity_row(&self, workspace: u64, pane: &PaneProcesses, folded: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn pane_activity_row(
+        &self,
+        workspace: u64,
+        pane: &PaneProcesses,
+        folded: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let group = Group::Pane(pane.id);
         let id = pane.id;
         div()
@@ -577,7 +660,8 @@ impl WindowView {
         let row = process.row;
         let pid = row.pid;
         // The pane's shell, or its agent: stopping those deserves a second click.
-        let shell = process.depth == 0 && pane.processes.first().is_some_and(|first| first.pid == pid);
+        let shell =
+            process.depth == 0 && pane.processes.first().is_some_and(|first| first.pid == pid);
         let confirm = shell || agent.is_some_and(|agent| row.name == agent);
         let is_armed = armed == Some(pid);
         div()

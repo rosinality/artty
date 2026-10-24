@@ -26,7 +26,9 @@ impl ConfigFile {
     }
 
     fn parse(path: PathBuf, text: &str) -> io::Result<Self> {
-        let doc = text.parse::<DocumentMut>().map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        let doc = text
+            .parse::<DocumentMut>()
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         Ok(Self { path, doc })
     }
 
@@ -161,7 +163,8 @@ mod tests {
         let mut file = ConfigFile::parse(PathBuf::from("/x"), "").unwrap();
         for theme in THEMES {
             file.set_theme(Some(theme));
-            let config = Config::parse(&file.doc.to_string()).unwrap_or_else(|e| panic!("{}: {e}", theme.name));
+            let config = Config::parse(&file.doc.to_string())
+                .unwrap_or_else(|e| panic!("{}: {e}", theme.name));
             assert_eq!(config.colors.palette.len(), 16);
         }
         file.set_theme(None);

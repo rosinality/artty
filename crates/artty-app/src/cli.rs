@@ -8,12 +8,32 @@ use std::time::Duration;
 
 use artty_core::SessionId;
 use artty_core::control::{
-    AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV, SplitDirection, live_sockets,
+    AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV, SplitDirection,
+    live_sockets,
 };
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
-    "list", "read", "send", "new", "run", "notify", "status", "focus", "close", "rename", "settings", "restart", "server", "ps", "top", "kill", "workspace", "workspaces", "activity", "hooks",
+    "list",
+    "read",
+    "send",
+    "new",
+    "run",
+    "notify",
+    "status",
+    "focus",
+    "close",
+    "rename",
+    "settings",
+    "restart",
+    "server",
+    "ps",
+    "top",
+    "kill",
+    "workspace",
+    "workspaces",
+    "activity",
+    "hooks",
     "shell-integration",
 ];
 
@@ -97,7 +117,7 @@ pub fn main(args: Vec<String>) -> i32 {
         Err(message) => {
             eprintln!("artty: {message}");
             1
-        }
+        },
     }
 }
 
@@ -129,13 +149,15 @@ fn run(args: Vec<String>) -> Result<i32, String> {
     // before the usual option parsing, which doesn't know these.
     match (args.first().map(String::as_str), args.get(1).map(String::as_str), args.get(2)) {
         (Some("server"), Some("--resume"), Some(header)) => {
-            return artty_server::resume(std::path::Path::new(header)).map(|()| 0).map_err(|err| format!("server: {err}"));
-        }
+            return artty_server::resume(std::path::Path::new(header))
+                .map(|()| 0)
+                .map_err(|err| format!("server: {err}"));
+        },
         (Some("server"), Some("--handover-check"), _) => {
             println!("{}", artty_server::handover_check());
             return Ok(0);
-        }
-        _ => {}
+        },
+        _ => {},
     }
     let mut args = Args { args: args.into_iter() };
     let command = args.next().unwrap_or_default();
@@ -166,16 +188,17 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--color" => _ = flags.insert("color", args.value("--color")?),
             "--env" => {
                 let pair = args.value("--env")?;
-                let (key, value) = pair.split_once('=').ok_or(format!("--env: expected KEY=VALUE, not {pair}"))?;
+                let (key, value) =
+                    pair.split_once('=').ok_or(format!("--env: expected KEY=VALUE, not {pair}"))?;
                 env_vars.push((key.to_owned(), value.to_owned()));
-            }
+            },
             "--unset-env" => unset_env.push(args.value("--unset-env")?),
             "--no-root" => {
                 switches.insert("no-root");
-            }
+            },
             "--pane" => {
                 switches.insert("pane");
-            }
+            },
             "--screen" | "--last" | "--no-enter" | "--background" | "--json" | "--hook" => {
                 switches.insert(match arg.as_str() {
                     "--screen" => "screen",
@@ -185,16 +208,16 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                     "--json" => "json",
                     _ => "hook",
                 });
-            }
+            },
             "--" => {
                 command_start = Some(rest.len());
                 rest.extend(args.args.by_ref());
                 break;
-            }
+            },
             "-h" | "--help" => {
                 print!("{HELP}");
                 return Ok(0);
-            }
+            },
             flag if flag.starts_with("--") => return Err(format!("unknown option {flag}")),
             _ => rest.push(arg),
         }
@@ -205,13 +228,18 @@ fn run(args: Vec<String>) -> Result<i32, String> {
         "ps" => Request::Processes { tab },
         "top" => return top(),
         "kill" => {
-            let id = rest.first().and_then(|id| id.parse().ok()).or(tab).ok_or("kill: which pane?")?;
+            let id =
+                rest.first().and_then(|id| id.parse().ok()).or(tab).ok_or("kill: which pane?")?;
             let signal = flags.get("signal").map(|s| parse_signal(s)).transpose()?;
             Request::Kill { tab: id, signal, pane: switches.contains("pane") }
-        }
+        },
         "workspace" | "workspaces" => {
             let action = rest.first().map_or("list", String::as_str);
-            let which = || rest.get(1).cloned().ok_or(format!("workspace {action}: which workspace? (an id or a name)"));
+            let which = || {
+                rest.get(1)
+                    .cloned()
+                    .ok_or(format!("workspace {action}: which workspace? (an id or a name)"))
+            };
             match action {
                 "list" => Request::Workspaces,
                 "new" => {
@@ -222,8 +250,11 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                         cwd: flags.get("cwd").map(PathBuf::from),
                         command: rest[split..].to_vec(),
                     }
-                }
-                "rename" => Request::RenameWorkspace { workspace: which()?, name: rest.get(2..).unwrap_or_default().join(" ") },
+                },
+                "rename" => Request::RenameWorkspace {
+                    workspace: which()?,
+                    name: rest.get(2..).unwrap_or_default().join(" "),
+                },
                 "close" => Request::CloseWorkspace { workspace: which()? },
                 "open" => Request::OpenWorkspace { workspace: which()? },
                 "hide" => Request::HideWorkspace { workspace: which()? },
@@ -231,7 +262,10 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                     // Relative to where you are, like any path you type.
                     let root = flags
                         .get("root")
-                        .map(|root| std::fs::canonicalize(root).map_err(|err| format!("--root {root}: {err}")))
+                        .map(|root| {
+                            std::fs::canonicalize(root)
+                                .map_err(|err| format!("--root {root}: {err}"))
+                        })
                         .transpose()?;
                     Request::ConfigureWorkspace {
                         workspace: which()?,
@@ -241,10 +275,14 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                         env: env_vars,
                         unset_env,
                     }
-                }
-                other => return Err(format!("workspace: unknown action {other} (list, new, rename, set, close, open, hide)")),
+                },
+                other => {
+                    return Err(format!(
+                        "workspace: unknown action {other} (list, new, rename, set, close, open, hide)"
+                    ));
+                },
             }
-        }
+        },
         "settings" => Request::Settings,
         "activity" => Request::Activity,
         "restart" => Request::Restart,
@@ -254,17 +292,19 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             } else if switches.contains("last") {
                 ReadSource::LastCommand
             } else {
-                let lines = flags.get("lines").map_or(Ok(100), |l| l.parse().map_err(|_| "--lines: not a number"))?;
+                let lines = flags
+                    .get("lines")
+                    .map_or(Ok(100), |l| l.parse().map_err(|_| "--lines: not a number"))?;
                 ReadSource::Scrollback { lines }
             };
             Request::Read { tab, source }
-        }
+        },
         "send" => {
             if rest.is_empty() {
                 return Err("send: nothing to send".into());
             }
             Request::Send { tab, text: rest.join(" "), enter: !switches.contains("no-enter") }
-        }
+        },
         "run" => {
             if rest.is_empty() {
                 return Err("run: missing command (artty run [--tab N] -- COMMAND)".into());
@@ -272,9 +312,12 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             if tab.is_none() && own_tab().is_some() {
                 return Err("run: pass --tab N; a tab can't run commands in itself".into());
             }
-            let timeout_secs = flags.get("timeout").map(|t| t.parse().map_err(|_| "--timeout: not a number")).transpose()?;
+            let timeout_secs = flags
+                .get("timeout")
+                .map(|t| t.parse().map_err(|_| "--timeout: not a number"))
+                .transpose()?;
             Request::Run { tab, command: rest.join(" "), timeout_secs }
-        }
+        },
         "new" => {
             let split = match flags.get("split").map(String::as_str) {
                 None => None,
@@ -295,18 +338,26 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 split,
                 target: split.and(tab.or_else(own_tab)),
             }
-        }
+        },
         "focus" | "close" => {
-            let id = rest.first().and_then(|id| id.parse().ok()).or(tab).ok_or(format!("{command}: which tab?"))?;
+            let id = rest
+                .first()
+                .and_then(|id| id.parse().ok())
+                .or(tab)
+                .ok_or(format!("{command}: which tab?"))?;
             if command == "focus" { Request::Focus { tab: id } } else { Request::Close { tab: id } }
-        }
+        },
         "rename" => Request::Rename { tab: tab.or_else(own_tab), title: rest.join(" ") },
         "notify" => {
             if rest.is_empty() {
                 return Err("notify: missing message".into());
             }
-            Request::Notify { tab: tab.or_else(own_tab), title: flags.get("title").cloned(), body: rest.join(" ") }
-        }
+            Request::Notify {
+                tab: tab.or_else(own_tab),
+                title: flags.get("title").cloned(),
+                body: rest.join(" "),
+            }
+        },
         "status" => {
             let state = match rest.first().map(String::as_str) {
                 Some("working") => AgentState::Working,
@@ -320,29 +371,41 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             } else {
                 (flags.get("message").cloned(), None)
             };
-            Request::Status { tab: tab.or_else(own_tab), state, message, agent_session, agent: flags.get("agent").cloned() }
-        }
+            Request::Status {
+                tab: tab.or_else(own_tab),
+                state,
+                message,
+                agent_session,
+                agent: flags.get("agent").cloned(),
+            }
+        },
         "hooks" => return hooks(&rest),
         "server" => match rest.first().map(String::as_str) {
             None | Some("run") => {
                 return artty_server::run().map(|()| 0).map_err(|err| format!("server: {err}"));
-            }
+            },
             Some("status") => Request::ServerStatus,
             Some("stop") => Request::StopServer,
             Some("restart") => {
                 let exe = std::env::current_exe().map_err(|err| err.to_string())?;
-                return match artty_server::upgrade(&exe).map_err(|err| format!("server restart: {err}"))? {
+                return match artty_server::upgrade(&exe)
+                    .map_err(|err| format!("server restart: {err}"))?
+                {
                     artty_server::Upgrade::HandedOver => {
                         println!("The server now runs this build; every program kept running.");
                         Ok(0)
-                    }
+                    },
                     artty_server::Upgrade::Restarted => {
-                        println!("The server (too old to hand over) restarted on this build: tabs reopen, programs restarted.");
+                        println!(
+                            "The server (too old to hand over) restarted on this build: tabs reopen, programs restarted."
+                        );
                         Ok(0)
-                    }
+                    },
                 };
-            }
-            Some(other) => return Err(format!("server: unknown action {other} (run, status, stop, restart)")),
+            },
+            Some(other) => {
+                return Err(format!("server: unknown action {other} (run, status, stop, restart)"));
+            },
         },
         "shell-integration" => {
             let shell = rest.first().map(String::as_str).unwrap_or_default();
@@ -350,11 +413,11 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 .ok_or("shell-integration: expected zsh or bash (fish has it built in)")?;
             print!("{script}");
             return Ok(0);
-        }
+        },
         _ => {
             print!("{HELP}");
             return Ok(2);
-        }
+        },
     };
 
     let timeout = match &request {
@@ -371,16 +434,20 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         Response::Workspace { id } => {
             println!("{id}");
             Ok(0)
-        }
+        },
         Response::Workspaces { workspaces } if json => {
             println!("{}", serde_json::to_string_pretty(&workspaces).unwrap_or_default());
             Ok(0)
-        }
+        },
         Response::Workspaces { workspaces } => {
             println!("    ID  WIN  TABS  STATUS   NAME");
             for workspace in workspaces {
                 let marker = if workspace.needs_attention { "!" } else { " " };
-                let window = if workspace.window_number == 0 { "-".to_owned() } else { workspace.window_number.to_string() };
+                let window = if workspace.window_number == 0 {
+                    "-".to_owned()
+                } else {
+                    workspace.window_number.to_string()
+                };
                 let place = match (workspace.window, workspace.attached) {
                     (None, _) => "  (hidden)",
                     (Some(_), false) => "  (closed window)",
@@ -391,23 +458,27 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
                     Some(name) => name.clone(),
                     None => format!("[{}]", workspace.title),
                 };
-                let root = workspace.root.as_ref().map(|r| format!("  {}", short_path(r))).unwrap_or_default();
+                let root = workspace
+                    .root
+                    .as_ref()
+                    .map(|r| format!("  {}", short_path(r)))
+                    .unwrap_or_default();
                 println!(
                     "{marker} {:>4}  {window:>3}  {:>4}  {:<8} {title}{root}{place}",
                     workspace.id, workspace.tabs, workspace.status
                 );
             }
             Ok(0)
-        }
+        },
         Response::Error { message } => Err(message),
         Response::Tab { id } => {
             println!("{id}");
             Ok(0)
-        }
+        },
         Response::Text { text } => {
             println!("{text}");
             Ok(0)
-        }
+        },
         Response::Server { info } => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
@@ -425,15 +496,15 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
                 );
             }
             Ok(0)
-        }
+        },
         Response::Processes { panes, .. } if json => {
             println!("{}", serde_json::to_string_pretty(&panes).unwrap_or_default());
             Ok(0)
-        }
+        },
         Response::Processes { panes, .. } => {
             print!("{}", process_table(&panes, false));
             Ok(0)
-        }
+        },
         Response::Command { output, exit, truncated, .. } => {
             if truncated {
                 eprintln!("artty: output truncated");
@@ -442,32 +513,41 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
                 println!("{output}");
             }
             Ok(exit.unwrap_or(0))
-        }
+        },
         Response::Tabs { tabs } if json => {
             println!("{}", serde_json::to_string_pretty(&tabs).unwrap_or_default());
             Ok(0)
-        }
+        },
         Response::Tabs { tabs } => {
             println!("    ID  WIN  WORKSPACE     TAB  STATUS   TITLE");
             for pane in tabs {
-                let marker = if pane.active { "*" } else if pane.needs_attention { "!" } else { " " };
+                let marker = if pane.active {
+                    "*"
+                } else if pane.needs_attention {
+                    "!"
+                } else {
+                    " "
+                };
                 let detail = pane.detail.map(|d| format!("  ({d})")).unwrap_or_default();
                 let workspace = workspace_label(pane.workspace, pane.workspace_name.as_deref());
                 // Window 0: the workspace is hidden.
-                let window = if pane.window == 0 { "-".to_owned() } else { pane.window.to_string() };
+                let window =
+                    if pane.window == 0 { "-".to_owned() } else { pane.window.to_string() };
                 println!(
                     "{marker} {:>4}  {window:>3}  {workspace:<12}  {:>3}  {:<8} {}{detail}",
                     pane.id, pane.tab, pane.status, pane.title
                 );
             }
             Ok(0)
-        }
+        },
     }
 }
 
 /// A path with the home directory as `~`.
 fn short_path(path: &std::path::Path) -> String {
-    match std::env::var_os("HOME").and_then(|home| path.strip_prefix(home).ok().map(std::path::Path::to_path_buf)) {
+    match std::env::var_os("HOME")
+        .and_then(|home| path.strip_prefix(home).ok().map(std::path::Path::to_path_buf))
+    {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
@@ -477,7 +557,9 @@ fn short_path(path: &std::path::Path) -> String {
 /// A workspace's name (shortened to fit a column), or its number.
 fn workspace_label(number: usize, name: Option<&str>) -> String {
     match name {
-        Some(name) if name.chars().count() > 12 => format!("{}…", name.chars().take(11).collect::<String>()),
+        Some(name) if name.chars().count() > 12 => {
+            format!("{}…", name.chars().take(11).collect::<String>())
+        },
         Some(name) => name.to_owned(),
         None => format!("#{number}"),
     }
@@ -582,7 +664,9 @@ fn top() -> Result<i32, String> {
         }
         let status = send(&Request::ServerStatus, Some(Duration::from_secs(5)));
         let panes = send(&Request::Processes { tab: None }, Some(Duration::from_secs(5)));
-        let (Ok(Response::Server { info }), Ok(Response::Processes { panes, .. })) = (status, panes) else {
+        let (Ok(Response::Server { info }), Ok(Response::Processes { panes, .. })) =
+            (status, panes)
+        else {
             break Err("lost the artty server".to_owned());
         };
         let total_cpu: f32 = panes.iter().map(|p| p.cpu_percent).fold(0., |a, b| a + b);
@@ -664,7 +748,8 @@ fn socket() -> Result<PathBuf, String> {
 
 fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String> {
     let path = socket()?;
-    let mut stream = UnixStream::connect(&path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let mut stream =
+        UnixStream::connect(&path).map_err(|err| format!("{}: {err}", path.display()))?;
     stream.set_read_timeout(timeout).map_err(|err| err.to_string())?;
     let mut line = serde_json::to_string(request).map_err(|err| err.to_string())?;
     line.push('\n');
@@ -686,21 +771,24 @@ fn hooks(args: &[String]) -> Result<i32, String> {
                 println!("{:<12} {}", agent.name, agent.status().describe());
             }
             Ok(0)
-        }
+        },
         Some("install") => {
             println!("{}", crate::hooks::install(&names)?);
             Ok(0)
-        }
+        },
         Some("uninstall") => {
             println!("{}", crate::hooks::uninstall(&names)?);
             Ok(0)
-        }
+        },
         name => {
             let agent = crate::hooks::agent(name.unwrap_or("claude"))?;
-            println!("{}", serde_json::to_string_pretty(&json!({ "hooks": agent.entries() })).unwrap());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "hooks": agent.entries() })).unwrap()
+            );
             eprintln!("Add these to ~/{}, or run `artty hooks install {}`.", agent.file, agent.id);
             Ok(0)
-        }
+        },
     }
 }
 

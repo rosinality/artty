@@ -2,8 +2,8 @@ mod app_state;
 mod boxdraw;
 mod cli;
 mod hooks;
-mod keys;
 mod keymap;
+mod keys;
 mod mouse;
 mod notify;
 mod profile;
@@ -17,11 +17,23 @@ use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 use window_view::{
     ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
     FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, MoveTabDown, MoveTabUp,
-    NewTab, NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, Paste, ShowActivity, PreviousPane, PreviousTab,
-    PreviousWorkspace, RenameTab, ResetFontSize, SplitDown, SplitRight, ToggleZoom,
+    NewTab, NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, Paste, PreviousPane,
+    PreviousTab, PreviousWorkspace, RenameTab, ResetFontSize, ShowActivity, SplitDown, SplitRight,
+    ToggleZoom,
 };
 
-actions!(artty, [Quit, QuitAndEndSessions, NewWindow, ReopenClosedWindows, OpenSettings, RestartToUpdate, RestartServer]);
+actions!(
+    artty,
+    [
+        Quit,
+        QuitAndEndSessions,
+        NewWindow,
+        ReopenClosedWindows,
+        OpenSettings,
+        RestartToUpdate,
+        RestartServer
+    ]
+);
 
 const USAGE: &str = "usage: artty [-e command [args...]]\n       artty help    (commands for controlling a running artty)";
 
@@ -37,18 +49,18 @@ fn parse_args() -> Option<Vec<String>> {
                 std::process::exit(2);
             }
             Some(command)
-        }
+        },
         Some("-h" | "--help" | "help") => {
             std::process::exit(cli::main(vec!["help".into(), "--help".into()]));
-        }
+        },
         Some(command) if cli::COMMANDS.contains(&command) => {
             std::process::exit(cli::main(std::env::args().skip(1).collect()));
-        }
+        },
         Some(other) if other.starts_with("-psn_") => None, // Launched from Finder.
         Some(other) => {
             eprintln!("artty: unknown argument {other:?}\n{USAGE}");
             std::process::exit(2);
-        }
+        },
     }
 }
 

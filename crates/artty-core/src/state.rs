@@ -50,7 +50,11 @@ pub struct SavedWindowState {
 }
 
 impl SavedWindowState {
-    pub fn new(window: Option<SavedWindow>, active: usize, workspaces: Vec<SavedWorkspace>) -> Self {
+    pub fn new(
+        window: Option<SavedWindow>,
+        active: usize,
+        workspaces: Vec<SavedWorkspace>,
+    ) -> Self {
         Self { window, active, workspaces, tabs: Vec::new() }
     }
 
@@ -58,7 +62,8 @@ impl SavedWindowState {
     fn upgraded(mut self) -> Self {
         if !self.tabs.is_empty() {
             let tabs = std::mem::take(&mut self.tabs);
-            self.workspaces.insert(0, SavedWorkspace { active: self.active, tabs, ..Default::default() });
+            self.workspaces
+                .insert(0, SavedWorkspace { active: self.active, tabs, ..Default::default() });
             self.active = 0;
         }
         self.workspaces.retain(|workspace| !workspace.tabs.is_empty());
@@ -138,8 +143,12 @@ enum TabRepr {
 impl From<TabRepr> for SavedTab {
     fn from(repr: TabRepr) -> Self {
         match repr {
-            TabRepr::Split { layout, title, focused, zoomed } => Self { title, layout, focused, zoomed },
-            TabRepr::Single(pane) => Self { title: None, layout: SavedLayout::Pane(pane), focused: 0, zoomed: false },
+            TabRepr::Split { layout, title, focused, zoomed } => {
+                Self { title, layout, focused, zoomed }
+            },
+            TabRepr::Single(pane) => {
+                Self { title: None, layout: SavedLayout::Pane(pane), focused: 0, zoomed: false }
+            },
         }
     }
 }
@@ -179,7 +188,8 @@ impl SavedState {
     pub fn into_windows(self) -> Vec<SavedWindowState> {
         let mut windows = self.windows;
         if !self.tabs.is_empty() {
-            let workspace = SavedWorkspace { active: self.active, tabs: self.tabs, ..Default::default() };
+            let workspace =
+                SavedWorkspace { active: self.active, tabs: self.tabs, ..Default::default() };
             windows.insert(0, SavedWindowState::new(self.window, 0, vec![workspace]));
         }
         let mut windows: Vec<_> = windows.into_iter().map(SavedWindowState::upgraded).collect();
@@ -219,7 +229,12 @@ impl SavedState {
         // Saved output can contain anything that was on screen: owner-only.
         let mut file = {
             use std::os::unix::fs::OpenOptionsExt;
-            std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&temp)?
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&temp)?
         };
         io::Write::write_all(&mut file, &serde_json::to_vec(self)?)?;
         file.sync_all()?;
@@ -236,7 +251,9 @@ pub(crate) fn styled_text<T>(term: &Term<T>, lines: usize) -> String {
     let grid = term.grid();
     let columns = term.columns();
     let blank = |line: Line| (0..columns).all(|c| is_blank(&grid[line][Column(c)]));
-    let Some(bottom) = (term.topmost_line().0..=term.bottommost_line().0).rev().map(Line).find(|&l| !blank(l)) else {
+    let Some(bottom) =
+        (term.topmost_line().0..=term.bottommost_line().0).rev().map(Line).find(|&l| !blank(l))
+    else {
         return String::new();
     };
     let top = Line((bottom.0 - lines as i32 + 1).max(term.topmost_line().0));
@@ -274,7 +291,9 @@ pub(crate) fn styled_text<T>(term: &Term<T>, lines: usize) -> String {
 
 /// A cell that shows nothing: a default-background space.
 fn is_blank(cell: &Cell) -> bool {
-    cell.c == ' ' && cell.bg == Color::Named(NamedColor::Background) && !cell.flags.contains(Flags::INVERSE)
+    cell.c == ' '
+        && cell.bg == Color::Named(NamedColor::Background)
+        && !cell.flags.contains(Flags::INVERSE)
 }
 
 const STYLE_FLAGS: Flags = Flags::BOLD
@@ -294,7 +313,11 @@ struct Style {
 
 impl Default for Style {
     fn default() -> Self {
-        Self { fg: Color::Named(NamedColor::Foreground), bg: Color::Named(NamedColor::Background), flags: Flags::empty() }
+        Self {
+            fg: Color::Named(NamedColor::Foreground),
+            bg: Color::Named(NamedColor::Background),
+            flags: Flags::empty(),
+        }
     }
 }
 
@@ -339,11 +362,13 @@ fn write_color(out: &mut String, color: Color, foreground: bool) {
                 0..8 => _ = write!(out, ";{}", base + index),
                 8..16 => _ = write!(out, ";{}", bright + index - 8),
                 // Dim colors are their normal color; DIM is a flag.
-                i if dim.contains(&i) => _ = write!(out, ";{}", base + i - NamedColor::DimBlack as usize),
+                i if dim.contains(&i) => {
+                    _ = write!(out, ";{}", base + i - NamedColor::DimBlack as usize)
+                },
                 // Default foreground/background, cursor color: nothing to set.
-                _ => {}
+                _ => {},
             }
-        }
+        },
     }
 }
 
@@ -365,7 +390,10 @@ mod tests {
 
     #[test]
     fn styled_text_round_trips() {
-        let original = term(20, "plain \x1b[1;31mbold red\x1b[0m\r\n\x1b[48;5;22m bg \x1b[0m 한글\r\n".as_bytes());
+        let original = term(
+            20,
+            "plain \x1b[1;31mbold red\x1b[0m\r\n\x1b[48;5;22m bg \x1b[0m 한글\r\n".as_bytes(),
+        );
         let saved = styled_text(&original, 100);
         assert_eq!(saved, "plain \x1b[0;1;31mbold red\x1b[0m\r\n\x1b[0;48;5;22m bg \x1b[0m 한글");
 
@@ -373,8 +401,15 @@ mod tests {
         let replayed = term(20, saved.as_bytes());
         for line in 0..2 {
             for column in 0..20 {
-                let (a, b) = (&original.grid()[Line(line)][Column(column)], &replayed.grid()[Line(line)][Column(column)]);
-                assert_eq!((a.c, a.fg, a.bg, a.flags), (b.c, b.fg, b.bg, b.flags), "line {line} column {column}");
+                let (a, b) = (
+                    &original.grid()[Line(line)][Column(column)],
+                    &replayed.grid()[Line(line)][Column(column)],
+                );
+                assert_eq!(
+                    (a.c, a.fg, a.bg, a.flags),
+                    (b.c, b.fg, b.bg, b.flags),
+                    "line {line} column {column}"
+                );
             }
         }
     }
@@ -460,8 +495,10 @@ mod tests {
     #[test]
     fn version_1_files_load() {
         // One pane per tab; unknown fields are tolerated.
-        let old: SavedState =
-            serde_json::from_str(r#"{"version":1,"active":0,"tabs":[{"cwd":"/x","title":"t","future":1}]}"#).unwrap();
+        let old: SavedState = serde_json::from_str(
+            r#"{"version":1,"active":0,"tabs":[{"cwd":"/x","title":"t","future":1}]}"#,
+        )
+        .unwrap();
         let windows = old.into_windows();
         let tab = &windows[0].workspaces[0].tabs[0];
         let SavedLayout::Pane(pane) = &tab.layout else { panic!("expected a single pane") };

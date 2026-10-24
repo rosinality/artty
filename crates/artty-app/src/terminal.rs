@@ -1,8 +1,8 @@
 //! Painting a terminal [`Frame`] onto the cell grid.
 
+use crate::boxdraw;
 use artty_core::vt::ansi::{CursorShape, Rgb};
 use artty_core::{Config, Frame, FrameCursor, FrameLine, FrameRun};
-use crate::boxdraw;
 use gpui::{
     App, BorderStyle, Bounds, Font, FontStyle, FontWeight, Hsla, Pixels, StrikethroughStyle,
     TextRun, UnderlineStyle, Window, fill, font, outline, point, px, size,
@@ -39,9 +39,18 @@ impl Metrics {
         }
     }
 
-    pub fn cell_bounds(&self, origin: gpui::Point<Pixels>, line: usize, column: usize, columns: usize) -> Bounds<Pixels> {
+    pub fn cell_bounds(
+        &self,
+        origin: gpui::Point<Pixels>,
+        line: usize,
+        column: usize,
+        columns: usize,
+    ) -> Bounds<Pixels> {
         Bounds::new(
-            point(origin.x + self.cell_width * column as f32, origin.y + self.line_height * line as f32),
+            point(
+                origin.x + self.cell_width * column as f32,
+                origin.y + self.line_height * line as f32,
+            ),
             size(self.cell_width * columns as f32, self.line_height),
         )
     }
@@ -90,7 +99,13 @@ pub struct PaintState<'a> {
 /// Each run of image cells shows its part of the image: the whole image is
 /// drawn where its top left cell would be, clipped to those cells, so text
 /// written over part of it hides only that part.
-fn paint_images(origin: gpui::Point<Pixels>, frame: &Frame, metrics: &Metrics, window: &mut Window, cx: &App) {
+fn paint_images(
+    origin: gpui::Point<Pixels>,
+    frame: &Frame,
+    metrics: &Metrics,
+    window: &mut Window,
+    cx: &App,
+) {
     let images = &cx.global::<crate::app_state::Shared>().images;
     for (index, line) in frame.lines.iter().enumerate() {
         for span in &line.images {
@@ -100,7 +115,10 @@ fn paint_images(origin: gpui::Point<Pixels>, frame: &Frame, metrics: &Metrics, w
                 origin.x + metrics.cell_width * (span.column as f32 - f32::from(span.tile_column)),
                 origin.y + metrics.line_height * (index as f32 - f32::from(span.tile_row)),
             );
-            let whole = Bounds::new(top_left, size(metrics.cell_width * image.columns, metrics.line_height * image.rows));
+            let whole = Bounds::new(
+                top_left,
+                size(metrics.cell_width * image.columns, metrics.line_height * image.rows),
+            );
             let cells = metrics.cell_bounds(origin, index, span.column, span.cells);
             window.with_content_mask(Some(gpui::ContentMask { bounds: cells }), |window| {
                 let _ = window.paint_image(whole, gpui::Corners::default(), render, 0, false);
@@ -123,13 +141,19 @@ pub fn paint(
 
     for (index, line) in frame.lines.iter().enumerate() {
         for rect in line.backgrounds.iter().chain(&line.matches) {
-            window.paint_quad(fill(metrics.cell_bounds(origin, index, rect.column, rect.width), faded(hsla(rect.color))));
+            window.paint_quad(fill(
+                metrics.cell_bounds(origin, index, rect.column, rect.width),
+                faded(hsla(rect.color)),
+            ));
         }
     }
     paint_images(origin, frame, metrics, window, cx);
     for (index, line) in frame.lines.iter().enumerate() {
         for rect in &line.selection {
-            window.paint_quad(fill(metrics.cell_bounds(origin, index, rect.column, rect.width), faded(hsla(rect.color))));
+            window.paint_quad(fill(
+                metrics.cell_bounds(origin, index, rect.column, rect.width),
+                faded(hsla(rect.color)),
+            ));
         }
     }
 
@@ -177,7 +201,13 @@ fn styled_font(metrics: &Metrics, run: &FrameRun) -> Font {
 /// is centered in its cells, or drawn as a shape if it's a box character.
 /// An underline across `cells`, just below the baseline (kept inside the
 /// cell), as thick as the font calls for.
-fn paint_underline(cells: Bounds<Pixels>, style: artty_core::UnderlineStyle, color: Hsla, metrics: &Metrics, window: &mut Window) {
+fn paint_underline(
+    cells: Bounds<Pixels>,
+    style: artty_core::UnderlineStyle,
+    color: Hsla,
+    metrics: &Metrics,
+    window: &mut Window,
+) {
     use artty_core::UnderlineStyle;
     let font_size = f32::from(metrics.font_size);
     let line_height = f32::from(metrics.line_height);
@@ -187,7 +217,8 @@ fn paint_underline(cells: Bounds<Pixels>, style: artty_core::UnderlineStyle, col
     let y = (baseline + (font_size * 0.12).max(thickness + 1.)).min(top + line_height - thickness);
     let (left, width) = (f32::from(cells.origin.x), f32::from(cells.size.width));
     let mut bar = |x: f32, y: f32, w: f32| {
-        window.paint_quad(fill(Bounds::new(point(px(x), px(y)), size(px(w), px(thickness))), color));
+        window
+            .paint_quad(fill(Bounds::new(point(px(x), px(y)), size(px(w), px(thickness))), color));
     };
     match style {
         UnderlineStyle::Single => bar(left, y, width),
@@ -216,7 +247,8 @@ fn paint_underline(cells: Bounds<Pixels>, style: artty_core::UnderlineStyle, col
         UnderlineStyle::Curly => {
             // A wave a cell long, as high as fits under the text.
             let half = f32::from(metrics.cell_width) / 2.;
-            let amplitude = (thickness * 1.5).max(1.5).min(top + line_height - y - thickness / 2.).max(1.);
+            let amplitude =
+                (thickness * 1.5).max(1.5).min(top + line_height - y - thickness / 2.).max(1.);
             let mid = y + thickness / 2.;
             let mut path = gpui::PathBuilder::stroke(px(thickness));
             path.move_to(point(px(left), px(mid)));
@@ -259,9 +291,16 @@ fn paint_text(
         background_color: None,
         // Underlines are drawn on their own (see `paint_underlines`).
         underline: None,
-        strikethrough: run.strikeout.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
+        strikethrough: run
+            .strikeout
+            .then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
     };
-    let shaped = window.text_system().shape_line(text.to_owned().into(), metrics.font_size, &[text_run], None);
+    let shaped = window.text_system().shape_line(
+        text.to_owned().into(),
+        metrics.font_size,
+        &[text_run],
+        None,
+    );
     let mut at = cells.origin;
     if single.is_some() && shaped.width < cells.size.width {
         // CJK glyphs are narrower than two cells; center them like other terminals.
@@ -292,7 +331,8 @@ fn paint_cursor(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let cell = metrics.cell_bounds(origin, cursor.line, cursor.column, if cursor.wide { 2 } else { 1 });
+    let cell =
+        metrics.cell_bounds(origin, cursor.line, cursor.column, if cursor.wide { 2 } else { 1 });
     let mut color = hsla(cursor.color);
     // Bars and underlines stay thin but readable at any font size.
     let thickness = px((f32::from(metrics.cell_width) * 0.14).round().max(2.));
@@ -307,21 +347,29 @@ fn paint_cursor(
     }
     match shape {
         CursorShape::Beam => {
-            window.paint_quad(fill(Bounds::new(cell.origin, size(thickness, cell.size.height)), color));
-        }
+            window.paint_quad(fill(
+                Bounds::new(cell.origin, size(thickness, cell.size.height)),
+                color,
+            ));
+        },
         CursorShape::Underline => {
             let y = cell.origin.y + cell.size.height - thickness;
-            window.paint_quad(fill(Bounds::new(point(cell.origin.x, y), size(cell.size.width, thickness)), color));
-        }
+            window.paint_quad(fill(
+                Bounds::new(point(cell.origin.x, y), size(cell.size.width, thickness)),
+                color,
+            ));
+        },
         CursorShape::HollowBlock => window.paint_quad(outline(cell, color, BorderStyle::Solid)),
         CursorShape::Block => {
             window.paint_quad(fill(cell, color));
             // Redraw the character under the cursor so it stays readable.
-            if let Some((run, text)) = frame.lines.get(cursor.line).and_then(|line| char_at(line, cursor.column)) {
+            if let Some((run, text)) =
+                frame.lines.get(cursor.line).and_then(|line| char_at(line, cursor.column))
+            {
                 paint_text(cell, &text, run, hsla(frame.background), metrics, window, cx);
             }
-        }
-        CursorShape::Hidden => {}
+        },
+        CursorShape::Hidden => {},
     }
 }
 
@@ -345,7 +393,8 @@ fn paint_marked_text(
         underline: Some(UnderlineStyle { thickness: px(1.), color: Some(color), wavy: false }),
         strikethrough: None,
     };
-    let shaped = window.text_system().shape_line(text.to_owned().into(), metrics.font_size, &[run], None);
+    let shaped =
+        window.text_system().shape_line(text.to_owned().into(), metrics.font_size, &[run], None);
     let _ = shaped.paint_background(at, metrics.line_height, window, cx);
     let _ = shaped.paint(at, metrics.line_height, window, cx);
 }

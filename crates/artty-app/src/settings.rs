@@ -1,12 +1,12 @@
 //! The Settings window: common options, written to the config file (which
 //! every window reloads when it changes).
 
-use artty_core::{Config, CursorStyle};
 use artty_core::config_file::{ConfigFile, THEMES, ThemePreset};
+use artty_core::{Config, CursorStyle};
 use gpui::{
-    AnyElement, App, AppContext, Bounds, Context, ElementId, FocusHandle, FontWeight, Hsla, SharedString,
-    TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, point, prelude::*,
-    px, rgba, size,
+    AnyElement, App, AppContext, Bounds, Context, ElementId, FocusHandle, FontWeight, Hsla,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, point,
+    prelude::*, px, rgba, size,
 };
 
 use crate::hooks::{self, Status};
@@ -42,8 +42,21 @@ struct Editing {
 /// Font families offered in the picker: installed families whose names look
 /// monospaced, plus the system monospaced font.
 const MONO_HINTS: &[&str] = &[
-    "Mono", "Code", "Menlo", "Monaco", "Courier", "Consolas", "Hack", "Iosevka", "Fira", "Cascadia", "JetBrains",
-    "Hasklig", "Inconsolata", "Terminus", "Victor",
+    "Mono",
+    "Code",
+    "Menlo",
+    "Monaco",
+    "Courier",
+    "Consolas",
+    "Hack",
+    "Iosevka",
+    "Fira",
+    "Cascadia",
+    "JetBrains",
+    "Hasklig",
+    "Inconsolata",
+    "Terminus",
+    "Victor",
 ];
 
 pub struct Settings {
@@ -57,7 +70,10 @@ pub struct Settings {
 }
 
 /// Open the Settings window, or bring the open one forward.
-pub fn open(existing: Option<WindowHandle<Settings>>, cx: &mut App) -> Option<WindowHandle<Settings>> {
+pub fn open(
+    existing: Option<WindowHandle<Settings>>,
+    cx: &mut App,
+) -> Option<WindowHandle<Settings>> {
     if let Some(handle) = existing
         && handle.update(cx, |_, window, _| window.activate_window()).is_ok()
     {
@@ -88,13 +104,23 @@ impl Settings {
             .text_system()
             .all_font_names()
             .into_iter()
-            .filter(|name| !name.starts_with('.') && MONO_HINTS.iter().any(|hint| name.contains(hint)))
+            .filter(|name| {
+                !name.starts_with('.') && MONO_HINTS.iter().any(|hint| name.contains(hint))
+            })
             .collect();
         fonts.push("SF Mono".to_owned());
         fonts.extend(config.font_family.iter().cloned());
         fonts.sort_by_key(|name| name.to_lowercase());
         fonts.dedup();
-        Self { config, error, fonts, font_menu: false, status: None, editing: None, focus: cx.focus_handle() }
+        Self {
+            config,
+            error,
+            fonts,
+            font_menu: false,
+            status: None,
+            editing: None,
+            focus: cx.focus_handle(),
+        }
     }
 
     /// Change the config file, then reload it.
@@ -120,7 +146,13 @@ impl Settings {
 
     // Controls.
 
-    fn toggle(&self, id: &'static str, on: bool, key: &'static str, cx: &mut Context<Self>) -> AnyElement {
+    fn toggle(
+        &self,
+        id: &'static str,
+        on: bool,
+        key: &'static str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         div()
             .id(id)
             .w(px(38.))
@@ -132,7 +164,9 @@ impl Settings {
             .flex()
             .when(on, |d| d.justify_end())
             .child(div().size(px(18.)).rounded_full().bg(rgba(0xffffffff)).shadow_sm())
-            .on_click(cx.listener(move |this, _, _, cx| this.edit(cx, |file| file.set_bool(key, !on))))
+            .on_click(
+                cx.listener(move |this, _, _, cx| this.edit(cx, |file| file.set_bool(key, !on))),
+            )
             .into_any_element()
     }
 
@@ -165,11 +199,20 @@ impl Settings {
         let value = (typed / editing.scale).clamp(editing.min, editing.max);
         let key = editing.key;
         self.edit(cx, |file| {
-            if editing.integer { file.set_int(key, value.round() as i64) } else { file.set_float(key, value) }
+            if editing.integer {
+                file.set_int(key, value.round() as i64)
+            } else {
+                file.set_float(key, value)
+            }
         });
     }
 
-    fn key_down(&mut self, event: &gpui::KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(editing) = self.editing.as_mut() else { return };
         let keystroke = &event.keystroke;
         match keystroke.key.as_str() {
@@ -182,23 +225,28 @@ impl Settings {
                     editing.text.pop();
                 }
                 editing.fresh = false;
-            }
+            },
             "up" | "down" => {
                 // Step from what's typed, staying in range.
                 let shown = editing.text.trim().parse::<f64>().unwrap_or(0.);
-                let delta = editing.step * editing.scale * if keystroke.key == "up" { 1. } else { -1. };
-                let next = (shown + delta).clamp(editing.min * editing.scale, editing.max * editing.scale);
+                let delta =
+                    editing.step * editing.scale * if keystroke.key == "up" { 1. } else { -1. };
+                let next =
+                    (shown + delta).clamp(editing.min * editing.scale, editing.max * editing.scale);
                 editing.text = ((next * 1000.).round() / 1000.).to_string();
                 editing.fresh = false;
-            }
+            },
             _ => match keystroke.key_char.as_deref() {
-                Some(c) if !keystroke.modifiers.platform && c.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-') => {
+                Some(c)
+                    if !keystroke.modifiers.platform
+                        && c.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-') =>
+                {
                     if editing.fresh {
                         editing.text.clear();
                         editing.fresh = false;
                     }
                     editing.text.push_str(c);
-                }
+                },
                 _ => return,
             },
         }
@@ -221,16 +269,26 @@ impl Settings {
             .rounded(px(5.))
             .text_color(rgba(0xffffffee))
             .map(|d| match editing {
-                Some(editing) => d.bg(rgba(0x0000004d)).border_1().border_color(rgba(0x8fb4ffcc)).child(if editing.fresh {
-                    div().px(px(1.)).rounded(px(2.)).bg(rgba(0x3478f6ff)).child(editing.text.clone())
-                } else {
-                    div().child(format!("{}▏", editing.text))
-                }),
-                None => d
-                    .cursor_text()
-                    .hover(|d| d.bg(rgba(0xffffff12)))
-                    .child(format(value))
-                    .on_click(cx.listener(move |this, _, window, cx| this.start_editing(&number, window, cx))),
+                Some(editing) => {
+                    d.bg(rgba(0x0000004d)).border_1().border_color(rgba(0x8fb4ffcc)).child(
+                        if editing.fresh {
+                            div()
+                                .px(px(1.))
+                                .rounded(px(2.))
+                                .bg(rgba(0x3478f6ff))
+                                .child(editing.text.clone())
+                        } else {
+                            div().child(format!("{}▏", editing.text))
+                        },
+                    )
+                },
+                None => {
+                    d.cursor_text().hover(|d| d.bg(rgba(0xffffff12))).child(format(value)).on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.start_editing(&number, window, cx)
+                        }),
+                    )
+                },
             });
         let button = |label: &'static str, next: f64, cx: &mut Context<Self>| {
             let next = next.clamp(min, max);
@@ -245,12 +303,18 @@ impl Settings {
                 .rounded(px(6.))
                 .text_color(if enabled { rgba(0xffffffdd) } else { rgba(0xffffff40) })
                 .when(enabled, |d| {
-                    d.hover(|d| d.bg(rgba(0xffffff1a))).on_click(cx.listener(move |this, _, _, cx| {
-                        this.editing = None;
-                        this.edit(cx, |file| {
-                            if integer { file.set_int(key, next.round() as i64) } else { file.set_float(key, next) }
-                        })
-                    }))
+                    d.hover(|d| d.bg(rgba(0xffffff1a))).on_click(cx.listener(
+                        move |this, _, _, cx| {
+                            this.editing = None;
+                            this.edit(cx, |file| {
+                                if integer {
+                                    file.set_int(key, next.round() as i64)
+                                } else {
+                                    file.set_float(key, next)
+                                }
+                            })
+                        },
+                    ))
                 })
                 .child(label)
         };
@@ -295,7 +359,9 @@ impl Settings {
             let glyph = div().w(px(9.)).h(px(15.)).map(|d| match style {
                 CursorStyle::Block => d.bg(rgba(0xffffffdd)),
                 CursorStyle::Bar => d.child(div().w(px(2.)).h_full().bg(rgba(0xffffffdd))),
-                CursorStyle::Underline => d.flex().items_end().child(div().w_full().h(px(2.)).bg(rgba(0xffffffdd))),
+                CursorStyle::Underline => {
+                    d.flex().items_end().child(div().w_full().h(px(2.)).bg(rgba(0xffffffdd)))
+                },
                 CursorStyle::Hollow => d.border_1().border_color(rgba(0xffffffdd)),
             });
             let label = match style {
@@ -321,7 +387,14 @@ impl Settings {
                     this.edit(cx, |file| file.set_string("cursor-style", style.name()))
                 }))
         });
-        div().flex().gap(px(2.)).p(px(2.)).rounded(px(8.)).bg(rgba(0xffffff12)).children(options).into_any_element()
+        div()
+            .flex()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(8.))
+            .bg(rgba(0xffffff12))
+            .children(options)
+            .into_any_element()
     }
 
     /// One row per agent: whether artty's hooks are installed, and buttons
@@ -340,18 +413,28 @@ impl Settings {
                 };
                 let id = agent.id;
                 let install = |label: &'static str, cx: &mut Context<Self>| {
-                    self.button(ElementId::Name(format!("install-{id}").into()), label, cx, move |this, cx| {
-                        let report = hooks::agent(id).and_then(|agent| agent.install());
-                        this.status = Some(report.unwrap_or_else(|err| err));
-                        cx.notify();
-                    })
+                    self.button(
+                        ElementId::Name(format!("install-{id}").into()),
+                        label,
+                        cx,
+                        move |this, cx| {
+                            let report = hooks::agent(id).and_then(|agent| agent.install());
+                            this.status = Some(report.unwrap_or_else(|err| err));
+                            cx.notify();
+                        },
+                    )
                 };
                 let uninstall = |cx: &mut Context<Self>| {
-                    self.button(ElementId::Name(format!("uninstall-{id}").into()), "Uninstall", cx, move |this, cx| {
-                        let report = hooks::agent(id).and_then(|agent| agent.uninstall());
-                        this.status = Some(report.unwrap_or_else(|err| err));
-                        cx.notify();
-                    })
+                    self.button(
+                        ElementId::Name(format!("uninstall-{id}").into()),
+                        "Uninstall",
+                        cx,
+                        move |this, cx| {
+                            let report = hooks::agent(id).and_then(|agent| agent.uninstall());
+                            this.status = Some(report.unwrap_or_else(|err| err));
+                            cx.notify();
+                        },
+                    )
                 };
                 let buttons: Vec<AnyElement> = match status {
                     Status::Installed => vec![uninstall(cx)],
@@ -380,7 +463,8 @@ impl Settings {
     }
 
     fn font_picker(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.config.font_family.first().cloned().unwrap_or_else(|| "SF Mono".to_owned());
+        let current =
+            self.config.font_family.first().cloned().unwrap_or_else(|| "SF Mono".to_owned());
         let list = self.font_menu.then(|| {
             div()
                 .id("font-list")
@@ -447,9 +531,16 @@ impl Settings {
     fn theme_chips(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.current_theme().map(|theme| theme.name);
         let defaults = artty_core::Theme::default();
-        let hex = |rgb: artty_core::vt::ansi::Rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b);
+        let hex =
+            |rgb: artty_core::vt::ansi::Rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b);
         let builtin_palette: Vec<String> = defaults.ansi.iter().map(|c| hex(*c)).collect();
-        let chip = |id: usize, name: &'static str, background: String, palette: Vec<String>, selected: bool, preset: Option<&'static ThemePreset>, cx: &mut Context<Self>| {
+        let chip = |id: usize,
+                    name: &'static str,
+                    background: String,
+                    palette: Vec<String>,
+                    selected: bool,
+                    preset: Option<&'static ThemePreset>,
+                    cx: &mut Context<Self>| {
             let color = |hex: &str| -> Hsla {
                 let value = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
                 gpui::rgb(value).into()
@@ -474,15 +565,36 @@ impl Settings {
                         .items_end()
                         .gap(px(3.))
                         .p(px(5.))
-                        .children([1, 2, 3, 4, 5, 6].map(|i| div().size(px(8.)).rounded_full().bg(color(&palette[i])))),
+                        .children(
+                            [1, 2, 3, 4, 5, 6]
+                                .map(|i| div().size(px(8.)).rounded_full().bg(color(&palette[i]))),
+                        ),
                 )
                 .child(div().text_size(px(11.5)).text_color(rgba(0xffffffcc)).child(name))
-                .on_click(cx.listener(move |this, _, _, cx| this.edit(cx, |file| file.set_theme(preset))))
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.edit(cx, |file| file.set_theme(preset))),
+                )
         };
-        let mut chips = vec![chip(0, "artty", hex(defaults.background), builtin_palette, current.is_none(), None, cx)];
+        let mut chips = vec![chip(
+            0,
+            "artty",
+            hex(defaults.background),
+            builtin_palette,
+            current.is_none(),
+            None,
+            cx,
+        )];
         for (i, theme) in THEMES.iter().enumerate() {
             let palette = theme.palette.iter().map(|s| s.to_string()).collect();
-            chips.push(chip(i + 1, theme.name, theme.background.to_owned(), palette, current == Some(theme.name), Some(theme), cx));
+            chips.push(chip(
+                i + 1,
+                theme.name,
+                theme.background.to_owned(),
+                palette,
+                current == Some(theme.name),
+                Some(theme),
+                cx,
+            ));
         }
         div().flex().flex_wrap().gap_1().children(chips).into_any_element()
     }
@@ -530,7 +642,9 @@ impl Settings {
                     .flex()
                     .flex_col()
                     .child(div().text_color(rgba(0xffffffee)).child(label))
-                    .when_some(hint, |d, hint| d.child(div().text_size(px(11.)).text_color(rgba(0xffffff70)).child(hint))),
+                    .when_some(hint, |d, hint| {
+                        d.child(div().text_size(px(11.)).text_color(rgba(0xffffff70)).child(hint))
+                    }),
             )
             .child(control)
             .into_any_element()
@@ -599,27 +713,67 @@ impl Render for Settings {
                         cx,
                     ),
                 ),
-                Self::row("Blur behind the window", None, self.toggle("blur", c.background_blur, "background-blur", cx)),
+                Self::row(
+                    "Blur behind the window",
+                    None,
+                    self.toggle("blur", c.background_blur, "background-blur", cx),
+                ),
                 Self::row("Cursor", None, self.cursor_picker(cx)),
-                Self::row("Blinking cursor", None, self.toggle("blink", c.cursor_blink, "cursor-blink", cx)),
+                Self::row(
+                    "Blinking cursor",
+                    None,
+                    self.toggle("blink", c.cursor_blink, "cursor-blink", cx),
+                ),
             ],
         );
         let behavior = Self::section(
             "Behavior",
             vec![
-                Self::row("Option key acts as Meta", Some("Off: Option types characters like å"), self.toggle("meta", c.option_as_meta, "option-as-meta", cx)),
-                Self::row("Copy on select", None, self.toggle("copy", c.copy_on_select, "copy-on-select", cx)),
-                Self::row("Flash on bell", None, self.toggle("vbell", c.visual_bell, "visual-bell", cx)),
-                Self::row("Sound on bell", None, self.toggle("sbell", c.bell_sound, "bell-sound", cx)),
-                Self::row("Notifications", Some("When a tab needs you while you're elsewhere"), self.toggle("notify", c.notifications, "notifications", cx)),
-                Self::row("Shell integration", Some("zsh and bash report commands; fish does natively"), self.toggle("si", c.shell_integration, "shell-integration", cx)),
+                Self::row(
+                    "Option key acts as Meta",
+                    Some("Off: Option types characters like å"),
+                    self.toggle("meta", c.option_as_meta, "option-as-meta", cx),
+                ),
+                Self::row(
+                    "Copy on select",
+                    None,
+                    self.toggle("copy", c.copy_on_select, "copy-on-select", cx),
+                ),
+                Self::row(
+                    "Flash on bell",
+                    None,
+                    self.toggle("vbell", c.visual_bell, "visual-bell", cx),
+                ),
+                Self::row(
+                    "Sound on bell",
+                    None,
+                    self.toggle("sbell", c.bell_sound, "bell-sound", cx),
+                ),
+                Self::row(
+                    "Notifications",
+                    Some("When a tab needs you while you're elsewhere"),
+                    self.toggle("notify", c.notifications, "notifications", cx),
+                ),
+                Self::row(
+                    "Shell integration",
+                    Some("zsh and bash report commands; fish does natively"),
+                    self.toggle("si", c.shell_integration, "shell-integration", cx),
+                ),
             ],
         );
         let sessions = Self::section(
             "Sessions",
             vec![
-                Self::row("Reopen tabs on launch", None, self.toggle("restore", c.restore_sessions, "restore-sessions", cx)),
-                Self::row("Resume coding agents", None, self.toggle("resume", c.resume_agents, "resume-agents", cx)),
+                Self::row(
+                    "Reopen tabs on launch",
+                    None,
+                    self.toggle("restore", c.restore_sessions, "restore-sessions", cx),
+                ),
+                Self::row(
+                    "Resume coding agents",
+                    None,
+                    self.toggle("resume", c.resume_agents, "resume-agents", cx),
+                ),
                 Self::row(
                     "Output kept per pane",
                     Some("Saved for reopened tabs; 0 saves none"),
@@ -650,20 +804,18 @@ impl Render for Settings {
                 .into_any_element(),
         ];
         agent_rows.extend(self.agent_rows(cx));
-        agent_rows.push(
-                Self::row(
-                    "Configuration file",
-                    Some("Every setting, including colors and agents"),
-                    self.button("open-config", "Open", cx, |_, _| {
-                        if let Some(path) = Config::path() {
-                            if !path.exists() {
-                                let _ = ConfigFile::open().and_then(|file| file.save());
-                            }
-                            let _ = std::process::Command::new("open").arg("-t").arg(path).spawn();
-                        }
-                    }),
-                ),
-        );
+        agent_rows.push(Self::row(
+            "Configuration file",
+            Some("Every setting, including colors and agents"),
+            self.button("open-config", "Open", cx, |_, _| {
+                if let Some(path) = Config::path() {
+                    if !path.exists() {
+                        let _ = ConfigFile::open().and_then(|file| file.save());
+                    }
+                    let _ = std::process::Command::new("open").arg("-t").arg(path).spawn();
+                }
+            }),
+        ));
         let agents = Self::section("Agents", agent_rows);
 
         div()

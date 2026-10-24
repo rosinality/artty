@@ -12,14 +12,17 @@ use std::time::{Duration, Instant, SystemTime};
 use artty_core::control::{Request, Response};
 use artty_core::layout::PaneId;
 use artty_core::protocol::{
-    AppCommand, ClientMessage, Hello, PaneSpec, PaneState, Query, Reply,
-    ServerMessage, WindowId, decode_response, encode_request, read_message, write_message,
+    AppCommand, ClientMessage, Hello, PaneSpec, PaneState, Query, Reply, ServerMessage, WindowId,
+    decode_response, encode_request, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
 use artty_core::{Config, Frame, SavedWindow};
 use futures::StreamExt;
 use futures::channel::{mpsc, oneshot};
-use gpui::{App, AppContext, AsyncApp, Bounds, Global, WeakEntity, WindowBounds, WindowOptions, point, px, size};
+use gpui::{
+    App, AppContext, AsyncApp, Bounds, Global, WeakEntity, WindowBounds, WindowOptions, point, px,
+    size,
+};
 
 use crate::window_view::{self, WindowView};
 
@@ -74,12 +77,16 @@ pub struct ShownImage {
 /// Keep an image the server sent, decoding it in the background.
 fn receive_image(image: artty_core::protocol::ImageData, cx: &mut App) {
     let id = image.id;
-    cx.global_mut::<Shared>().images.insert(id, ShownImage { columns: image.columns, rows: image.rows, render: None });
+    cx.global_mut::<Shared>()
+        .images
+        .insert(id, ShownImage { columns: image.columns, rows: image.rows, render: None });
     let decoding = cx.background_spawn(async move { decode_image(image) });
     cx.spawn(async move |cx| {
         let render = decoding.await;
         let _ = cx.update(|cx| {
-            if let (Some(render), Some(shown)) = (render, cx.global_mut::<Shared>().images.get_mut(&id)) {
+            if let (Some(render), Some(shown)) =
+                (render, cx.global_mut::<Shared>().images.get_mut(&id))
+            {
                 shown.render = Some(Arc::new(render));
                 cx.refresh_windows();
             }
@@ -111,7 +118,9 @@ fn forget_unshown_images(cx: &mut App) {
     let shown: std::collections::HashSet<u64> = shared
         .screens
         .values()
-        .flat_map(|screen| screen.frame.lines.iter().flat_map(|line| line.images.iter().map(|span| span.image)))
+        .flat_map(|screen| {
+            screen.frame.lines.iter().flat_map(|line| line.images.iter().map(|span| span.image))
+        })
         .collect();
     let gone: Vec<u64> = shared.images.keys().copied().filter(|id| !shown.contains(id)).collect();
     if gone.is_empty() {
@@ -148,7 +157,9 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         update_ready: false,
         images: HashMap::new(),
         server_mismatch: None,
-        build: std::env::current_exe().map(|exe| artty_core::protocol::build_id(&exe)).unwrap_or_default(),
+        build: std::env::current_exe()
+            .map(|exe| artty_core::protocol::build_id(&exe))
+            .unwrap_or_default(),
         stopped: false,
         reconnecting: false,
         lost_at: None,
@@ -176,7 +187,9 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         // running in the server either way.
         let shared = cx.global::<Shared>();
         let settings = shared.settings.map(|handle| handle.window_id());
-        if !shared.reconnecting && cx.windows().iter().all(|window| Some(window.window_id()) == settings) {
+        if !shared.reconnecting
+            && cx.windows().iter().all(|window| Some(window.window_id()) == settings)
+        {
             cx.quit();
         }
     })
@@ -259,7 +272,10 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
             return Err(std::io::Error::other("the artty server speaks another protocol"));
         }
         if restart_other_server()? == artty_server::Upgrade::Restarted {
-            crate::notify::post("artty", "Restarted the artty server to update it: tabs reopen and agents resume, but programs that were running in them restart.");
+            crate::notify::post(
+                "artty",
+                "Restarted the artty server to update it: tabs reopen and agents resume, but programs that were running in them restart.",
+            );
         }
         return connect_once(cx, false, retries);
     }
@@ -284,7 +300,7 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
                     if incoming.unbounded_send(Some(message)).is_err() {
                         return;
                     }
-                }
+                },
                 Err(err) => {
                     if err.kind() == std::io::ErrorKind::InvalidData {
                         // A message this build can't read: the server is
@@ -295,7 +311,7 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
                         log::warn!("reading from the server: {err}");
                     }
                     break;
-                }
+                },
             }
         }
         let _ = incoming.unbounded_send(None);
@@ -351,8 +367,15 @@ fn server_lost(cx: &mut App) {
     // Losing it again right away means reconnecting won't help (say, the
     // two can't understand each other): give up rather than loop.
     let now = Instant::now();
-    if shared.lost_at.replace(now).is_some_and(|at| now.duration_since(at) < Duration::from_secs(10)) {
-        crate::notify::post("artty", "Lost the connection to the artty server again; quitting. Sessions may still be running.");
+    if shared
+        .lost_at
+        .replace(now)
+        .is_some_and(|at| now.duration_since(at) < Duration::from_secs(10))
+    {
+        crate::notify::post(
+            "artty",
+            "Lost the connection to the artty server again; quitting. Sessions may still be running.",
+        );
         return cx.quit();
     }
     shared.outgoing = None;
@@ -376,9 +399,11 @@ fn handle(message: ServerMessage, cx: &mut App) {
     match message {
         ServerMessage::Welcome { version, server_version } => {
             let shared = cx.global_mut::<Shared>();
-            shared.server_mismatch = (version != artty_core::protocol::protocol_version() || server_version != shared.build).then_some(server_version);
+            shared.server_mismatch = (version != artty_core::protocol::protocol_version()
+                || server_version != shared.build)
+                .then_some(server_version);
             cx.refresh_windows();
-        }
+        },
         ServerMessage::Attached { window, bounds } => {
             let shared = cx.global_mut::<Shared>();
             if let Some(view) = shared.attaching.pop_front() {
@@ -387,33 +412,38 @@ fn handle(message: ServerMessage, cx: &mut App) {
                     view.update(cx, |view, cx| view.attached(window, bounds, cx));
                 }
             }
-        }
+        },
         ServerMessage::Layout { window, layout } => {
             if let Some(view) = view_for(window, cx) {
                 view.update(cx, |view, cx| view.set_layout(layout, cx));
             }
-        }
+        },
         ServerMessage::WindowClosed { window } => {
-            if let Some(view) = cx.global_mut::<Shared>().windows.remove(&window).and_then(|w| w.upgrade()) {
+            if let Some(view) =
+                cx.global_mut::<Shared>().windows.remove(&window).and_then(|w| w.upgrade())
+            {
                 view.update(cx, |view, _| view.forget_server());
                 let handle = view.read(cx).window_handle();
                 let _ = handle.update(cx, |_, window, _| window.remove_window());
             }
-        }
+        },
         ServerMessage::Frame { pane, update } => {
             let shared = cx.global_mut::<Shared>();
-            let screen = shared.screens.entry(pane).or_insert_with(|| Screen { frame: Frame::default(), mode: TermMode::empty() });
+            let screen = shared
+                .screens
+                .entry(pane)
+                .or_insert_with(|| Screen { frame: Frame::default(), mode: TermMode::empty() });
             screen.mode = TermMode::from_bits_truncate(update.mode);
             update.apply(&mut screen.frame);
             refresh_pane(pane, cx);
-        }
+        },
         ServerMessage::Panes { panes } => {
             let shared = cx.global_mut::<Shared>();
             for pane in panes {
                 shared.panes.insert(pane.info.id, pane);
             }
             cx.refresh_windows();
-        }
+        },
         ServerMessage::Bell { pane } => {
             let config = Config::load().0;
             if config.visual_bell {
@@ -423,30 +453,32 @@ fn handle(message: ServerMessage, cx: &mut App) {
             if config.bell_sound {
                 let _ = std::process::Command::new("osascript").args(["-e", "beep"]).spawn();
             }
-        }
+        },
         ServerMessage::Notify { title, body } => crate::notify::post(&title, &body),
         ServerMessage::App(command) => match command {
             AppCommand::Activate { window } => activate(window, cx),
-            AppCommand::OpenWindow { window } => open_window(Some(window), None, PaneSpec::default(), cx),
+            AppCommand::OpenWindow { window } => {
+                open_window(Some(window), None, PaneSpec::default(), cx)
+            },
             AppCommand::OpenSettings => open_settings(cx),
             AppCommand::ShowActivity { window } => {
                 if let Some(view) = view_for(window, cx) {
                     view.update(cx, |view, cx| view.show_activity(cx));
                 }
                 activate(window, cx);
-            }
+            },
             AppCommand::Restart => restart(cx),
         },
         ServerMessage::Reply { id, reply } => {
             if let Some(waiter) = cx.global_mut::<Shared>().replies.remove(&id) {
                 let _ = waiter.send(reply);
             }
-        }
+        },
         ServerMessage::Control { id, response } => {
             if let Some(waiter) = cx.global_mut::<Shared>().controls.remove(&id) {
                 let _ = waiter.send(decode_response(&response));
             }
-        }
+        },
         ServerMessage::Stopping { restart } => cx.global_mut::<Shared>().stopped = !restart,
         ServerMessage::Image(image) => receive_image(image, cx),
     }
@@ -458,7 +490,8 @@ fn view_for(window: WindowId, cx: &App) -> Option<gpui::Entity<WindowView>> {
 
 /// Redraw the window showing `pane`.
 fn refresh_pane(pane: PaneId, cx: &mut App) {
-    let windows: Vec<_> = cx.global::<Shared>().windows.values().filter_map(WeakEntity::upgrade).collect();
+    let windows: Vec<_> =
+        cx.global::<Shared>().windows.values().filter_map(WeakEntity::upgrade).collect();
     for view in windows {
         if view.read(cx).shows(pane) {
             view.update(cx, |_, cx| cx.notify());
@@ -490,7 +523,13 @@ pub fn query(query: Query, cx: &mut App) -> oneshot::Receiver<Reply> {
 }
 
 /// Search a pane; the answer comes back like a query's.
-pub fn search(pane: PaneId, query: String, older: bool, restart: bool, cx: &mut App) -> oneshot::Receiver<Reply> {
+pub fn search(
+    pane: PaneId,
+    query: String,
+    older: bool,
+    restart: bool,
+    cx: &mut App,
+) -> oneshot::Receiver<Reply> {
     let (waiter, answer) = oneshot::channel();
     let id = next_id(cx);
     cx.global_mut::<Shared>().replies.insert(id, waiter);
@@ -529,14 +568,22 @@ pub fn other_windows(except: Option<WindowId>, cx: &App) -> Vec<(WindowId, Strin
 }
 
 /// Open a window attached to the server's `window` (or a new one).
-pub fn open_window(window: Option<WindowId>, bounds: Option<SavedWindow>, spec: PaneSpec, cx: &mut App) {
+pub fn open_window(
+    window: Option<WindowId>,
+    bounds: Option<SavedWindow>,
+    spec: PaneSpec,
+    cx: &mut App,
+) {
     let (config, config_error) = Config::load();
     let open_windows = cx.global::<Shared>().windows.len();
     let window_bounds = bounds.as_ref().map(window_view::window_bounds).unwrap_or_else(|| {
         // New windows cascade.
         let offset = px(24.) * open_windows as f32;
         let base = Bounds::centered(None, size(px(1100.), px(680.)), cx);
-        WindowBounds::Windowed(Bounds::new(point(base.origin.x + offset, base.origin.y + offset), base.size))
+        WindowBounds::Windowed(Bounds::new(
+            point(base.origin.x + offset, base.origin.y + offset),
+            base.size,
+        ))
     });
     let options = WindowOptions {
         window_bounds: Some(window_bounds),
@@ -548,14 +595,16 @@ pub fn open_window(window: Option<WindowId>, bounds: Option<SavedWindow>, spec: 
         window_background: window_view::background_appearance(&config),
         ..Default::default()
     };
-    let opened = cx.open_window(options, |window, cx| cx.new(|cx| WindowView::new(config, config_error, window, cx)));
+    let opened = cx.open_window(options, |window, cx| {
+        cx.new(|cx| WindowView::new(config, config_error, window, cx))
+    });
     match opened {
         Ok(handle) => {
             if let Ok(entity) = handle.entity(cx) {
                 cx.global_mut::<Shared>().attaching.push_back(entity.downgrade());
                 send(ClientMessage::AttachWindow { window, spec, bounds }, cx);
             }
-        }
+        },
         Err(err) => log::error!("opening a window: {err}"),
     }
 }
@@ -635,9 +684,11 @@ fn check_for_update(cx: &mut App) {
 /// new app reattaches to them.
 pub fn restart(cx: &mut App) {
     let Some((path, _)) = cx.global::<Shared>().executable.clone() else { return };
-    let bundle = path.ancestors().nth(3).filter(|dir| dir.extension().is_some_and(|ext| ext == "app"));
+    let bundle =
+        path.ancestors().nth(3).filter(|dir| dir.extension().is_some_and(|ext| ext == "app"));
     let target = bundle.unwrap_or(&path);
-    let relaunch = if bundle.is_some() { "exec open \"$2\"" } else { "exec \"$2\" >/dev/null 2>&1" };
+    let relaunch =
+        if bundle.is_some() { "exec open \"$2\"" } else { "exec \"$2\" >/dev/null 2>&1" };
     // Wait for this process to exit first.
     let script = format!("while kill -0 \"$1\" 2>/dev/null; do sleep 0.1; done; {relaunch}");
     let spawned = std::process::Command::new("/bin/sh")
