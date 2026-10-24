@@ -138,6 +138,10 @@ pub fn paint(
             let cell = metrics.cell_bounds(origin, index, run.column, run.cells);
             paint_text(cell, &run.text, run, faded(hsla(run.fg)), metrics, window, cx);
         }
+        for underline in &line.underlines {
+            let cells = metrics.cell_bounds(origin, index, underline.column, underline.width);
+            paint_underline(cells, underline.style, faded(hsla(underline.color)), metrics, window);
+        }
     }
 
     if let Some((line, columns)) = link {
@@ -171,6 +175,67 @@ fn styled_font(metrics: &Metrics, run: &FrameRun) -> Font {
 
 /// Paint `text` starting at the left of `cells`. A lone non-ASCII character
 /// is centered in its cells, or drawn as a shape if it's a box character.
+/// An underline across `cells`, just below the baseline (kept inside the
+/// cell), as thick as the font calls for.
+fn paint_underline(cells: Bounds<Pixels>, style: artty_core::UnderlineStyle, color: Hsla, metrics: &Metrics, window: &mut Window) {
+    use artty_core::UnderlineStyle;
+    let font_size = f32::from(metrics.font_size);
+    let line_height = f32::from(metrics.line_height);
+    let thickness = (font_size / 13.).round().max(1.);
+    let top = f32::from(cells.origin.y);
+    let baseline = top + (line_height - font_size) / 2. + font_size * 0.8;
+    let y = (baseline + (font_size * 0.12).max(thickness + 1.)).min(top + line_height - thickness);
+    let (left, width) = (f32::from(cells.origin.x), f32::from(cells.size.width));
+    let mut bar = |x: f32, y: f32, w: f32| {
+        window.paint_quad(fill(Bounds::new(point(px(x), px(y)), size(px(w), px(thickness))), color));
+    };
+    match style {
+        UnderlineStyle::Single => bar(left, y, width),
+        UnderlineStyle::Double => {
+            // Two lines, two thicknesses apart; up together if they'd leave the cell.
+            let gap = thickness * 2.;
+            let lower = (y + gap).min(top + line_height - thickness);
+            bar(left, lower - gap, width);
+            bar(left, lower, width);
+        },
+        UnderlineStyle::Dotted => {
+            let mut x = left;
+            while x < left + width {
+                bar(x, y, thickness.min(left + width - x));
+                x += thickness * 2.;
+            }
+        },
+        UnderlineStyle::Dashed => {
+            let dash = (f32::from(metrics.cell_width) * 0.6).max(thickness * 3.);
+            let mut x = left;
+            while x < left + width {
+                bar(x, y, dash.min(left + width - x));
+                x += dash * 5. / 3.;
+            }
+        },
+        UnderlineStyle::Curly => {
+            // A wave a cell long, as high as fits under the text.
+            let half = f32::from(metrics.cell_width) / 2.;
+            let amplitude = (thickness * 1.5).max(1.5).min(top + line_height - y - thickness / 2.).max(1.);
+            let mid = y + thickness / 2.;
+            let mut path = gpui::PathBuilder::stroke(px(thickness));
+            path.move_to(point(px(left), px(mid)));
+            let mut x = left;
+            let mut up = true;
+            while x < left + width {
+                let next = (x + half).min(left + width);
+                let peak = if up { mid - amplitude * 2. } else { mid + amplitude * 2. };
+                path.curve_to(point(px(next), px(mid)), point(px((x + next) / 2.), px(peak)));
+                x = next;
+                up = !up;
+            }
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    }
+}
+
 fn paint_text(
     cells: Bounds<Pixels>,
     text: &str,
@@ -192,7 +257,8 @@ fn paint_text(
         font: styled_font(metrics, run),
         color,
         background_color: None,
-        underline: run.underline.then_some(UnderlineStyle { thickness: px(1.), color: Some(color), wavy: false }),
+        // Underlines are drawn on their own (see `paint_underlines`).
+        underline: None,
         strikethrough: run.strikeout.then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
     };
     let shaped = window.text_system().shape_line(text.to_owned().into(), metrics.font_size, &[text_run], None);

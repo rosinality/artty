@@ -41,6 +41,45 @@ pub struct FrameLine {
     pub matches: Vec<FrameRect>,
     /// Parts of images, drawn over the backgrounds and under the text.
     pub images: Vec<FrameImage>,
+    /// Underlined cells, drawn over the text.
+    pub underlines: Vec<FrameUnderline>,
+}
+
+/// Consecutive cells underlined alike.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FrameUnderline {
+    pub column: usize,
+    pub width: usize,
+    pub style: UnderlineStyle,
+    pub color: Rgb,
+}
+
+/// How a cell is underlined (`SGR 4`, `4:2` ... `4:5`, `21`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum UnderlineStyle {
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+impl UnderlineStyle {
+    fn of(flags: Flags) -> Option<Self> {
+        Some(if flags.contains(Flags::UNDERCURL) {
+            UnderlineStyle::Curly
+        } else if flags.contains(Flags::DOUBLE_UNDERLINE) {
+            UnderlineStyle::Double
+        } else if flags.contains(Flags::DOTTED_UNDERLINE) {
+            UnderlineStyle::Dotted
+        } else if flags.contains(Flags::DASHED_UNDERLINE) {
+            UnderlineStyle::Dashed
+        } else if flags.contains(Flags::UNDERLINE) {
+            UnderlineStyle::Single
+        } else {
+            return None;
+        })
+    }
 }
 
 /// Consecutive cells showing one row of an image: from its cell
@@ -63,7 +102,6 @@ pub struct FrameRun {
     pub fg: Rgb,
     pub bold: bool,
     pub italic: bool,
-    pub underline: bool,
     pub strikeout: bool,
 }
 
@@ -90,7 +128,6 @@ struct Style {
     fg: Rgb,
     bold: bool,
     italic: bool,
-    underline: bool,
     strikeout: bool,
 }
 
@@ -246,6 +283,15 @@ impl LineBuilder {
             }
         }
 
+        // Underlines are drawn on their own, so underlined spaces show too.
+        if let Some(style) = UnderlineStyle::of(flags) {
+            let color = cell.underline_color().map_or(fg, |color| theme.resolve(color, colors));
+            match self.line.underlines.last_mut() {
+                Some(u) if u.style == style && u.color == color && u.column + u.width == column => u.width += width,
+                _ => self.line.underlines.push(FrameUnderline { column, width, style, color }),
+            }
+        }
+
         if cell.c == ' ' && cell.zerowidth().is_none() || flags.contains(Flags::HIDDEN) {
             // Blank cells only matter as a gap: end the run unless it can absorb
             // the space and stay on the grid.
@@ -262,7 +308,6 @@ impl LineBuilder {
             fg,
             bold: flags.contains(Flags::BOLD),
             italic: flags.contains(Flags::ITALIC),
-            underline: flags.intersects(Flags::ALL_UNDERLINES),
             strikeout: flags.contains(Flags::STRIKEOUT),
         };
         let ascii = cell.c.is_ascii() && cell.zerowidth().is_none();
@@ -289,7 +334,6 @@ impl LineBuilder {
             fg: style.fg,
             bold: style.bold,
             italic: style.italic,
-            underline: style.underline,
             strikeout: style.strikeout,
         };
         if ascii {
@@ -345,6 +389,21 @@ mod tests {
 
     fn texts(line: &FrameLine) -> Vec<(usize, &str)> {
         line.runs.iter().map(|r| (r.column, r.text.as_str())).collect()
+    }
+
+    #[test]
+    fn underlines_keep_their_style_and_color() {
+        // Curly in red (as editors mark errors), then a double underline (4:2),
+        // then a plain one across spaces.
+        let frame = frame_for(b"\x1b[4:3;58:2::255:0:0mab\x1b[0m \x1b[4:2mc\x1b[0m \x1b[4m  \x1b[0m");
+        let underlines: Vec<_> = frame.lines[0].underlines.iter().map(|u| (u.column, u.width, u.style)).collect();
+        assert_eq!(
+            underlines,
+            vec![(0, 2, UnderlineStyle::Curly), (3, 1, UnderlineStyle::Double), (5, 2, UnderlineStyle::Single)]
+        );
+        assert_eq!(frame.lines[0].underlines[0].color, Rgb { r: 255, g: 0, b: 0 });
+        // Without a color of its own, an underline takes the text's.
+        assert_eq!(frame.lines[0].underlines[1].color, frame.foreground);
     }
 
     #[test]

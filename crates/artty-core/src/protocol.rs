@@ -378,7 +378,6 @@ mod tests {
                 fg: Rgb { r: 1, g: 2, b: 3 },
                 bold: false,
                 italic: false,
-                underline: false,
                 strikeout: false,
             }],
             ..Default::default()
