@@ -66,6 +66,7 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘⇧O | Open a workspace: a hidden one, or one in another window |
 | ⇧⌘A | Activity: every pane's processes, CPU and memory |
 | ⇧⌘E | Files: the focused pane's folder, on its machine |
+| ⌘⇧F | Search everything: what every pane on every server printed (history too), and Claude Code's and Codex's conversations on those machines; a line goes to its pane, selected, a conversation carries on in a new tab |
 | ⌘P / ⌘⇧P | Go to any pane on any server (fuzzy: title, workspace, folder, program, agent) / run any command (`>` in ⌘P) |
 | ⌘B | Fold the sidebar away, and back (folded, the titlebar says how many tabs need you; a click goes there) |
 | ⌃⌘[ / ⌃⌘] | Previous / next workspace |

@@ -633,6 +633,51 @@ impl Session {
         Ok(true)
     }
 
+    /// Lines with `text` in the output, history too, newest first, at most
+    /// `max`: each its line from the top of the history, the match's column
+    /// and length (in characters), and the line. Case is ignored unless
+    /// `text` has capitals.
+    pub fn find_lines(&self, text: &str, max: usize) -> Vec<(u64, usize, usize, String)> {
+        let exact = text.chars().any(char::is_uppercase);
+        let wanted = if exact { text.to_owned() } else { text.to_lowercase() };
+        let term = self.term.lock();
+        let history = term.history_size() as i64;
+        let mut found = Vec::new();
+        let mut line = term.bottommost_line();
+        while line >= term.topmost_line() && found.len() < max {
+            let row = term.bounds_to_string(
+                Point::new(line, Column(0)),
+                Point::new(line, term.last_column()),
+            );
+            let row = row.trim_end();
+            let haystack = if exact { row.to_owned() } else { row.to_lowercase() };
+            if let Some(at) = haystack.find(&wanted) {
+                let column = haystack[..at].chars().count();
+                let from_top = (i64::from(line.0) + history) as u64;
+                found.push((from_top, column, wanted.chars().count(), row.to_owned()));
+            }
+            line -= 1;
+        }
+        found
+    }
+
+    /// Select what [`Session::find_lines`] found at `line` (from the top of
+    /// the history), and scroll to it.
+    pub fn reveal(&mut self, line: u64, column: usize, length: usize) {
+        let mut term = self.term.lock();
+        let history = term.history_size() as i64;
+        let line = Line((line as i64 - history) as i32)
+            .max(term.topmost_line())
+            .min(term.bottommost_line());
+        let last = term.last_column();
+        let start = Point::new(line, Column(column.min(last.0)));
+        let end = Point::new(line, Column((column + length.max(1) - 1).min(last.0)));
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        term.selection = Some(selection);
+        term.scroll_to_point(start);
+    }
+
     /// Drop the scrollback and ask the program to redraw (Clear Buffer).
     pub fn clear_buffer(&self) {
         use artty_vt::ansi::{ClearMode, Handler};

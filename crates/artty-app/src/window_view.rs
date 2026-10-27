@@ -41,6 +41,8 @@ mod files_drawer;
 mod palette;
 #[path = "pane_actions.rs"]
 mod pane_actions;
+#[path = "search_view.rs"]
+mod search_view;
 
 actions!(
     artty,
@@ -95,7 +97,8 @@ actions!(
         ToggleFiles,
         ToggleSidebar,
         GoTo,
-        RunCommand
+        RunCommand,
+        SearchEverything
     ]
 );
 
@@ -379,6 +382,8 @@ pub struct WindowView {
     sidebar_hidden: bool,
     /// The palette (⌘P, ⌘⇧P), when open.
     palette: Option<palette::Palette>,
+    /// Search everything (⌘⇧F), when open.
+    search_all: Option<search_view::SearchAll>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -493,6 +498,7 @@ impl WindowView {
             files: None,
             sidebar_hidden: false,
             palette: None,
+            search_all: None,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -1486,6 +1492,10 @@ impl WindowView {
         }
         if self.palette.is_some() {
             self.palette_key(event, window, cx);
+            return;
+        }
+        if self.search_all.is_some() {
+            self.search_all_key(event, cx);
             return;
         }
         if self.context_menu.take().is_some() {
@@ -3336,6 +3346,7 @@ impl Render for WindowView {
             .on_action(
                 cx.listener(|this, _: &GoTo, window, cx| this.open_palette(false, window, cx)),
             )
+            .on_action(cx.listener(|this, _: &SearchEverything, _, cx| this.open_search_all(cx)))
             .on_action(
                 cx.listener(|this, _: &RunCommand, window, cx| this.open_palette(true, window, cx)),
             )
@@ -3590,6 +3601,7 @@ impl Render for WindowView {
             .children(self.context_menu_overlay(window.viewport_size(), cx))
             .children(self.picker_overlay(cx))
             .children(self.palette_overlay(cx))
+            .children(self.search_all_overlay(cx))
             .children(self.ask_overlay(cx))
     }
 }
@@ -3649,6 +3661,10 @@ impl EntityInputHandler for WindowView {
         }
         if self.palette.is_some() {
             self.palette_text(text, cx);
+            return;
+        }
+        if self.search_all.is_some() {
+            self.search_all_text(text, cx);
             return;
         }
         if let Some(picker) = self.picker.as_mut() {
@@ -3719,6 +3735,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-b", ToggleSidebar, None),
         KeyBinding::new("cmd-p", GoTo, None),
         KeyBinding::new("cmd-shift-p", RunCommand, None),
+        KeyBinding::new("cmd-shift-f", SearchEverything, None),
         KeyBinding::new("ctrl-cmd-]", NextWorkspace, None),
         KeyBinding::new("ctrl-cmd-[", PreviousWorkspace, None),
         KeyBinding::new("cmd-w", ClosePane, None),

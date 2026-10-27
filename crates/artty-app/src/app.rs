@@ -11,9 +11,9 @@ use crate::window_view::{
     JumpToAttention, JumpToNextPrompt, JumpToPreviousPrompt, MoveTabDown, MoveTabUp, NewTab,
     NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, PaneToNewTab, Paste,
     PreviousPane, PreviousTab, PreviousWorkspace, RenameTab, ReopenClosedTab, ResetFontSize,
-    ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp, RunCommand, ShowActivity,
-    SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleBroadcast,
-    ToggleFiles, ToggleSidebar, ToggleZoom,
+    ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp, RunCommand, SearchEverything,
+    ShowActivity, SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp,
+    ToggleBroadcast, ToggleFiles, ToggleSidebar, ToggleZoom,
 };
 
 actions!(
@@ -128,6 +128,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::action("Go to…", GoTo),
                 MenuItem::action("Run Command…", RunCommand),
+                MenuItem::action("Search Everything…", SearchEverything),
                 MenuItem::separator(),
                 MenuItem::action("Rename Tab…", RenameTab),
                 MenuItem::action("Move Tab Up", MoveTabUp),

@@ -93,6 +93,11 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
                     tag(&mut window.window);
                 }
             },
+            Reply::Found(hits) => {
+                for hit in hits {
+                    tag(&mut hit.pane);
+                }
+            },
             Reply::Link(_)
             | Reply::Text(_)
             | Reply::Path(_)
@@ -100,7 +105,8 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
             | Reply::Output(_)
             | Reply::Upload(_)
             | Reply::File(_)
-            | Reply::Dir(_) => {},
+            | Reply::Dir(_)
+            | Reply::Sessions(_) => {},
         },
         ServerMessage::Image(image) => tag(&mut image.id),
         ServerMessage::Welcome { .. }
@@ -136,7 +142,8 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
         | ClientMessage::SetRatio { window, .. }
         | ClientMessage::EqualizePanes { window }
         | ClientMessage::ToggleBroadcast { window }
-        | ClientMessage::ReopenClosedTab { window } => untag(window),
+        | ClientMessage::ReopenClosedTab { window }
+        | ClientMessage::ResumeSession { window, .. } => untag(window),
         ClientMessage::NewTab { window, workspace, .. } => {
             untag(window);
             if let Some(workspace) = workspace {
@@ -156,6 +163,7 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
         | ClientMessage::JumpToPrompt { pane, .. }
         | ClientMessage::CopyMode { pane, .. }
         | ClientMessage::Unwatch { pane }
+        | ClientMessage::Reveal { pane, .. }
         | ClientMessage::PaneToNewTab { pane } => untag(pane),
         ClientMessage::CloseTab { workspace, .. }
         | ClientMessage::SelectTab { workspace, .. }
@@ -194,7 +202,8 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
             | Query::Upload { pane, .. }
             | Query::ReadFile { pane, .. }
             | Query::ListDir { pane, .. } => untag(pane),
-            Query::DetachedWindows => {},
+            Query::DetachedWindows | Query::SearchOutput { .. } | Query::SearchSessions { .. } => {
+            },
         },
         ClientMessage::Control { .. }
         | ClientMessage::Ack { .. }

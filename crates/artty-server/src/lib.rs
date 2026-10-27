@@ -8,6 +8,7 @@
 mod handover;
 mod inbox;
 mod server;
+mod sessions;
 mod watch;
 
 use std::io::{self, BufRead, BufReader, Write};

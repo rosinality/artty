@@ -1981,6 +1981,52 @@ mod tests {
         let told = exchange(ClientMessage::Input { pane, bytes: cd.into_bytes() }, &changed);
         assert!(matches!(told, ServerMessage::DirChanged { pane: p } if p == pane));
 
+        // Everything searched: a pane's output (then shown, selected), and
+        // an agent's conversation in this machine's transcripts.
+        // (Typed as it isn't printed: the output line alone is "zq-needle-42".)
+        let echo = b"printf 'zq-needle-%s\\n' 42\r".to_vec();
+        exchange(ClientMessage::Input { pane, bytes: echo }, &|m| {
+            matches!(m, ServerMessage::Frame { .. }).then_some(m)
+        });
+        let search = |text: &str| ClientMessage::Query {
+            id: 9,
+            query: Query::SearchOutput { text: text.to_owned() },
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let hit = loop {
+            let reply = exchange(search("ZQ-NEEDLE-42".to_lowercase().as_str()), &|m| {
+                matches!(m, ServerMessage::Reply { id: 9, .. }).then_some(m)
+            });
+            let ServerMessage::Reply { reply: Reply::Found(hits), .. } = reply else { panic!() };
+            // (The output line, not the command typed.)
+            if let Some(hit) = hits.into_iter().find(|h| h.text.trim() == "zq-needle-42") {
+                break hit;
+            }
+            assert!(Instant::now() < deadline, "not found");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!((hit.pane, hit.column, hit.length), (pane, 0, 12));
+        // Shown, selected: the screen changes.
+        let reveal = ClientMessage::Reveal { pane, line: hit.line, column: 0, length: 12 };
+        exchange(reveal, &|m| matches!(m, ServerMessage::Frame { .. }).then_some(m));
+        let transcripts = dir.join(".claude/projects/-tmp-x");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        std::fs::write(
+            transcripts.join("11111111-2222-3333-4444-555555555555.jsonl"),
+            r#"{"type":"user","cwd":"/tmp/x","message":{"role":"user","content":"find the zq-giraffe"}}"#,
+        )
+        .unwrap();
+        let sessions = ClientMessage::Query {
+            id: 9,
+            query: Query::SearchSessions { text: "zq-giraffe".into() },
+        };
+        let reply =
+            exchange(sessions, &|m| matches!(m, ServerMessage::Reply { id: 9, .. }).then_some(m));
+        let ServerMessage::Reply { reply: Reply::Sessions(hits), .. } = reply else { panic!() };
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].session, "11111111-2222-3333-4444-555555555555");
+        assert_eq!(hits[0].cwd.as_deref(), Some(Path::new("/tmp/x")));
+
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         exchange(stop, &|m| matches!(m, ServerMessage::Stopping { .. }).then_some(m));
         let _ = child.wait();

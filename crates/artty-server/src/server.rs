@@ -14,9 +14,10 @@ use artty_core::control::{
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
-    AppCommand, ClientMessage, DirEntry, Existing, FileChunk, Listing, PaneSpec, PaneState, Query,
-    Reply, SelectionOp, ServerMessage, TabLayout, UploadError, UploadTo, Uploaded,
-    WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
+    AppCommand, ClientMessage, DirEntry, Existing, FileChunk, Listing, OutputHit, PaneSpec,
+    PaneState, Query, Reply, SelectionOp, ServerMessage, TabLayout, UploadError, UploadTo,
+    Uploaded, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId,
+    WorkspaceLayout,
 };
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
@@ -1841,6 +1842,31 @@ impl Server {
             },
             ClientMessage::Ping { id } => self.send(client, ServerMessage::Pong { id }),
             ClientMessage::Unwatch { pane } => self.watches.unwatch(client, pane),
+            ClientMessage::Reveal { pane, line, column, length } => {
+                if let Some(state) = self.panes.get_mut(&pane) {
+                    state.session.reveal(line, column, length);
+                }
+                self.focus_pane(pane);
+                self.mark_dirty(pane);
+            },
+            ClientMessage::ResumeSession { window, agent, session, cwd } => {
+                let command =
+                    self.config.resume.get(&agent).and_then(|r| r.command(Some(&session)));
+                let Some(command) = command else {
+                    return log::warn!("no way to resume {agent} configured");
+                };
+                let before = self.focused_pane();
+                let spec = PaneSpec { command: None, cwd: cwd.filter(|c| c.is_dir()), title: None };
+                match self.open_tab(window, None, spec, true) {
+                    Ok(pane) => {
+                        if let Some(pane) = self.panes.get_mut(&pane) {
+                            pane.type_when_ready(command);
+                        }
+                    },
+                    Err(err) => log::error!("{err}"),
+                }
+                self.report_focus_change(before);
+            },
             ClientMessage::Appearance { theme, cursor } => {
                 self.appearance = true;
                 if *self.theme != theme || self.cursor != cursor {
@@ -1861,6 +1887,15 @@ impl Server {
                     state.session.clear_buffer();
                 }
                 self.mark_dirty(pane);
+            },
+            // Reading agents' transcripts takes a while: off the main loop.
+            ClientMessage::Query { id, query: Query::SearchSessions { text } } => {
+                let Some(tx) = self.clients.get(&client).map(|c| c.tx.clone()) else { return };
+                let _ =
+                    std::thread::Builder::new().name("artty-sessions".into()).spawn(move || {
+                        let reply = Reply::Sessions(crate::sessions::search(&text));
+                        let _ = tx.send(ServerMessage::Reply { id, reply });
+                    });
             },
             ClientMessage::Query { id, query } => {
                 let reply = match query {
@@ -1898,6 +1933,8 @@ impl Server {
                     Query::Upload { pane: _, upload, name, data, last, to } => {
                         Reply::Upload(self.upload(client, upload, &name, &data, last, to))
                     },
+                    Query::SearchOutput { text } => Reply::Found(self.search_output(&text)),
+                    Query::SearchSessions { .. } => unreachable!("handled before"),
                     Query::ListDir { pane, path, known, watch } => {
                         let follows = path.is_none();
                         let mut listing = self.list_dir(pane, path, known);
@@ -2122,6 +2159,24 @@ impl Server {
         })?;
         let modified = modified_time(&path).unwrap_or_default();
         Ok(Some(Uploaded { path, modified }))
+    }
+
+    /// Lines with `text` in every pane's output, newest first in each, a few
+    /// per pane and so many in all.
+    fn search_output(&self, text: &str) -> Vec<OutputHit> {
+        const PER_PANE: usize = 20;
+        const ALL: usize = 300;
+        if text.trim().is_empty() {
+            return Vec::new();
+        }
+        let mut hits = Vec::new();
+        for (&pane, state) in &self.panes {
+            let left = ALL.saturating_sub(hits.len()).min(PER_PANE);
+            for (line, column, length, text) in state.session.find_lines(text, left) {
+                hits.push(OutputHit { pane, line, column, length, text });
+            }
+        }
+        hits
     }
 
     /// What's in `path` (else the pane's current directory): folders

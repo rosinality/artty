@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -473,6 +473,21 @@ pub enum ClientMessage {
     Unwatch {
         pane: PaneId,
     },
+    /// Show a match from [`Query::SearchOutput`]: select it and scroll to it.
+    Reveal {
+        pane: PaneId,
+        line: u64,
+        column: usize,
+        length: usize,
+    },
+    /// Carry on an agent's conversation ([`SessionHit`]) in a new tab of
+    /// `window`, in its directory.
+    ResumeSession {
+        window: WindowId,
+        agent: String,
+        session: String,
+        cwd: Option<PathBuf>,
+    },
     /// Screen updates up to [`ServerMessage::Sync`] `seq` have arrived: the
     /// server sends more (it holds them back while two batches are unseen,
     /// so a slow link gets the newest screens rather than a backlog).
@@ -546,6 +561,16 @@ pub enum Query {
         known: Option<u64>,
         watch: bool,
     },
+    /// Lines with `text` in every pane's output, history too (case
+    /// ignored unless `text` has capitals), newest first: [`Reply::Found`].
+    SearchOutput {
+        text: String,
+    },
+    /// Coding agents' conversations on this machine mentioning `text`
+    /// (Claude Code's, Codex's), newest first: [`Reply::Sessions`].
+    SearchSessions {
+        text: String,
+    },
     /// Part of a file on the pane's machine, from `offset`: answered with
     /// [`Reply::File`].
     ReadFile {
@@ -569,6 +594,38 @@ pub enum Reply {
     Upload(Result<Option<Uploaded>, UploadError>),
     File(Result<FileChunk, String>),
     Dir(Result<Listing, String>),
+    Found(Vec<OutputHit>),
+    Sessions(Vec<SessionHit>),
+}
+
+/// A line of a pane's output with what was searched for
+/// ([`Query::SearchOutput`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OutputHit {
+    pub pane: PaneId,
+    /// Its line, counted from the top of the pane's history (where it is
+    /// for [`ClientMessage::Reveal`]).
+    pub line: u64,
+    pub column: usize,
+    pub length: usize,
+    pub text: String,
+}
+
+/// An agent's conversation mentioning what was searched for
+/// ([`Query::SearchSessions`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionHit {
+    /// `claude` or `codex`.
+    pub agent: String,
+    pub session: String,
+    /// Where it was had.
+    pub cwd: Option<PathBuf>,
+    /// Its first request, shortened.
+    pub title: String,
+    /// The text around the match.
+    pub snippet: String,
+    /// Last written, seconds since the epoch.
+    pub modified: u64,
 }
 
 /// Where a file sent to a pane's machine goes ([`Query::Upload`]).
