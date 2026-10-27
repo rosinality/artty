@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 
 use artty_core::control::{
-    PaneProcesses, ProcessRow, Request, Response, ServerUsage, WorkspaceInfo,
+    PaneProcesses, ProcessRow, Request, Response, ServerInfo, ServerUsage, WorkspaceInfo,
 };
 
 use super::*;
@@ -29,6 +29,8 @@ pub(super) struct Activity {
     panes: Vec<PaneProcesses>,
     workspaces: Vec<WorkspaceInfo>,
     server: Option<ServerUsage>,
+    /// The server's build, uptime and what it holds.
+    info: Option<ServerInfo>,
     sort: Sort,
     collapsed: HashSet<Group>,
     filter: String,
@@ -153,11 +155,15 @@ impl WindowView {
         activity.loading = true;
         let processes = app_state::control(Request::Processes { tab: None }, cx);
         let workspaces = app_state::control(Request::Workspaces, cx);
+        let status = app_state::control(Request::ServerStatus, cx);
         cx.spawn(async move |this, cx| {
-            let (processes, workspaces) = (processes.await, workspaces.await);
+            let (processes, workspaces, status) = (processes.await, workspaces.await, status.await);
             let _ = this.update(cx, |this, cx| {
                 let Some(activity) = this.activity.as_mut() else { return };
                 activity.loading = false;
+                if let Ok(Response::Server { info }) = status {
+                    activity.info = Some(info);
+                }
                 match (processes, workspaces) {
                     (
                         Ok(Response::Processes { panes, server }),
@@ -287,14 +293,6 @@ impl WindowView {
         let cpu_history: Vec<f32> = history.iter().map(|h| h.0).collect();
         let memory_history: Vec<f32> = history.iter().map(|h| h.1 as f32).collect();
         let peak_memory = memory_history.iter().copied().fold(0., f32::max) * 1.25;
-        let server = activity.server.as_ref().map(|server| {
-            format!(
-                "Server {:.1}% · {} (pid {})",
-                server.cpu_percent,
-                crate::cli::bytes(server.memory_bytes),
-                server.pid
-            )
-        });
         let gauge = |label: String, graph: gpui::Div| {
             div()
                 .flex()
@@ -303,27 +301,24 @@ impl WindowView {
                 .child(div().text_color(rgba(0xffffffd0)).child(label))
                 .child(div().p(px(4.)).rounded(px(5.)).bg(rgba(0x0000002e)).child(graph))
         };
-        let summary = div()
-            .flex()
-            .items_end()
-            .gap(px(20.))
-            .child(gauge(
-                format!("CPU {:.1}%", cpu(&all)),
-                sparkline(&cpu_history, 100., 180., 30., 0x8fb4ffcc),
-            ))
-            .child(gauge(
-                format!("Memory {}", crate::cli::bytes(memory(&all))),
-                sparkline(&memory_history, peak_memory, 180., 30., 0xbb9af7cc),
-            ))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .text_color(rgba(0xffffff90))
-                    .child(format!("{process_count} processes in {} panes", activity.panes.len()))
-                    .when_some(server, |d, server| d.child(server)),
-            );
+        let summary =
+            div()
+                .flex()
+                .items_end()
+                .gap(px(20.))
+                .child(gauge(
+                    format!("CPU {:.1}%", cpu(&all)),
+                    sparkline(&cpu_history, 100., 180., 30., 0x8fb4ffcc),
+                ))
+                .child(gauge(
+                    format!("Memory {}", crate::cli::bytes(memory(&all))),
+                    sparkline(&memory_history, peak_memory, 180., 30., 0xbb9af7cc),
+                ))
+                .child(
+                    div().flex().flex_col().gap(px(2.)).text_color(rgba(0xffffff90)).child(
+                        format!("{process_count} processes in {} panes", activity.panes.len()),
+                    ),
+                );
 
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         for (workspace, panes) in &groups {
@@ -423,6 +418,7 @@ impl WindowView {
                             }),
                     ),
             )
+            .when(activity.loaded, |d| d.child(self.server_strip(activity, cx)))
             .when_some(activity.error.clone(), |d, error| {
                 d.child(div().pb(px(8.)).text_color(rgba(0xf7768eff)).child(error))
             })
@@ -461,6 +457,82 @@ impl WindowView {
                         )
                     }),
             )
+    }
+
+    /// The server: whether it runs the app's build, what it holds and uses,
+    /// and a restart that hands its sessions over (programs keep running).
+    fn server_strip(&self, activity: &Activity, cx: &Context<Self>) -> gpui::Div {
+        let different = cx.global::<app_state::Shared>().server_mismatch.is_some();
+        let lost = activity.error.is_some();
+        let (dot, status) = match (lost, different) {
+            (true, _) => (0xf7768eff, "Server not answering".to_owned()),
+            (false, true) => (0xe0af68ff, "Server runs a different build".to_owned()),
+            (false, false) => (0x9ece6aff, "Server running".to_owned()),
+        };
+        let mut facts: Vec<String> = Vec::new();
+        if let Some(info) = &activity.info {
+            facts.push(format!("up {}", crate::cli::duration(info.uptime_secs)));
+            facts.push(format!("pid {}", info.pid));
+        }
+        if let Some(usage) = &activity.server {
+            facts.push(format!(
+                "CPU {:.1}% · {}",
+                usage.cpu_percent,
+                crate::cli::bytes(usage.memory_bytes)
+            ));
+        }
+        if let Some(info) = &activity.info {
+            let plural = |n: usize, one: &str, many: &str| {
+                format!("{n} {}", if n == 1 { one } else { many })
+            };
+            let detached = info.windows - info.attached_windows.min(info.windows);
+            facts.push(if detached > 0 {
+                format!("{} ({detached} detached)", plural(info.windows, "window", "windows"))
+            } else {
+                plural(info.windows, "window", "windows")
+            });
+            facts.push(plural(info.workspaces, "workspace", "workspaces"));
+            facts.push(plural(info.panes, "pane", "panes"));
+            facts.push(plural(info.clients, "app connected", "apps connected"));
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .mb(px(10.))
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(px(7.))
+            .bg(rgba(0x0000002e))
+            .child(div().flex_none().size(px(8.)).rounded_full().bg(rgba(dot)))
+            .child(div().flex_none().text_color(rgba(0xffffffd0)).child(status))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .line_clamp(1)
+                    .text_ellipsis()
+                    .text_color(rgba(0xffffff80))
+                    .child(facts.join(" · ")),
+            )
+            .when(!lost, |d| {
+                d.child(
+                    div()
+                        .id("restart-server")
+                        .flex_none()
+                        .px(px(8.))
+                        .py(px(2.))
+                        .rounded(px(5.))
+                        .bg(if different { rgba(0x3478f6ff) } else { rgba(0xffffff14) })
+                        .hover(|d| {
+                            d.bg(if different { rgba(0x4a88ffff) } else { rgba(0xffffff26) })
+                        })
+                        .text_color(rgba(0xffffffe0))
+                        .child(if different { "Update Server" } else { "Restart Server" })
+                        .on_click(cx.listener(|_, _, _, cx| app_state::restart_server(cx))),
+                )
+            })
     }
 
     /// A row's CPU, memory and time cells.
