@@ -258,9 +258,18 @@ Like this Mac's, that server keeps its sessions running on its own, and it
 sends screens rather than a stream of output, so a dropped connection —
 sleep, a new network — loses nothing: artty reconnects with backoff (a
 click on the server's header tries at once) and shows the same tabs again.
-A server running another artty build says so in its header. Tabs and panes
-stay on their server (they can't be dragged to another); Activity and the
-workspace picker show this Mac's.
+A server running another artty build says so in its header, which also
+shows its round trip. Tabs and panes stay on their server (they can't be
+dragged to another); Activity and the workspace picker (⌘⇧O) show every
+server's.
+
+Slow and flaky links: the server holds back screen updates while two
+batches are unacknowledged, then sends the newest screens — so a flood of
+output never queues up ahead of what you type (over a 100 ms link, a key
+still comes back in 100 ms while `yes` runs), and ssh compresses what goes
+through. The app pings each server every 5 s: 15 s of silence, or no answer
+within 4 s after the Mac wakes or its network changes, and it reconnects
+(ssh alone can take minutes to notice a dead network).
 
 ## Images
 

@@ -46,6 +46,14 @@ pub struct Connection {
     attempt: u64,
     /// It said it's ending every session: don't reconnect by ourselves.
     stopped: bool,
+    /// When it last sent anything, and the ping awaiting its answer.
+    last_heard: Instant,
+    ping: Option<(u64, Instant)>,
+    /// How long its last ping took to come back.
+    pub latency: Option<Duration>,
+    /// Checking it's still there (after a wake or a network change): lost
+    /// if nothing comes by then.
+    probe_until: Option<Instant>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +82,10 @@ impl Connection {
             failures: 0,
             attempt: 0,
             stopped: false,
+            last_heard: Instant::now(),
+            ping: None,
+            latency: None,
+            probe_until: None,
         }
     }
 
@@ -81,6 +93,9 @@ impl Connection {
     fn close(&mut self) {
         self.outgoing = None;
         self.attaching.clear();
+        self.ping = None;
+        self.latency = None;
+        self.probe_until = None;
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             std::thread::spawn(move || child.wait());
@@ -125,6 +140,10 @@ pub struct Shared {
     reconnecting: bool,
     /// When the connection was last lost, to stop reconnecting in a loop.
     lost_at: Option<Instant>,
+    /// For noticing wakes and network changes: the last second's tick and
+    /// the interface addresses then.
+    last_tick: Option<Instant>,
+    addresses: Option<Vec<String>>,
 }
 
 impl Global for Shared {}
@@ -228,6 +247,8 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         stopped: false,
         reconnecting: false,
         lost_at: None,
+        last_tick: None,
+        addresses: None,
     });
     connect_and_open(spec, cx);
 
@@ -238,6 +259,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
                 // Windows that closed since: detach them in the server.
                 window_view::flush_detached(cx);
                 sync_servers(cx);
+                heartbeat(cx);
                 check_for_update(cx);
                 forget_unshown_images(cx);
                 crate::keymap::refresh(cx);
@@ -425,6 +447,12 @@ fn start_io(
             }
             let lost = batch.iter().any(Option::is_none);
             let handled = cx.update(|cx| {
+                if let Some(connection) =
+                    cx.global_mut::<Shared>().connections.get_mut(server as usize)
+                {
+                    connection.last_heard = Instant::now();
+                    connection.probe_until = None;
+                }
                 for mut message in batch.into_iter().flatten() {
                     ids::incoming(server, &mut message);
                     handle(server, message, cx);
@@ -633,6 +661,17 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
             }
         },
         ServerMessage::Image(image) => receive_image(image, cx),
+        // The screens before it are applied: ready for more.
+        ServerMessage::Sync { seq } => send_to(server, ClientMessage::Ack { seq }, cx),
+        ServerMessage::Pong { id } => {
+            if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize)
+                && let Some((sent_id, sent)) = connection.ping
+                && sent_id == id
+            {
+                connection.ping = None;
+                connection.latency = Some(sent.elapsed());
+            }
+        },
     }
 }
 
@@ -879,6 +918,121 @@ fn sync_servers(cx: &mut App) {
             connection.status = Status::Off("removed from the settings".to_owned());
         }
     }
+}
+
+/// Pings every few seconds; a remote silent for long is taken for lost
+/// (ssh can take minutes to notice a dead network). After a wake or a
+/// network change, remotes are checked at once: one waiting reconnects now,
+/// one connected must answer within seconds.
+fn heartbeat(cx: &mut App) {
+    const PING_EVERY: Duration = Duration::from_secs(5);
+    const SILENCE: Duration = Duration::from_secs(15);
+    const PROBE: Duration = Duration::from_secs(4);
+    let now = Instant::now();
+    let changed = network_changed(cx);
+    let next_ping = cx.global::<Shared>().next_request;
+    let mut lost = Vec::new();
+    let mut retry = Vec::new();
+    let count = cx.global::<Shared>().connections.len();
+    for server in 0..count {
+        let connection = &mut cx.global_mut::<Shared>().connections[server];
+        let remote = connection.remote.is_some();
+        if connection.outgoing.is_none() {
+            if changed && remote && matches!(connection.status, Status::Waiting { .. }) {
+                retry.push(server as ServerId);
+            }
+            continue;
+        }
+        if changed && remote {
+            connection.probe_until.get_or_insert(now + PROBE);
+            connection.ping = None;
+        }
+        let silent = now.duration_since(connection.last_heard);
+        if remote && (silent >= SILENCE || connection.probe_until.is_some_and(|until| now >= until))
+        {
+            lost.push(server as ServerId);
+            continue;
+        }
+        let due = connection.ping.is_none_or(|(_, sent)| now.duration_since(sent) >= PING_EVERY);
+        if due {
+            connection.ping = Some((next_ping + server as u64, now));
+            send_to(server as ServerId, ClientMessage::Ping { id: next_ping + server as u64 }, cx);
+        }
+    }
+    cx.global_mut::<Shared>().next_request += count as u64;
+    for server in lost {
+        log::warn!("server {server}: no answer; reconnecting");
+        // Ending what carries it ends the connection: `remote_lost` follows.
+        if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize)
+            && let Some(child) = connection.child.as_mut()
+        {
+            let _ = child.kill();
+        }
+    }
+    for server in retry {
+        connect_remote(server, cx);
+    }
+}
+
+/// Whether the Mac woke or its network changed since the last call: a gap
+/// in this once-a-second loop, or different interface addresses.
+fn network_changed(cx: &mut App) -> bool {
+    let now = Instant::now();
+    let addresses = interface_addresses();
+    let shared = cx.global_mut::<Shared>();
+    let woke = shared.last_tick.is_some_and(|at| now.duration_since(at) > Duration::from_secs(10));
+    let moved = shared.addresses.as_ref().is_some_and(|before| *before != addresses);
+    shared.last_tick = Some(now);
+    shared.addresses = Some(addresses);
+    if woke || moved {
+        log::info!("network: {}", if woke { "woke" } else { "addresses changed" });
+    }
+    woke || moved
+}
+
+/// The addresses of the network interfaces that are up (not loopback).
+fn interface_addresses() -> Vec<String> {
+    let mut list = Vec::new();
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills a list we free below; we only read it.
+    unsafe {
+        if libc::getifaddrs(&mut head) != 0 {
+            return list;
+        }
+        let mut entry = head;
+        while !entry.is_null() {
+            let ifa = &*entry;
+            entry = ifa.ifa_next;
+            let flags = ifa.ifa_flags as i32;
+            if ifa.ifa_addr.is_null()
+                || flags & libc::IFF_UP == 0
+                || flags & libc::IFF_LOOPBACK != 0
+            {
+                continue;
+            }
+            let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy();
+            let address = match i32::from((*ifa.ifa_addr).sa_family) {
+                libc::AF_INET => {
+                    let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
+                    std::net::Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)).to_string()
+                },
+                libc::AF_INET6 => {
+                    let sin6 = &*(ifa.ifa_addr as *const libc::sockaddr_in6);
+                    std::net::Ipv6Addr::from(sin6.sin6_addr.s6_addr).to_string()
+                },
+                _ => continue,
+            };
+            list.push(format!("{name} {address}"));
+        }
+        libc::freeifaddrs(head);
+    }
+    list.sort();
+    list
+}
+
+/// How long `server`'s last ping took, for the sidebar.
+pub fn latency(server: ServerId, cx: &App) -> Option<Duration> {
+    cx.global::<Shared>().connections.get(server as usize)?.latency
 }
 
 /// Connect to a configured server, in the background (ssh can take a while).
@@ -1144,15 +1298,14 @@ pub fn restart(cx: &mut App) {
 mod tests {
     use super::*;
 
-    /// Through a command, as through ssh: a server of its own (in a
-    /// directory of its own), greeting, a window, then stopped.
-    #[test]
-    fn reaches_a_server_through_a_command() {
+    /// A server of its own (in a directory of its own), reached through a
+    /// command as through ssh. `None` without the app binary built.
+    fn scratch_server(tag: &str) -> Option<(artty_core::remote::Opened, PathBuf)> {
         // The app binary, built beside the tests.
         let exe = std::env::current_exe().unwrap();
         let artty = exe.parent().and_then(Path::parent).map(|dir| dir.join("artty"));
-        let Some(artty) = artty.filter(|path| path.exists()) else { return };
-        let dir = std::env::temp_dir().join(format!("artty-rt-{}", std::process::id()));
+        let artty = artty.filter(|path| path.exists())?;
+        let dir = std::env::temp_dir().join(format!("artty-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("t")).unwrap();
         let d = dir.display();
         let config = ServerConfig {
@@ -1168,34 +1321,192 @@ mod tests {
             ],
             ..Default::default()
         };
-        let mut opened = artty_core::remote::open(&config).unwrap();
-        assert!(matches!(
-            opened.welcome,
-            ServerMessage::Welcome { version, .. } if version == artty_core::protocol::protocol_version()
-        ));
+        Some((artty_core::remote::open(&config).unwrap(), dir))
+    }
 
+    /// Attach a new window; returns its first pane once laid out.
+    fn attach_window(opened: &mut artty_core::remote::Opened) -> PaneId {
         let attach =
             ClientMessage::AttachWindow { window: None, spec: PaneSpec::default(), bounds: None };
         write_message(&mut opened.writer, &attach).unwrap();
-        let (mut attached, mut laid_out) = (None, false);
+        let mut attached = None;
         for _ in 0..200 {
             match read_message::<ServerMessage>(&mut opened.reader).unwrap() {
                 ServerMessage::Attached { window, .. } => attached = Some(window),
                 ServerMessage::Layout { window, layout } if Some(window) == attached => {
-                    laid_out = layout.active_tab().is_some();
+                    if let Some(tab) = layout.active_tab() {
+                        return tab.focused;
+                    }
                 },
                 _ => {},
             }
-            if laid_out {
-                break;
-            }
         }
-        assert!(laid_out, "a window with a tab");
+        panic!("no window");
+    }
 
+    fn stop(mut opened: artty_core::remote::Opened, dir: PathBuf) {
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         write_message(&mut opened.writer, &stop).unwrap();
         while read_message::<ServerMessage>(&mut opened.reader).is_ok() {}
         let _ = opened.child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Through a command, as through ssh: greeting, a window, then stopped.
+    #[test]
+    fn reaches_a_server_through_a_command() {
+        let Some((mut opened, dir)) = scratch_server("rt") else { return };
+        assert!(matches!(
+            opened.welcome,
+            ServerMessage::Welcome { version, .. } if version == artty_core::protocol::protocol_version()
+        ));
+        attach_window(&mut opened);
+        stop(opened, dir);
+    }
+
+    /// Over a real link: `ARTTY_TEST_SSH=user@host cargo test -p artty
+    /// over_ssh -- --ignored --nocapture`. Floods a pane with `yes` while
+    /// acknowledging as the app does, and reports round trips and screens.
+    #[test]
+    #[ignore]
+    fn over_ssh() {
+        let Ok(destination) = std::env::var("ARTTY_TEST_SSH") else { return };
+        let config =
+            ServerConfig { name: "test".into(), ssh: Some(destination), ..Default::default() };
+        let opened = artty_core::remote::open(&config).unwrap();
+        let artty_core::remote::Opened { mut child, mut reader, writer, .. } = opened;
+        let writer = Arc::new(std::sync::Mutex::new(writer));
+        let send =
+            |message: &ClientMessage| write_message(&mut *writer.lock().unwrap(), message).unwrap();
+        send(&ClientMessage::AttachWindow {
+            window: None,
+            spec: PaneSpec::default(),
+            bounds: None,
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(message) = read_message::<ServerMessage>(&mut reader) {
+                let size = postcard::to_stdvec(&message).map_or(0, |b| b.len());
+                if tx.send((message, size, Instant::now())).is_err() {
+                    break;
+                }
+            }
+        });
+        let (mut window, mut pane) = (None, None);
+        while pane.is_none() {
+            match rx.recv_timeout(Duration::from_secs(20)).unwrap().0 {
+                ServerMessage::Attached { window: w, .. } => window = Some(w),
+                ServerMessage::Layout { window: w, layout } if Some(w) == window => {
+                    pane = layout.active_tab().map(|t| t.focused)
+                },
+                _ => {},
+            }
+        }
+        let pane = pane.unwrap();
+        let mut rtts = Vec::new();
+        for id in 0..5 {
+            let sent = Instant::now();
+            send(&ClientMessage::Ping { id });
+            loop {
+                let (message, _, at) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                if let ServerMessage::Sync { seq } = message {
+                    send(&ClientMessage::Ack { seq });
+                }
+                if matches!(message, ServerMessage::Pong { id: got } if got == id) {
+                    rtts.push(at.duration_since(sent).as_millis());
+                    break;
+                }
+            }
+        }
+        send(&ClientMessage::Input { pane, bytes: b"yes\r".to_vec() });
+        let start = Instant::now();
+        let (mut frames, mut bytes, mut syncs) = (0, 0, 0);
+        while start.elapsed() < Duration::from_secs(5) {
+            let Ok((message, size, _)) = rx.recv_timeout(Duration::from_millis(500)) else {
+                continue;
+            };
+            bytes += size;
+            match message {
+                ServerMessage::Frame { .. } => frames += 1,
+                ServerMessage::Sync { seq } => {
+                    syncs += 1;
+                    send(&ClientMessage::Ack { seq });
+                },
+                _ => {},
+            }
+        }
+        // Typing still gets through quickly while it floods.
+        let sent = Instant::now();
+        send(&ClientMessage::Ping { id: 99 });
+        let pong = loop {
+            let (message, _, at) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            if let ServerMessage::Sync { seq } = message {
+                send(&ClientMessage::Ack { seq });
+            }
+            if matches!(message, ServerMessage::Pong { id: 99 }) {
+                break at.duration_since(sent).as_millis();
+            }
+        };
+        send(&ClientMessage::Input { pane, bytes: vec![3] });
+        send(&ClientMessage::Input { pane, bytes: b"exit\r".to_vec() });
+        println!(
+            "round trips {rtts:?} ms; flooding 5 s: {syncs} batches, {frames} screens, {} KB/s; \
+             a ping during it: {pong} ms",
+            bytes / 5 / 1024
+        );
+        let _ = child.kill();
+    }
+
+    /// Screens wait for acknowledgment: two batches unacknowledged and the
+    /// server sends no more, however much output there is, until an Ack.
+    /// And pings are answered.
+    #[test]
+    fn screens_wait_for_acknowledgment() {
+        let Some((mut opened, dir)) = scratch_server("fc") else { return };
+        let pane = attach_window(&mut opened);
+        let artty_core::remote::Opened { mut child, mut reader, mut writer, .. } = opened;
+        let input = ClientMessage::Input { pane, bytes: b"yes\r".to_vec() };
+        write_message(&mut writer, &input).unwrap();
+        // Read on a thread, to wait with a timeout.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(message) = read_message::<ServerMessage>(&mut reader) {
+                if tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let collect = |time: Duration| {
+            let deadline = Instant::now() + time;
+            let mut got = Vec::new();
+            while let Ok(message) =
+                rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            {
+                got.push(message);
+            }
+            got
+        };
+        let got = collect(Duration::from_millis(1500));
+        let syncs: Vec<u64> = got
+            .iter()
+            .filter_map(|m| if let ServerMessage::Sync { seq } = m { Some(*seq) } else { None })
+            .collect();
+        assert_eq!(syncs, [1, 2], "two batches, then it waits");
+        let after_last = got.iter().rposition(|m| matches!(m, ServerMessage::Sync { .. })).unwrap();
+        assert!(!got[after_last..].iter().any(|m| matches!(m, ServerMessage::Frame { .. })));
+
+        write_message(&mut writer, &ClientMessage::Ack { seq: 1 }).unwrap();
+        write_message(&mut writer, &ClientMessage::Ping { id: 7 }).unwrap();
+        let got = collect(Duration::from_millis(500));
+        assert!(got.iter().any(|m| matches!(m, ServerMessage::Frame { .. })), "more after the Ack");
+        assert!(got.iter().any(|m| matches!(m, ServerMessage::Sync { seq: 3 })));
+        assert!(got.iter().any(|m| matches!(m, ServerMessage::Pong { id: 7 })));
+
+        write_message(&mut writer, &ClientMessage::Input { pane, bytes: vec![3] }).unwrap();
+        let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
+        write_message(&mut writer, &stop).unwrap();
+        while rx.recv_timeout(Duration::from_secs(2)).is_ok() {}
+        let _ = child.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

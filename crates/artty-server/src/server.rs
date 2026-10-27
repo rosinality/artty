@@ -34,6 +34,9 @@ use crate::{ClientId, Input};
 
 /// Each visible pane gets at most one screen update per frame at 120 Hz.
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
+/// Batches of screen updates an app may have unacknowledged; more wait, and
+/// it gets the newest screens once it catches up.
+const FRAMES_IN_FLIGHT: u64 = 2;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 /// A server with no sessions and no app exits after this long.
@@ -162,6 +165,16 @@ struct Client {
     panes_sent: Vec<PaneState>,
     /// Images it has (by id), so each is sent once.
     images_sent: HashSet<u64>,
+    /// Batches of screen updates sent, and acknowledged.
+    batches_sent: u64,
+    batches_acked: u64,
+}
+
+impl Client {
+    /// It's behind on screen updates: send it no more for now.
+    fn behind(&self) -> bool {
+        self.batches_sent - self.batches_acked >= FRAMES_IN_FLIGHT
+    }
 }
 
 /// Who's waiting for `artty run` to finish.
@@ -1261,6 +1274,8 @@ impl Server {
                         dirty: HashSet::new(),
                         panes_sent: Vec::new(),
                         images_sent: HashSet::new(),
+                        batches_sent: 0,
+                        batches_acked: 0,
                     },
                 );
             },
@@ -1620,6 +1635,12 @@ impl Server {
                 }
             },
             ClientMessage::ReopenClosedTab { window } => self.reopen_closed_tab(window),
+            ClientMessage::Ack { seq } => {
+                if let Some(client) = self.clients.get_mut(&client) {
+                    client.batches_acked = seq.min(client.batches_sent);
+                }
+            },
+            ClientMessage::Ping { id } => self.send(client, ServerMessage::Pong { id }),
             ClientMessage::ClearBuffer { pane } => {
                 if let Some(state) = self.panes.get(&pane) {
                     state.session.clear_buffer();
@@ -2165,7 +2186,8 @@ impl Server {
     /// When the main loop must wake up next.
     pub(crate) fn next_deadline(&self) -> Instant {
         let mut deadline = (self.last_poll + POLL_INTERVAL).min(self.last_save + SAVE_INTERVAL);
-        for client in self.clients.values() {
+        // (One that's behind wakes the loop when its acknowledgment comes.)
+        for client in self.clients.values().filter(|c| !c.behind()) {
             for pane in &client.dirty {
                 if let Some((_, sent)) = client.sent.get(pane) {
                     deadline = deadline.min(*sent + FRAME_INTERVAL);
@@ -2289,7 +2311,8 @@ impl Server {
                 // Forget panes no longer shown, so they get a full update if
                 // they come back.
                 client.sent.retain(|pane, _| visible.contains(pane));
-                for &pane in &visible {
+                let behind = client.behind();
+                for &pane in visible.iter().filter(|_| !behind) {
                     let due = match client.sent.get(&pane) {
                         None => true,
                         Some((_, at)) => {
@@ -2332,6 +2355,10 @@ impl Server {
                 messages.push(ServerMessage::Frame { pane, update });
             }
             let client = self.clients.get_mut(&client_id).unwrap();
+            if messages.iter().any(|m| matches!(m, ServerMessage::Frame { .. })) {
+                client.batches_sent += 1;
+                messages.push(ServerMessage::Sync { seq: client.batches_sent });
+            }
             if client.panes_sent != states {
                 client.panes_sent = states.clone();
                 messages.push(ServerMessage::Panes { panes: states });

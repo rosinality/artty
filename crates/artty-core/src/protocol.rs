@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -464,6 +464,16 @@ pub enum ClientMessage {
     ReopenClosedTab {
         window: WindowId,
     },
+    /// Screen updates up to [`ServerMessage::Sync`] `seq` have arrived: the
+    /// server sends more (it holds them back while two batches are unseen,
+    /// so a slow link gets the newest screens rather than a backlog).
+    Ack {
+        seq: u64,
+    },
+    /// Are you there? Answered with [`ServerMessage::Pong`].
+    Ping {
+        id: u64,
+    },
 
     /// Questions with an answer in [`ServerMessage::Reply`].
     Query {
@@ -715,6 +725,13 @@ pub enum ServerMessage {
     },
     /// An image that frames show (by id), sent before the first of them.
     Image(ImageData),
+    /// The end of a batch of screen updates, to acknowledge.
+    Sync {
+        seq: u64,
+    },
+    Pong {
+        id: u64,
+    },
 }
 
 /// An image's pixels and how big it's shown.

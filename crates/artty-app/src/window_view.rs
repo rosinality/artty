@@ -816,16 +816,36 @@ impl WindowView {
             self.finish_rename(true, cx);
         }
         self.close_search(cx);
-        let answer = app_state::control(Request::Workspaces, cx);
-        let here = self.window;
+        // Every server shown here: its workspaces not in this window.
+        let names: HashMap<ServerId, String> =
+            app_state::servers(cx).into_iter().map(|(id, name, _)| (id, name)).collect();
+        let several = self.servers.len() > 1;
+        let asks: Vec<(ServerId, Option<WindowId>, _)> = self
+            .servers
+            .iter()
+            .map(|(&server, &(window, _))| {
+                (server, Some(window), app_state::control_on(server, Request::Workspaces, cx))
+            })
+            .collect();
         cx.spawn(async move |this, cx| {
-            let Ok(Response::Workspaces { workspaces }) = answer.await else { return };
+            let mut items: Vec<WorkspaceInfo> = Vec::new();
+            for (server, here, answer) in asks {
+                let Ok(Response::Workspaces { workspaces }) = answer.await else { continue };
+                let name = names.get(&server).cloned().unwrap_or_default();
+                items.extend(workspaces.into_iter().filter_map(|mut workspace| {
+                    workspace.id = ids::tag(server, workspace.id);
+                    workspace.window = workspace.window.map(|w| ids::tag(server, w));
+                    if workspace.window.is_some() && workspace.window == here {
+                        return None;
+                    }
+                    if several && server != LOCAL {
+                        workspace.title = format!("{name} · {}", workspace.title);
+                    }
+                    Some(workspace)
+                }));
+            }
             let _ = this.update(cx, |this, cx| {
                 // Hidden ones first: those are what you're likely after.
-                let mut items: Vec<WorkspaceInfo> = workspaces
-                    .into_iter()
-                    .filter(|w| w.window.is_none() || w.window != here)
-                    .collect();
                 items.sort_by_key(|w| w.attached);
                 this.marked_text = None;
                 this.picker = Some(Picker { query: String::new(), items, selected: 0 });
@@ -837,12 +857,13 @@ impl WindowView {
 
     fn choose_workspace(&mut self, cx: &mut Context<Self>) {
         let Some(picker) = self.picker.take() else { return };
-        // The picker lists this Mac's workspaces.
-        if let (Some(choice), Some(window)) =
-            (picker.matches().get(picker.selected), self.window_on(LOCAL))
-        {
-            self.set_front(LOCAL, cx);
-            self.send(ClientMessage::OpenWorkspace { workspace: choice.id, window }, cx);
+        // Into this window's window on the workspace's server.
+        if let Some(choice) = picker.matches().get(picker.selected) {
+            let server = ids::server_of(choice.id);
+            if let Some(window) = self.window_on(server) {
+                self.set_front(server, cx);
+                self.send(ClientMessage::OpenWorkspace { workspace: choice.id, window }, cx);
+            }
         }
         self.marked_text = None;
         cx.notify();
@@ -2138,6 +2159,19 @@ impl WindowView {
                     .text_color(rgba(0xffffff70))
                     .child(div().flex_none().size(px(6.)).rounded_full().bg(rgba(dot)))
                     .child(Self::one_line(name.to_uppercase()).flex_1().min_w_0())
+                    // Another machine's round trip, as of its last ping.
+                    .when_some(
+                        app_state::latency(server, cx).filter(|_| connected && server != LOCAL),
+                        |d, latency| {
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(rgba(0xffffff50))
+                                    .child(format!("{} ms", latency.as_millis())),
+                            )
+                        },
+                    )
                     .when(connected, |d| {
                         d.child(
                             div()

@@ -26,11 +26,11 @@ pub(super) enum Group {
 
 #[derive(Default)]
 pub(super) struct Activity {
+    /// Every connected server's panes and workspaces, ids tagged (see `ids`).
     panes: Vec<PaneProcesses>,
     workspaces: Vec<WorkspaceInfo>,
-    server: Option<ServerUsage>,
-    /// The server's build, uptime and what it holds.
-    info: Option<ServerInfo>,
+    /// Each connected server: its build, uptime, use and what it holds.
+    servers: Vec<ServerActivity>,
     sort: Sort,
     collapsed: HashSet<Group>,
     filter: String,
@@ -39,6 +39,15 @@ pub(super) struct Activity {
     loaded: bool,
     /// A refresh is on its way.
     loading: bool,
+    error: Option<String>,
+}
+
+/// One server, as of the last refresh.
+struct ServerActivity {
+    server: ServerId,
+    name: String,
+    usage: Option<ServerUsage>,
+    info: Option<ServerInfo>,
     error: Option<String>,
 }
 
@@ -149,37 +158,81 @@ impl WindowView {
         cx.notify();
     }
 
-    /// Ask the server for every pane's processes (and workspaces' names).
+    /// Ask every connected server for its panes' processes (and workspaces'
+    /// names and its own state).
     pub(super) fn refresh_activity(&mut self, cx: &mut Context<Self>) {
         let Some(activity) = self.activity.as_mut().filter(|a| !a.loading) else { return };
         activity.loading = true;
-        let processes = app_state::control(Request::Processes { tab: None }, cx);
-        let workspaces = app_state::control(Request::Workspaces, cx);
-        let status = app_state::control(Request::ServerStatus, cx);
+        let servers: Vec<(ServerId, String)> = app_state::servers(cx)
+            .into_iter()
+            .filter(|(_, _, status)| *status == app_state::Status::Connected)
+            .map(|(server, name, _)| (server, name))
+            .collect();
+        let asks: Vec<_> = servers
+            .into_iter()
+            .map(|(server, name)| {
+                (
+                    server,
+                    name,
+                    app_state::control_on(server, Request::Processes { tab: None }, cx),
+                    app_state::control_on(server, Request::Workspaces, cx),
+                    app_state::control_on(server, Request::ServerStatus, cx),
+                )
+            })
+            .collect();
+        let several = asks.len() > 1;
         cx.spawn(async move |this, cx| {
-            let (processes, workspaces, status) = (processes.await, workspaces.await, status.await);
+            let mut panes = Vec::new();
+            let mut workspaces = Vec::new();
+            let mut servers = Vec::new();
+            for (server, name, processes, spaces, status) in asks {
+                let mut entry = ServerActivity {
+                    server,
+                    name: name.clone(),
+                    usage: None,
+                    info: None,
+                    error: None,
+                };
+                if let Ok(Response::Server { info }) = status.await {
+                    entry.info = Some(info);
+                }
+                match (processes.await, spaces.await) {
+                    (
+                        Ok(Response::Processes { panes: found, server: usage }),
+                        Ok(Response::Workspaces { workspaces: spaces }),
+                    ) => {
+                        entry.usage = usage;
+                        let tag = |id: u64| ids::tag(server, id);
+                        panes.extend(found.into_iter().map(|mut pane| {
+                            pane.id = tag(pane.id);
+                            pane.workspace = tag(pane.workspace as u64) as usize;
+                            pane
+                        }));
+                        // Another machine's workspaces say whose they are.
+                        workspaces.extend(spaces.into_iter().map(|mut workspace| {
+                            workspace.id = tag(workspace.id);
+                            if several && server != LOCAL {
+                                workspace.title = format!("{name} · {}", workspace.title);
+                                workspace.name = workspace.name.map(|n| format!("{name} · {n}"));
+                            }
+                            workspace
+                        }));
+                    },
+                    (Ok(Response::Error { message }), _) | (_, Ok(Response::Error { message })) => {
+                        entry.error = Some(message)
+                    },
+                    _ => entry.error = Some("not answering".into()),
+                }
+                servers.push(entry);
+            }
             let _ = this.update(cx, |this, cx| {
                 let Some(activity) = this.activity.as_mut() else { return };
                 activity.loading = false;
-                if let Ok(Response::Server { info }) = status {
-                    activity.info = Some(info);
-                }
-                match (processes, workspaces) {
-                    (
-                        Ok(Response::Processes { panes, server }),
-                        Ok(Response::Workspaces { workspaces }),
-                    ) => {
-                        activity.panes = panes;
-                        activity.server = server;
-                        activity.workspaces = workspaces;
-                        activity.loaded = true;
-                        activity.error = None;
-                    },
-                    (Ok(Response::Error { message }), _) | (_, Ok(Response::Error { message })) => {
-                        activity.error = Some(message)
-                    },
-                    _ => activity.error = Some("lost the artty server".into()),
-                }
+                activity.panes = panes;
+                activity.workspaces = workspaces;
+                activity.error = servers.is_empty().then(|| "lost the artty server".to_owned());
+                activity.servers = servers;
+                activity.loaded = true;
                 cx.notify();
             });
         })
@@ -219,7 +272,14 @@ impl WindowView {
 
     /// Stop a process: SIGTERM, or SIGKILL with ⌥. Shells and agents need a
     /// second click.
-    fn stop_process(&mut self, pid: i32, confirm: bool, kill: bool, cx: &mut Context<Self>) {
+    fn stop_process(
+        &mut self,
+        server: ServerId,
+        pid: i32,
+        confirm: bool,
+        kill: bool,
+        cx: &mut Context<Self>,
+    ) {
         let Some(activity) = self.activity.as_mut() else { return };
         if confirm && activity.armed != Some(pid) {
             activity.armed = Some(pid);
@@ -227,7 +287,8 @@ impl WindowView {
         }
         activity.armed = None;
         let signal = if kill { libc::SIGKILL } else { libc::SIGTERM };
-        let answer = app_state::control(Request::Signal { pid, signal: Some(signal) }, cx);
+        let answer =
+            app_state::control_on(server, Request::Signal { pid, signal: Some(signal) }, cx);
         cx.spawn(async move |this, cx| {
             let response = answer.await;
             let _ = this.update(cx, |this, cx| {
@@ -418,7 +479,9 @@ impl WindowView {
                             }),
                     ),
             )
-            .when(activity.loaded, |d| d.child(self.server_strip(activity, cx)))
+            .when(activity.loaded, |d| {
+                d.children(activity.servers.iter().map(|server| self.server_strip(server, cx)))
+            })
             .when_some(activity.error.clone(), |d, error| {
                 d.child(div().pb(px(8.)).text_color(rgba(0xf7768eff)).child(error))
             })
@@ -461,20 +524,26 @@ impl WindowView {
 
     /// The server: whether it runs the app's build, what it holds and uses,
     /// and a restart that hands its sessions over (programs keep running).
-    fn server_strip(&self, activity: &Activity, cx: &Context<Self>) -> gpui::Div {
-        let different = cx.global::<app_state::Shared>().server_mismatch.is_some();
+    fn server_strip(&self, activity: &ServerActivity, cx: &Context<Self>) -> gpui::Div {
+        let server = activity.server;
+        let local = server == LOCAL;
+        let different = local && cx.global::<app_state::Shared>().server_mismatch.is_some();
         let lost = activity.error.is_some();
         let (dot, status) = match (lost, different) {
-            (true, _) => (0xf7768eff, "Server not answering".to_owned()),
-            (false, true) => (0xe0af68ff, "Server runs a different build".to_owned()),
-            (false, false) => (0x9ece6aff, "Server running".to_owned()),
+            (true, _) => (0xf7768eff, "not answering"),
+            (false, true) => (0xe0af68ff, "runs a different build"),
+            (false, false) => (0x9ece6aff, "running"),
         };
+        let status = format!("{} {status}", if local { "Server" } else { activity.name.as_str() });
         let mut facts: Vec<String> = Vec::new();
+        if let Some(latency) = app_state::latency(server, cx).filter(|_| !local) {
+            facts.push(format!("{} ms away", latency.as_millis()));
+        }
         if let Some(info) = &activity.info {
             facts.push(format!("up {}", crate::cli::duration(info.uptime_secs)));
             facts.push(format!("pid {}", info.pid));
         }
-        if let Some(usage) = &activity.server {
+        if let Some(usage) = &activity.usage {
             facts.push(format!(
                 "CPU {:.1}% · {}",
                 usage.cpu_percent,
@@ -516,7 +585,9 @@ impl WindowView {
                     .text_color(rgba(0xffffff80))
                     .child(facts.join(" · ")),
             )
-            .when(!lost, |d| {
+            // This Mac's server moves to this build; another machine's runs
+            // the build installed there.
+            .when(!lost && local, |d| {
                 d.child(
                     div()
                         .id("restart-server")
@@ -731,6 +802,7 @@ impl WindowView {
     ) -> gpui::Stateful<gpui::Div> {
         let row = process.row;
         let pid = row.pid;
+        let server = ids::server_of(pane.id);
         // The pane's shell, or its agent: stopping those deserves a second click.
         let shell =
             process.depth == 0 && pane.processes.first().is_some_and(|first| first.pid == pid);
@@ -788,7 +860,7 @@ impl WindowView {
                             }
                         })
                         .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                            this.stop_process(pid, confirm, event.modifiers().alt, cx);
+                            this.stop_process(server, pid, confirm, event.modifiers().alt, cx);
                         })),
                 ),
             )

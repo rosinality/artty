@@ -101,6 +101,9 @@ impl ServerConfig {
                 "-T",
                 "-o",
                 "BatchMode=yes",
+                // Screens are text and colors: they shrink well.
+                "-o",
+                "Compression=yes",
                 "-o",
                 "ConnectTimeout=10",
                 "-o",

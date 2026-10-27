@@ -97,7 +97,9 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
         ServerMessage::Welcome { .. }
         | ServerMessage::Notify { .. }
         | ServerMessage::Control { .. }
-        | ServerMessage::Stopping { .. } => {},
+        | ServerMessage::Stopping { .. }
+        | ServerMessage::Sync { .. }
+        | ServerMessage::Pong { .. } => {},
     }
 }
 
@@ -180,7 +182,8 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
             | Query::CommandOutput { pane } => untag(pane),
             Query::DetachedWindows => {},
         },
-        ClientMessage::Control { .. } => {},
+        ClientMessage::Control { .. } | ClientMessage::Ack { .. } | ClientMessage::Ping { .. } => {
+        },
     }
     server
 }
