@@ -40,6 +40,12 @@ copy-on-select = false
 # pane.
 list-panes = true
 
+# How the sidebar shows workspaces: "list" (every workspace with its tabs),
+# "accordion" (only the current one open; the others one line each, with what
+# needs you there), or "switcher" (only the current one's tabs, under a button
+# listing the others).
+sidebar-style = "list"
+
 # Ask before pasting several lines into a program that would run them one by
 # one: one that hasn't turned on bracketed paste (shells and editors usually
 # have, so they get the paste whole).

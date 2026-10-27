@@ -384,6 +384,8 @@ pub struct WindowView {
     palette: Option<palette::Palette>,
     /// Search everything (⌘⇧F), when open.
     search_all: Option<search_view::SearchAll>,
+    /// The workspace switcher's list is open (sidebar style `switcher`).
+    switcher_open: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -499,6 +501,7 @@ impl WindowView {
             sidebar_hidden: false,
             palette: None,
             search_all: None,
+            switcher_open: false,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -816,11 +819,36 @@ impl WindowView {
             return;
         }
         let target = (self.layout.active as isize + offset).rem_euclid(count) as usize;
-        let workspace = &self.layout.workspaces[target];
+        self.show_workspace_at(target, cx);
+    }
+
+    /// Show the workspace at `position` (its current tab).
+    fn show_workspace_at(&mut self, position: usize, cx: &mut Context<Self>) {
+        let Some(workspace) = self.layout.workspaces.get(position) else { return };
         if let Some(index) = self.places.iter().position(|&p| p == (workspace.id, workspace.active))
         {
             self.select(index, cx);
         }
+    }
+
+    /// What needs you most in the workspaces at `positions`: that pane's
+    /// state, and how many are in the same state.
+    fn rollup<'a>(
+        &self,
+        positions: impl Iterator<Item = usize>,
+        cx: &'a App,
+    ) -> Option<(&'a PaneState, usize)> {
+        let states: Vec<&PaneState> = positions
+            .filter_map(|p| self.layout.workspaces.get(p))
+            .flat_map(|w| w.tabs.iter().flat_map(|t| t.root.panes()))
+            .filter_map(|pane| self.pane_state(pane, cx))
+            .collect();
+        let top = states
+            .iter()
+            .copied()
+            .max_by_key(|s| Self::urgency(Some(s)))
+            .filter(|s| Self::urgency(Some(s)) > 0)?;
+        Some((top, states.iter().filter(|s| s.icon == top.icon).count()))
     }
 
     fn toggle_collapsed(&self, workspace: WorkspaceId, cx: &App) {
@@ -1489,6 +1517,11 @@ impl WindowView {
         if self.asking() {
             self.ask_key(event, cx);
             return;
+        }
+        if self.switcher_open && keystroke.key == "escape" {
+            self.switcher_open = false;
+            cx.stop_propagation();
+            return cx.notify();
         }
         if self.palette.is_some() {
             self.palette_key(event, window, cx);
@@ -2435,6 +2468,7 @@ impl WindowView {
     fn workspace_header(
         &self,
         position: usize,
+        folded: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let workspace = &self.layout.workspaces[position];
@@ -2510,12 +2544,12 @@ impl WindowView {
                     .flex_none()
                     .text_size(px(9.))
                     .text_color(rgba(0xffffff70))
-                    .child(if workspace.collapsed { "▶" } else { "▼" }),
+                    .child(if folded { "▶" } else { "▼" }),
             )
             .when_some(color, |d, color| d.child(div().flex_none().size(px(7.)).rounded_full().bg(rgba(color << 8 | 0xff))))
             .child(name)
             // Folded, it says how many tabs it holds.
-            .when(workspace.collapsed && renaming.is_none(), |d| {
+            .when(folded && renaming.is_none(), |d| {
                 d.child(div().flex_none().text_size(px(11.)).text_color(rgba(0xffffff60)).child(tabs.to_string()))
             })
             .when_some(top, |d, top| {
@@ -2585,8 +2619,12 @@ impl WindowView {
                 }
             }))
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                let accordion = this.config.sidebar_style == artty_core::SidebarStyle::Accordion;
                 if event.click_count() >= 2 {
                     this.start_workspace_rename(id, cx);
+                } else if accordion && position != this.layout.active {
+                    // An accordion opens the one clicked: going to it.
+                    this.show_workspace_at(position, cx);
                 } else {
                     this.toggle_collapsed(id, cx);
                 }
@@ -2708,6 +2746,208 @@ impl WindowView {
             })
     }
 
+    /// Sidebar style `switcher`: the current workspace (and its server's
+    /// name, with several), and what needs you most in the others; a click
+    /// lists them.
+    fn switcher_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let active = self.layout.active;
+        let workspace = self.layout.workspaces.get(active);
+        let several = app_state::servers(cx).len() > 1;
+        let mut title = self.layout.workspaces.get(active).map_or_else(
+            || "No workspace".to_owned(),
+            |_| self.workspace_title(active).to_string(),
+        );
+        if let Some(workspace) = workspace.filter(|_| several) {
+            let server = app_state::server_name(ids::server_of(workspace.id), cx);
+            title = format!("{} · {title}", server.to_uppercase());
+        }
+        let color = workspace.and_then(|w| w.color.as_deref()).and_then(workspace_color);
+        let others = self.rollup((0..self.layout.workspaces.len()).filter(|&p| p != active), cx);
+        div()
+            .id("workspace-switcher")
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .h(px(28.))
+            .mb(px(4.))
+            .px_2()
+            .rounded(px(7.))
+            .bg(if self.switcher_open { rgba(0xffffff1c) } else { rgba(0xffffff0a) })
+            .hover(|d| d.bg(rgba(0xffffff14)))
+            .text_size(px(12.))
+            .font_weight(FontWeight::SEMIBOLD)
+            .when_some(color, |d, color| {
+                d.child(div().flex_none().size(px(7.)).rounded_full().bg(rgba(color << 8 | 0xff)))
+            })
+            .child(Self::one_line(title).flex_1().min_w_0().text_color(rgba(0xffffffd8)))
+            .when_some(others, |d, (top, count)| {
+                d.child(self.icon_cell(Some(top))).when(count > 1, |d| {
+                    d.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(10.5))
+                            .text_color(rgba(0xffffff90))
+                            .child(count.to_string()),
+                    )
+                })
+            })
+            .child(div().flex_none().text_size(px(9.)).text_color(rgba(0xffffff70)).child("▼"))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.switcher_open = !this.switcher_open;
+                cx.notify();
+            }))
+    }
+
+    /// The switcher's list: this window's workspaces by server, each with
+    /// what needs you there; a new one; hidden ones.
+    fn switcher_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        if !self.switcher_open || self.sidebar_hidden {
+            return None;
+        }
+        let servers = app_state::servers(cx);
+        let several = servers.len() > 1;
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        for (server, name, status) in servers {
+            let positions: Vec<usize> = (0..self.layout.workspaces.len())
+                .filter(|&p| ids::server_of(self.layout.workspaces[p].id) == server)
+                .collect();
+            if several {
+                let dot =
+                    if status == app_state::Status::Connected { 0x9ece6aff } else { 0xe0af68ff };
+                rows.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(8.))
+                        .pt(px(6.))
+                        .pb(px(2.))
+                        .text_size(px(10.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgba(0xffffff70))
+                        .child(div().flex_none().size(px(6.)).rounded_full().bg(rgba(dot)))
+                        .child(name.to_uppercase())
+                        .into_any_element(),
+                );
+            }
+            for position in positions {
+                let workspace = &self.layout.workspaces[position];
+                let current = position == self.layout.active;
+                let color = workspace.color.as_deref().and_then(workspace_color);
+                let rollup = self.rollup(std::iter::once(position), cx);
+                rows.push(
+                    div()
+                        .id(("switch-to", position))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .h(px(26.))
+                        .px(px(8.))
+                        .rounded(px(6.))
+                        .when(current, |d| d.bg(rgba(0x3478f6ff)))
+                        .when(!current, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
+                        .child(div().flex_none().size(px(7.)).rounded_full().map(|d| match color {
+                            Some(color) => d.bg(rgba(color << 8 | 0xff)),
+                            None => d,
+                        }))
+                        .child(
+                            Self::one_line(self.workspace_title(position))
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(rgba(0xffffffee)),
+                        )
+                        .when_some(rollup, |d, (top, count)| {
+                            d.child(self.icon_cell(Some(top))).when(count > 1, |d| {
+                                d.child(
+                                    div().flex_none().text_size(px(10.5)).child(count.to_string()),
+                                )
+                            })
+                        })
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(rgba(0xffffff60))
+                                .child(workspace.tabs.len().to_string()),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.switcher_open = false;
+                            this.show_workspace_at(position, cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+        }
+        let action = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .px(px(8.))
+                .h(px(26.))
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .text_color(rgba(0xffffffb0))
+                .hover(|d| d.bg(rgba(0xffffff10)).text_color(rgba(0xffffffee)))
+                .child(label)
+        };
+        let hidden = self.layout.hidden;
+        let panel = div()
+            .id("switcher")
+            .absolute()
+            .top(px(116.))
+            .left(px(8.))
+            .w(px(SIDEBAR_WIDTH + 40.))
+            .max_h(px(440.))
+            .occlude()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .p(px(6.))
+            .rounded(px(10.))
+            .bg(rgba(0x262a33f8))
+            .border_1()
+            .border_color(rgba(0xffffff26))
+            .shadow_lg()
+            .text_size(px(12.5))
+            .child(
+                div()
+                    .id("switcher-rows")
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .overflow_y_scroll()
+                    .children(rows),
+            )
+            .child(div().my(px(4.)).h(px(1.)).bg(rgba(0xffffff14)))
+            .child(action("switcher-new", "New Workspace   ⌘⇧N".to_owned()).on_click(cx.listener(
+                |this, _, _, cx| {
+                    this.switcher_open = false;
+                    this.new_workspace(cx);
+                },
+            )))
+            .when(hidden > 0, |d| {
+                let label = if hidden == 1 {
+                    "1 hidden workspace…".to_owned()
+                } else {
+                    format!("{hidden} hidden workspaces…")
+                };
+                d.child(action("switcher-hidden", label).on_click(cx.listener(|this, _, _, cx| {
+                    this.switcher_open = false;
+                    this.open_picker(cx);
+                })))
+            });
+        let backdrop =
+            div().id("switcher-backdrop").absolute().top_0().left_0().size_full().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.switcher_open = false;
+                    cx.notify();
+                }),
+            );
+        Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Workspaces are sections (there's always one); a folded one still
         // shows the tab on screen.
@@ -2717,15 +2957,36 @@ impl WindowView {
         // its header (with nothing under it while it's away).
         let servers = app_state::servers(cx);
         let several = servers.len() > 1;
-        let mut headers = servers.into_iter().filter(|_| several).peekable();
+        let style = self.config.sidebar_style;
+        let mut headers = servers
+            .into_iter()
+            .filter(|_| several && style != artty_core::SidebarStyle::Switcher)
+            .peekable();
+        if style == artty_core::SidebarStyle::Switcher {
+            // The current workspace's tabs, under the way to the others.
+            rows.push(self.switcher_button(cx).into_any_element());
+        }
         for (position, workspace) in self.layout.workspaces.iter().enumerate() {
+            let current = position == self.layout.active;
+            if style == artty_core::SidebarStyle::Switcher {
+                for tab in &workspace.tabs {
+                    if current {
+                        rows.push(self.tab_row(index, tab, cx).into_any_element());
+                    }
+                    index += 1;
+                }
+                continue;
+            }
             let server = ids::server_of(workspace.id);
             while let Some((id, name, status)) = headers.next_if(|(id, _, _)| *id <= server) {
                 rows.push(self.server_header(id, name, status, cx).into_any_element());
             }
-            rows.push(self.workspace_header(position, cx).into_any_element());
+            // An accordion has only the current workspace open.
+            let folded =
+                workspace.collapsed || style == artty_core::SidebarStyle::Accordion && !current;
+            rows.push(self.workspace_header(position, folded, cx).into_any_element());
             for tab in &workspace.tabs {
-                if !workspace.collapsed || index == self.active {
+                if !folded || index == self.active {
                     rows.push(self.tab_row(index, tab, cx).into_any_element());
                 }
                 index += 1;
@@ -3602,6 +3863,7 @@ impl Render for WindowView {
             .children(self.picker_overlay(cx))
             .children(self.palette_overlay(cx))
             .children(self.search_all_overlay(cx))
+            .children(self.switcher_overlay(cx))
             .children(self.ask_overlay(cx))
     }
 }

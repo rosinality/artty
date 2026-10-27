@@ -364,6 +364,39 @@ impl Settings {
             .into_any_element()
     }
 
+    /// List | Accordion | Switcher.
+    fn sidebar_picker(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.config.sidebar_style;
+        let options = artty_core::SidebarStyle::ALL.map(|style| {
+            let selected = style == current;
+            let label = match style {
+                artty_core::SidebarStyle::List => "List",
+                artty_core::SidebarStyle::Accordion => "Accordion",
+                artty_core::SidebarStyle::Switcher => "Switcher",
+            };
+            div()
+                .id(ElementId::Name(format!("sidebar-{}", style.name()).into()))
+                .px_2()
+                .py(px(4.))
+                .rounded(px(6.))
+                .when(selected, |d| d.bg(rgba(0x3478f6ff)))
+                .when(!selected, |d| d.hover(|d| d.bg(rgba(0xffffff1a))))
+                .text_color(rgba(0xffffffee))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.edit(cx, |file| file.set_string("sidebar-style", style.name()))
+                }))
+        });
+        div()
+            .flex()
+            .gap(px(2.))
+            .p(px(2.))
+            .rounded(px(8.))
+            .bg(rgba(0xffffff12))
+            .children(options)
+            .into_any_element()
+    }
+
     /// Block | Bar | Underline | Hollow, with a preview of each.
     fn cursor_picker(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.config.cursor_style;
@@ -776,6 +809,11 @@ impl Render for Settings {
                         "secure-keyboard-entry",
                         cx,
                     ),
+                ),
+                Self::row(
+                    "Workspaces in the sidebar",
+                    Some("All · only the current one open · only the current one, with a switcher"),
+                    self.sidebar_picker(cx),
                 ),
                 Self::row(
                     "List a split tab's panes",

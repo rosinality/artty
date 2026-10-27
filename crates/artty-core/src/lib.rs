@@ -21,7 +21,9 @@ mod state;
 mod theme;
 
 pub use artty_vt as vt;
-pub use config::{Colors, Config, CursorStyle, KeyAction, ResumeCommand, ServerConfig};
+pub use config::{
+    Colors, Config, CursorStyle, KeyAction, ResumeCommand, ServerConfig, SidebarStyle,
+};
 pub use frame::{
     Frame, FrameCursor, FrameImage, FrameLine, FrameRect, FrameRun, FrameUnderline, UnderlineStyle,
 };

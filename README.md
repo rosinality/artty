@@ -66,9 +66,10 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘⇧O | Open a workspace: a hidden one, or one in another window |
 | ⇧⌘A | Activity: every pane's processes, CPU and memory |
 | ⇧⌘E | Files: the focused pane's folder, on its machine |
-| ⌘⇧F | Search everything: what every pane on every server printed (history too), and Claude Code's and Codex's conversations on those machines; a line goes to its pane, selected, a conversation carries on in a new tab |
+| ⌘⇧F | Search everything: what every pane on every server printed (history too), and Claude Code's and Codex's conversations on those machines (✳ Claude Code, ◇ Codex; matches highlighted); a line goes to its pane, selected, a conversation carries on in a new tab |
 | ⌘P / ⌘⇧P | Go to any pane on any server (fuzzy: title, workspace, folder, program, agent) / run any command (`>` in ⌘P) |
 | ⌘B | Fold the sidebar away, and back (folded, the titlebar says how many tabs need you; a click goes there) |
+| Settings > Workspaces in the sidebar | List (every workspace with its tabs), Accordion (only the current one open; the others a line each, with what needs you there; a click goes to one), or Switcher (only the current one's tabs, under a button listing the others by server, with what needs you in each) |
 | ⌃⌘[ / ⌃⌘] | Previous / next workspace |
 | Click / double-click / drag a workspace header | Fold it / rename it / reorder workspaces |
 | Right-click (or ⌃-click) | In a pane: copy, paste, links, split, rename, clear, close. On a tab or workspace in the sidebar: rename, move to a new workspace, fold, close |

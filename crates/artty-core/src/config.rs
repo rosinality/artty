@@ -47,6 +47,9 @@ pub struct Config {
     /// In the sidebar, a tab with split panes lists them, a line each; off,
     /// it's one line, for its focused pane.
     pub list_panes: bool,
+    /// How the sidebar shows workspaces: all of them, only the current one
+    /// open (accordion), or only the current one with a switcher.
+    pub sidebar_style: SidebarStyle,
     /// Ask before pasting several lines into a program that would run them
     /// one by one (one that hasn't turned on bracketed paste).
     pub confirm_multiline_paste: bool,
@@ -192,6 +195,34 @@ impl ResumeCommand {
     }
 }
 
+/// How the sidebar shows workspaces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarStyle {
+    /// Every workspace with its tabs (each folds by hand).
+    #[default]
+    List,
+    /// Every workspace, only the current one open; the rest one line each,
+    /// saying what needs you there.
+    Accordion,
+    /// Only the current workspace's tabs, under a switcher to the others.
+    Switcher,
+}
+
+impl SidebarStyle {
+    pub const ALL: [SidebarStyle; 3] =
+        [SidebarStyle::List, SidebarStyle::Accordion, SidebarStyle::Switcher];
+
+    /// The name used in the config file.
+    pub fn name(self) -> &'static str {
+        match self {
+            SidebarStyle::List => "list",
+            SidebarStyle::Accordion => "accordion",
+            SidebarStyle::Switcher => "switcher",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CursorStyle {
@@ -264,6 +295,7 @@ impl Default for Config {
             bell_sound: false,
             copy_on_select: false,
             list_panes: true,
+            sidebar_style: SidebarStyle::List,
             confirm_multiline_paste: true,
             secure_keyboard_entry: false,
             local_echo: true,
