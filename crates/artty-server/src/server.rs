@@ -30,6 +30,7 @@ use artty_core::{
 };
 
 use crate::handover::{self, HandedPane};
+use crate::inbox::{Inbox, PaneEvents};
 use crate::{ClientId, Input};
 
 /// Each visible pane gets at most one screen update per frame at 120 Hz.
@@ -318,14 +319,13 @@ fn pbpaste() -> String {
 }
 
 impl Server {
-    pub(crate) fn new(socket: PathBuf, tx: Sender<Input>, listener_fd: i32) -> Self {
+    pub(crate) fn new(socket: PathBuf, inbox: Arc<Inbox>, listener_fd: i32) -> Self {
         let (config, error) = Config::load();
         if let Some(error) = error {
             log::error!("config: {error}");
         }
-        let sink: Arc<dyn Fn(PaneId, Event) + Send + Sync> = Arc::new(move |id, event| {
-            let _ = tx.send(Input::Session(id, event));
-        });
+        let sink: Arc<dyn Fn(PaneId, Event) + Send + Sync> =
+            Arc::new(move |id, event| inbox.pane_event(id, event));
         let now = Instant::now();
         Self {
             socket,
@@ -1243,7 +1243,6 @@ impl Server {
 
     pub(crate) fn handle(&mut self, input: Input) {
         match input {
-            Input::Session(id, event) => self.handle_event(id, event),
             Input::Control(request, reply) => match request {
                 Request::Run { tab, command, timeout_secs } => {
                     match self.start_run(tab, &command) {
@@ -1301,6 +1300,16 @@ impl Server {
                     drop(run);
                 }
             },
+        }
+    }
+
+    /// A pane's events, merged while they waited.
+    pub(crate) fn handle_pane(&mut self, id: PaneId, events: PaneEvents) {
+        if events.dropped > 0 {
+            log::warn!("pane {id}: dropped {} events sent faster than handled", events.dropped);
+        }
+        for event in events.into_events() {
+            self.handle_event(id, event);
         }
     }
 

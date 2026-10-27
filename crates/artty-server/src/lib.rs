@@ -6,6 +6,7 @@
 //! `artty` command and agent hooks use (see `artty_core::protocol`).
 
 mod handover;
+mod inbox;
 mod server;
 
 use std::io::{self, BufRead, BufReader, Write};
@@ -13,22 +14,21 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
-use artty_core::SessionId;
 use artty_core::control::{Request, Response, server_socket_path};
 use artty_core::protocol::{ClientMessage, Hello, ServerMessage, read_message, write_message};
-use artty_core::vt::event::Event;
 
+use inbox::{Inbox, Next};
 use server::Server;
 
 pub type ClientId = u64;
 
 /// Everything the server reacts to.
 pub(crate) enum Input {
-    Session(SessionId, Event),
     /// A one-off request from the `artty` command; answer on the sender.
     Control(Request, Sender<Response>),
     Connected(ClientId, Sender<ServerMessage>),
@@ -82,8 +82,8 @@ fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -
     let socket = RemoveOnDrop(path.clone());
     let listener_fd = listener.as_raw_fd();
 
-    let (tx, rx) = mpsc::channel::<Input>();
-    let accept = tx.clone();
+    let inbox = Arc::new(Inbox::default());
+    let accept = inbox.clone();
     std::thread::Builder::new().name("artty-accept".into()).spawn(move || {
         static NEXT_CLIENT: AtomicU64 = AtomicU64::new(1);
         for stream in listener.incoming().flatten() {
@@ -95,26 +95,27 @@ fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -
         }
     })?;
 
-    let mut server = Server::new(path, tx, listener_fd);
+    let mut server = Server::new(path, inbox.clone(), listener_fd);
     match handover {
         Some((header, snapshots)) => server.adopt(header, snapshots),
         None => server.start(),
     }
     loop {
-        let timeout = server.next_deadline().saturating_duration_since(Instant::now());
-        match rx.recv_timeout(timeout.max(Duration::from_millis(1))) {
-            Ok(input) => survive("handling an input", || server.handle(input)),
-            Err(mpsc::RecvTimeoutError::Timeout) => {},
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-        // Handle what's already queued before doing per-batch work, so a
-        // burst of output costs one screen update; but only for so long, or
-        // panes that never pause would hold back every screen.
+        inbox.wait(server.next_deadline().max(Instant::now() + Duration::from_millis(1)));
+        // Handle what's waiting before doing per-batch work, so a burst of
+        // output costs one screen update; but only for so long, so screens
+        // still go out while there's always more.
         let end = Instant::now() + BATCH_TIME;
-        while Instant::now() < end
-            && let Ok(input) = rx.try_recv()
-        {
-            survive("handling an input", || server.handle(input));
+        while let Some(next) = inbox.next() {
+            match next {
+                Next::Input(input) => survive("handling an input", || server.handle(input)),
+                Next::Pane(pane, events) => {
+                    survive("handling a pane's events", || server.handle_pane(pane, events))
+                },
+            }
+            if Instant::now() >= end {
+                break;
+            }
         }
         survive("updating", || server.after_batch());
         // Asked to hand over: it doesn't come back if it works.
@@ -125,6 +126,7 @@ fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -
             break;
         }
     }
+    inbox.close();
     // Stop taking connections first: an app reconnecting after a restart
     // must reach the new server, not this one.
     drop(socket);
@@ -159,7 +161,7 @@ impl Drop for RemoveOnDrop {
 }
 
 /// One connection: a JSON control request, or an attached app.
-fn serve(stream: UnixStream, id: ClientId, tx: Sender<Input>) {
+fn serve(stream: UnixStream, id: ClientId, tx: Arc<Inbox>) {
     let Ok(mut writer) = stream.try_clone() else { return };
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -199,7 +201,7 @@ fn serve_app(
     mut reader: BufReader<UnixStream>,
     mut writer: UnixStream,
     id: ClientId,
-    tx: Sender<Input>,
+    tx: Arc<Inbox>,
 ) {
     let (outgoing, messages) = mpsc::channel::<ServerMessage>();
     if tx.send(Input::Connected(id, outgoing)).is_err() {
