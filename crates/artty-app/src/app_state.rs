@@ -590,7 +590,8 @@ pub fn open_window(
         titlebar: Some(gpui::TitlebarOptions {
             title: Some("artty".into()),
             appears_transparent: true,
-            traffic_light_position: Some(point(px(14.), px(14.))),
+            // Where macOS itself puts them in a 32 pt titlebar.
+            traffic_light_position: Some(point(px(9.), px(9.))),
         }),
         window_background: window_view::background_appearance(&config),
         ..Default::default()

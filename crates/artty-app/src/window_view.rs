@@ -1655,6 +1655,17 @@ impl WindowView {
         }
     }
 
+    /// Part of the titlebar: a double click does what System Settings says
+    /// (zoom, minimize, or nothing), as in other apps — content covers the
+    /// real titlebar, so macOS doesn't see the clicks itself.
+    fn titlebar(id: &'static str) -> gpui::Stateful<gpui::Div> {
+        div().id(id).on_click(|event, window, _| {
+            if event.click_count() == 2 {
+                window.titlebar_double_click();
+            }
+        })
+    }
+
     fn one_line(text: impl Into<SharedString>) -> gpui::Div {
         // GPUI 0.2 caches the first measurement of `nowrap` text, which happens
         // before the width is known, so `.truncate()` only clips. A one-line
@@ -2130,10 +2141,13 @@ impl WindowView {
             .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
+            .relative()
             .bg(rgba(0xffffff0a))
             .border_r_1()
             .border_color(rgba(0xffffff12))
             .pt(px(44.))
+            // The titlebar goes on above the sidebar, behind the window buttons.
+            .child(Self::titlebar("sidebar-titlebar").absolute().top_0().left_0().right_0().h(px(TITLEBAR_HEIGHT)))
             .px(px(8.))
             .pb(px(10.))
             .text_size(px(12.5))
@@ -2804,7 +2818,7 @@ impl Render for WindowView {
                     .flex_1()
                     .min_w_0()
                     .child(
-                        div()
+                        Self::titlebar("titlebar")
                             .flex()
                             .flex_none()
                             .h(px(TITLEBAR_HEIGHT))

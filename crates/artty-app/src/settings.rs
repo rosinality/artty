@@ -85,7 +85,8 @@ pub fn open(
         titlebar: Some(TitlebarOptions {
             title: Some("Settings".into()),
             appears_transparent: true,
-            traffic_light_position: Some(point(px(14.), px(14.))),
+            // Where macOS itself puts them in a 40 pt titlebar.
+            traffic_light_position: Some(point(px(12.), px(13.))),
         }),
         window_background: gpui::WindowBackgroundAppearance::Blurred,
         is_resizable: false,
