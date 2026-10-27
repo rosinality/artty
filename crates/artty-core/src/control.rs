@@ -48,6 +48,13 @@ pub fn private_dir() -> PathBuf {
     own
 }
 
+/// Make `dir` (mode 0700) unless it's there, and check it's this user's
+/// alone (see [`make_private`]).
+pub fn make_private_dir(dir: &Path) -> io::Result<()> {
+    // SAFETY: getuid can't fail.
+    make_private(dir, unsafe { libc::getuid() })
+}
+
 /// Make `dir` (mode 0700) unless it's there, and check it's `uid`'s alone:
 /// a directory, not a link, no one else's, and no one else may write in it.
 fn make_private(dir: &Path, uid: u32) -> io::Result<()> {

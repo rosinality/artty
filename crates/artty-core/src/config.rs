@@ -102,59 +102,88 @@ impl ServerConfig {
         self.ssh_command(&format!("exec \"$SHELL\" -lc 'exec {artty} server --stdio'"))
     }
 
-    /// ssh forwarding this Mac's `local` port to `remote` there, until its
-    /// input closes (so it ends with the app that started it).
-    pub fn ssh_forward_command(&self, local: u16, remote: u16) -> Option<Vec<String>> {
-        let destination = self.ssh.as_ref()?;
-        Some(
-            [
-                "ssh",
-                "-T",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=3",
-                "-L",
-                &format!("127.0.0.1:{local}:localhost:{remote}"),
-                destination,
-                "cat >/dev/null",
-            ]
-            .map(str::to_owned)
-            .to_vec(),
-        )
-    }
-
-    /// ssh running `remote` there (for one reached by ssh).
+    /// ssh running `remote` there (for one reached by ssh), sharing the
+    /// connection to it (see [`ServerConfig::shared`]).
     pub fn ssh_command(&self, remote: &str) -> Option<Vec<String>> {
         let destination = self.ssh.as_ref()?;
-        Some(
-            [
-                "ssh",
-                "-T",
-                "-o",
-                "BatchMode=yes",
-                // Screens are text and colors: they shrink well.
-                "-o",
-                "Compression=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=3",
-                destination,
-                remote,
-            ]
-            .map(str::to_owned)
-            .to_vec(),
-        )
+        let mut command = vec!["ssh".to_owned(), "-T".to_owned()];
+        command.extend(shared_options());
+        command.extend(
+            // Screens are text and colors: they shrink well.
+            ["-o", "Compression=yes", "-o", "ConnectTimeout=10"].map(str::to_owned),
+        );
+        command.extend([destination.clone(), remote.to_owned()]);
+        Some(command)
     }
+
+    /// One ssh connection to the machine, shared: the app's, forwards'
+    /// and installs' sessions all go through it (OpenSSH's ControlMaster),
+    /// so a login that needs a password or a code is made once
+    /// ([`ServerConfig::login_command`]). It outlives its last session by
+    /// ten minutes.
+    ///
+    /// `operation`, given to it: `check` (whether it's up), `exit`, or
+    /// `forward`/`cancel` with `forward` (`-L` arguments).
+    pub fn shared(&self, operation: &str, forward: Option<&str>) -> Option<Vec<String>> {
+        let destination = self.ssh.as_ref()?;
+        let mut command = vec!["ssh".to_owned()];
+        command.extend(shared_options());
+        command.extend(["-O".to_owned(), operation.to_owned()]);
+        if let Some(forward) = forward {
+            command.extend(["-L".to_owned(), forward.to_owned()]);
+        }
+        command.push(destination.clone());
+        Some(command)
+    }
+
+    /// An interactive ssh that logs in (asking for what the machine wants:
+    /// a password, a code, whether to trust its key) and leaves the shared
+    /// connection running for the app.
+    pub fn login_command(&self) -> Option<Vec<String>> {
+        let destination = self.ssh.as_ref()?;
+        let mut command = vec!["ssh".to_owned()];
+        // As the others, but asking, and making the shared connection.
+        for option in SHARED.iter().filter(|o| !o.starts_with("BatchMode")) {
+            command.extend(["-o".to_owned(), option.replace("=auto", "=yes")]);
+        }
+        command.extend(["-o".to_owned(), format!("ControlPath={}", control_path())]);
+        // Into the background once logged in; no command.
+        command.extend(["-f", "-N"].map(str::to_owned));
+        command.push(destination.clone());
+        Some(command)
+    }
+}
+
+/// Options for every ssh artty runs, besides where the shared connection's
+/// socket is.
+const SHARED: [&str; 5] = [
+    "BatchMode=yes",
+    "ServerAliveInterval=15",
+    "ServerAliveCountMax=3",
+    "ControlMaster=auto",
+    "ControlPersist=600",
+];
+
+fn shared_options() -> Vec<String> {
+    let mut options = Vec::new();
+    for option in SHARED {
+        options.extend(["-o".to_owned(), option.to_owned()]);
+    }
+    options.extend(["-o".to_owned(), format!("ControlPath={}", control_path())]);
+    options
+}
+
+/// Where shared connections' sockets go: `~/.ssh/artty`, made private (a
+/// socket path must be short: macOS's temporary directory is too long).
+fn control_path() -> String {
+    let home = std::env::var_os("HOME").map_or_else(|| "/".into(), std::path::PathBuf::from);
+    let dir = home.join(".ssh/artty");
+    if let Err(err) = crate::control::make_private_dir(&dir) {
+        log::warn!("{}: {err}", dir.display());
+    }
+    let path = format!("{}/%C", dir.display());
+    // ssh reads the option like a config line: quote a path with spaces.
+    if path.contains(char::is_whitespace) { format!("\"{path}\"") } else { path }
 }
 
 /// Commands that resume an agent's conversation.
@@ -406,6 +435,23 @@ mod tests {
         assert_eq!(ssh.last().unwrap(), "exec \"$SHELL\" -lc 'exec artty server --stdio'");
         assert_eq!(config.servers[1].connect_command().unwrap(), ["artty", "server", "--stdio"]);
         assert_eq!(ServerConfig::default().connect_command(), None);
+    }
+
+    #[test]
+    fn ssh_shares_one_connection_and_logs_in_once() {
+        let server = ServerConfig { ssh: Some("me@devbox".into()), ..Default::default() };
+        let has = |command: &[String], option: &str| command.iter().any(|o| o == option);
+        let connect = server.connect_command().unwrap();
+        assert!(has(&connect, "BatchMode=yes") && has(&connect, "ControlMaster=auto"));
+        assert!(connect.iter().any(|o| o.starts_with("ControlPath=") && o.ends_with("/%C")));
+        // Logging in asks, makes the shared connection, and leaves it be.
+        let login = server.login_command().unwrap();
+        assert!(!has(&login, "BatchMode=yes") && has(&login, "ControlMaster=yes"));
+        assert!(has(&login, "-f") && has(&login, "-N") && login.last().unwrap() == "me@devbox");
+        let forward = server.shared("forward", Some("127.0.0.1:1:localhost:2")).unwrap();
+        let tail: Vec<&str> = forward.iter().rev().take(5).rev().map(String::as_str).collect();
+        assert_eq!(tail, ["-O", "forward", "-L", "127.0.0.1:1:localhost:2", "me@devbox"]);
+        assert_eq!(ServerConfig::default().login_command(), None);
     }
 
     #[test]

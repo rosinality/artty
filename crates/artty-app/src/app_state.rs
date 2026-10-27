@@ -130,6 +130,13 @@ pub enum Status {
     /// this app can install it ([`install_remote`]).
     NeedsInstall(String),
     Installing,
+    /// ssh needs the user: a password, a code, whether to trust the
+    /// machine's key ([`log_in`]).
+    NeedsLogin(String),
+    /// A tab of this Mac's is logging in; connecting once that's done.
+    LoggingIn {
+        since: Instant,
+    },
 }
 
 impl Connection {
@@ -1070,6 +1077,7 @@ fn sync_appearance(cx: &mut App) {
 /// one connected must answer within seconds.
 fn heartbeat(cx: &mut App) {
     crate::forward::tick(cx);
+    check_logins(cx);
     const PING_EVERY: Duration = Duration::from_secs(5);
     const SILENCE: Duration = Duration::from_secs(15);
     const PROBE: Duration = Duration::from_secs(4);
@@ -1116,6 +1124,13 @@ fn heartbeat(cx: &mut App) {
     cx.global_mut::<Shared>().next_request += count as u64;
     for server in lost {
         log::warn!("server {server}: no answer; reconnecting");
+        // Its shared ssh connection is likely dead too, and new sessions
+        // would wait on it: end it.
+        if let Some(exit) = remote_config(server, cx).and_then(|r| r.shared("exit", None)) {
+            std::thread::spawn(move || {
+                std::process::Command::new(&exit[0]).args(&exit[1..]).output()
+            });
+        }
         // Ending what carries it ends the connection: `remote_lost` follows.
         if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize)
             && let Some(child) = connection.child.as_mut()
@@ -1289,6 +1304,13 @@ fn remote_opened(
             cx.refresh_windows();
             return;
         },
+        Err(error) if needs_login(&error) && by_ssh(server, cx) => {
+            let connection = &mut cx.global_mut::<Shared>().connections[server as usize];
+            connection.close();
+            connection.status = Status::NeedsLogin(error);
+            cx.refresh_windows();
+            return;
+        },
         Err(error) => return retry_later(server, error, cx),
     };
     let artty_core::remote::Opened { mut child, reader, writer, welcome } = opened;
@@ -1315,6 +1337,90 @@ fn remote_opened(
     }
     attach_remote(server, cx);
     cx.refresh_windows();
+}
+
+/// Whether ssh failed for want of the user (artty's ssh asks nothing).
+fn needs_login(error: &str) -> bool {
+    ["Permission denied", "Host key verification failed", "authentication", "password"]
+        .iter()
+        .any(|sign| error.contains(sign))
+}
+
+/// Log in to `server`'s machine in a tab of this Mac's (ssh asks there for
+/// what the machine wants), then connect through the shared connection
+/// that leaves.
+pub fn log_in(server: ServerId, cx: &mut App) {
+    let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
+        return;
+    };
+    let Some(command) = connection.remote.as_ref().and_then(|r| r.login_command()) else {
+        return;
+    };
+    let name = connection.name.clone();
+    connection.status = Status::LoggingIn { since: Instant::now() };
+    cx.refresh_windows();
+    // Say how it went; on failure, wait, so it can be read.
+    let script = "\"$@\"; status=$?; echo; if [ $status = 0 ]; then \
+        echo \"Logged in: artty connects now.\"; sleep 2; \
+        else echo \"ssh failed ($status). Press Return to close.\"; read _; fi";
+    let mut shell = vec!["sh".to_owned(), "-c".to_owned(), script.to_owned(), "sh".to_owned()];
+    shell.extend(command);
+    let request = Request::NewWorkspace {
+        name: Some(format!("Log in to {name}")),
+        cwd: None,
+        command: shell,
+    };
+    let answer = control_on(LOCAL, request, cx);
+    cx.spawn(async move |_| {
+        if let Ok(Response::Error { message }) = answer.await {
+            log::error!("couldn't open a tab to log in to {name}: {message}");
+        }
+    })
+    .detach();
+}
+
+/// While logging in: connect once the shared connection is up (asked
+/// every two seconds), or give up after ten minutes.
+fn check_logins(cx: &mut App) {
+    let count = cx.global::<Shared>().connections.len();
+    for server in 0..count as ServerId {
+        let connection = &mut cx.global_mut::<Shared>().connections[server as usize];
+        let Status::LoggingIn { since } = connection.status else { continue };
+        if since.elapsed() >= Duration::from_secs(600) {
+            connection.status = Status::NeedsLogin("the login took too long".to_owned());
+            cx.refresh_windows();
+            continue;
+        }
+        if since.elapsed().as_secs() % 2 != 0 {
+            continue;
+        }
+        let Some(check) = connection.remote.as_ref().and_then(|r| r.shared("check", None)) else {
+            continue;
+        };
+        let checking = cx.background_spawn(async move {
+            std::process::Command::new(&check[0])
+                .args(&check[1..])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        });
+        cx.spawn(async move |cx| {
+            if checking.await {
+                let _ = cx.update(|cx| {
+                    let logging_in = cx
+                        .global::<Shared>()
+                        .connections
+                        .get(server as usize)
+                        .is_some_and(|c| matches!(c.status, Status::LoggingIn { .. }));
+                    if logging_in {
+                        connect_remote(server, cx);
+                    }
+                });
+            }
+        })
+        .detach();
+    }
 }
 
 fn by_ssh(server: ServerId, cx: &App) -> bool {

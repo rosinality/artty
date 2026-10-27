@@ -249,7 +249,14 @@ ssh = "me@devbox"
 ```
 
 The connection is ssh running `artty server --stdio` there (ssh uses your
-config and keys, without password prompts). On Linux, artty is the server
+config, keys and agent). Everything artty does there — the connection,
+forwards, installs — shares one ssh connection per machine (OpenSSH's
+ControlMaster, its socket in `~/.ssh/artty`; it lasts ten minutes past its
+last use), so connecting again is quick, and a machine that wants a
+password, a code, or a yes to its key is logged in to once: its header says
+so — click it, and a tab of this Mac's runs ssh to ask; once logged in, the
+app connects through that. (After the connection is lost — a network gone
+— that shared connection is closed too, so such a machine asks again.) On Linux, artty is the server
 and the `artty` command (the app is macOS only), and this app installs it:
 when artty isn't there, or runs another build, the server's header says so
 — click it (or run `artty remote install NAME`) and the app copies its build
@@ -283,7 +290,7 @@ Ports: when a program in a pane listens on a TCP port (a dev server, say),
 the tab shows it (`:3000`; on Linux, where the server finds them). Click it
 to open it in the browser — another machine's is forwarded here first, by
 ssh, on the same port when it's free (`3000 → 3001` when it isn't); × stops
-forwarding. Forwards end with the app. `auto-forward-ports = true` forwards
+forwarding. Forwards end when the app quits (or loses the connection). `auto-forward-ports = true` forwards
 each as it starts listening. Activity shows them by process, and `artty ps`
 lists them.
 
