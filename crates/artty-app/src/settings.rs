@@ -741,6 +741,11 @@ impl Render for Settings {
                     self.toggle("copy", c.copy_on_select, "copy-on-select", cx),
                 ),
                 Self::row(
+                    "List a split tab's panes",
+                    Some("Off: one line, for the focused pane"),
+                    self.toggle("list-panes", c.list_panes, "list-panes", cx),
+                ),
+                Self::row(
                     "Flash on bell",
                     None,
                     self.toggle("vbell", c.visual_bell, "visual-bell", cx),

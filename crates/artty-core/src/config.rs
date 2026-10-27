@@ -44,6 +44,9 @@ pub struct Config {
     pub bell_sound: bool,
     /// Copy text to the clipboard as soon as it's selected.
     pub copy_on_select: bool,
+    /// In the sidebar, a tab with split panes lists them, a line each; off,
+    /// it's one line, for its focused pane.
+    pub list_panes: bool,
     /// Reopen the previous tabs on launch.
     pub restore_sessions: bool,
     /// Lines of each tab's output to save and show again; 0 saves none.
@@ -153,6 +156,7 @@ impl Default for Config {
             visual_bell: true,
             bell_sound: false,
             copy_on_select: false,
+            list_panes: true,
             restore_sessions: true,
             restore_scrollback: 1000,
             resume_agents: true,

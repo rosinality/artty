@@ -639,12 +639,6 @@ impl WindowView {
         workspace_color(workspace.color.as_deref()?)
     }
 
-    /// Whether the sidebar shows workspace sections: not for one unnamed
-    /// workspace, which looks like a plain list of tabs.
-    fn sections(&self) -> bool {
-        self.layout.workspaces.len() > 1 || self.layout.workspaces.iter().any(|w| w.name.is_some())
-    }
-
     /// Make the directory of a workspace's current pane its root.
     fn root_from_current_directory(&self, workspace: WorkspaceId, cx: &mut Context<Self>) {
         let Some(state) = self.layout.workspaces.iter().find(|w| w.id == workspace) else { return };
@@ -1696,136 +1690,93 @@ impl WindowView {
         let label: SharedString =
             if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
         let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
-        let detail = if split {
+        let group: SharedString = format!("tab-row-{index}").into();
+        let renaming = self.renaming.as_ref().filter(|r| r.target == RenameTarget::Tab(index));
+        // A split tab lists its panes, a line each, so every agent's state is
+        // visible; a name of its own (or renaming it) keeps a line above them.
+        // With `list-panes` off, a split tab is one line: its focused pane.
+        let list = split && self.config.list_panes;
+        let own_line = !list || tab.title.is_some() || renaming.is_some();
+        let detail = if list {
             None
         } else {
             focused.and_then(|state| Self::short_detail(&self.tab_title(tab, cx), state))
         };
-        let group: SharedString = format!("tab-row-{index}").into();
 
         // One line: icon, title, then what it's doing on the right, and a
         // last column for the ⌘N label (while ⌘ is held) or, on hover, a close
-        // button. (Fading, not hiding: GPUI can't change layout on hover.)
-        let renaming = self.renaming.as_ref().filter(|r| r.target == RenameTarget::Tab(index));
-        let header = div()
-            .flex()
-            .items_center()
-            .gap(px(6.))
-            .h(px(22.))
-            .child(self.icon_cell(summary))
-            .child(match renaming {
-                Some(renaming) => {
-                    let marked = self.marked_text.as_deref().unwrap_or_default();
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .px_1()
-                        .rounded(px(4.))
-                        .bg(rgba(0x0000004d))
-                        .border_1()
-                        .border_color(rgba(0x8fb4ff99))
-                        .text_color(rgba(0xffffffee))
-                        .child(format!("{}{marked}▏", renaming.text))
-                }
-                None => Self::one_line(self.tab_title(tab, cx))
-                    .flex_1()
-                    .min_w_0()
-                    .text_color(text_color)
-                    .when(attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
-            })
-            // The last column: what it's running; while ⌘ is held its ⌘N
-            // shortcut, and on hover the close button, in its place.
-            .child(
-                div()
-                    .relative()
-                    .min_w(px(TAB_LABEL_WIDTH))
-                    .max_w(px(110.))
-                    .h_full()
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .text_size(px(11.))
-                    .text_color(rgba(0xffffff70))
-                    .when_some(detail.filter(|_| renaming.is_none()), |d, detail| {
-                        d.child(
-                            Self::one_line(detail)
-                                .min_w_0()
-                                .opacity(if self.command_held { 0. } else { 1. })
-                                .group_hover(group.clone(), |s| s.opacity(0.)),
-                        )
-                    })
-                    .child(
+        // button.
+        let header = own_line.then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .h(px(22.))
+                .child(self.icon_cell(summary))
+                .child(match renaming {
+                    Some(renaming) => {
+                        let marked = self.marked_text.as_deref().unwrap_or_default();
                         div()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right_0()
-                            .flex()
-                            .items_center()
-                            .text_xs()
-                            .text_color(rgba(0xffffff80))
-                            .opacity(if self.command_held { 1. } else { 0. })
-                            .group_hover(group.clone(), |s| s.opacity(0.))
-                            .child(label),
-                    )
-                    .child(
-                        // Spans the slot's height, so the button sits at its center.
-                        div().absolute().top_0().bottom_0().right_0().flex().items_center().child(
-                            div()
-                                .id(("close-tab", index))
-                                .opacity(0.)
-                                .group_hover(group.clone(), |s| s.opacity(1.))
-                                .flex()
-                                .size(px(18.))
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(4.))
-                                .text_size(px(13.))
-                                .line_height(px(18.))
-                                .text_color(rgba(0xffffffa0))
-                                .hover(|d| d.bg(rgba(0xffffff1f)).text_color(rgba(0xffffffee)))
-                                .child("×")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    if let Some(&(workspace, tab)) = this.places.get(index) {
-                                        this.send(ClientMessage::CloseTab { workspace, tab }, cx);
-                                    }
-                                    cx.stop_propagation();
-                                })),
-                        ),
-                    ),
-            );
-
-        // Split tabs list their panes, so every agent's state is visible.
-        let pane_rows = split.then(|| {
-            ids.iter().zip(&states).map(|(&id, state)| {
-                let is_focused = id == tab.focused;
-                let title = state.map(|s| s.info.title.clone()).unwrap_or_else(|| "shell".into());
-                let detail = state.and_then(|state| Self::short_detail(&title, state));
-                let pane_attention = state.is_some_and(|s| s.info.needs_attention);
-                div()
-                    .id(("pane", id as usize))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .pl(px(14.))
-                    .text_size(px(11.5))
-                    .rounded(px(5.))
-                    .hover(|d| d.bg(rgba(0xffffff0c)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.focus_pane(id, cx)))
-                    .child(self.icon_cell(*state))
-                    .child(
-                        Self::one_line(title)
                             .flex_1()
                             .min_w_0()
-                            .text_color(if is_focused && selected { rgba(0xffffffd0) } else { rgba(0xffffff80) })
-                            .when(pane_attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
-                    )
-                    // At the right, as on the tab's own line.
-                    .when_some(detail, |d, detail| {
-                        d.child(Self::one_line(detail).flex_none().max_w(px(110.)).text_size(px(11.)).text_color(rgba(0xffffff60)))
-                    })
-            })
+                            .px_1()
+                            .rounded(px(4.))
+                            .bg(rgba(0x0000004d))
+                            .border_1()
+                            .border_color(rgba(0x8fb4ff99))
+                            .text_color(rgba(0xffffffee))
+                            .child(format!("{}{marked}▏", renaming.text))
+                    },
+                    None => Self::one_line(self.tab_title(tab, cx))
+                        .flex_1()
+                        .min_w_0()
+                        .text_color(text_color)
+                        .when(attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
+                })
+                .child(self.tab_end(
+                    index,
+                    &group,
+                    Some(label.clone()),
+                    detail.filter(|_| renaming.is_none()),
+                    cx,
+                ))
+        });
+
+        let pane_rows = list.then(|| {
+            ids.iter()
+                .zip(&states)
+                .enumerate()
+                .map(|(position, (&id, state))| {
+                    let is_focused = id == tab.focused;
+                    let title =
+                        state.map(|s| s.info.title.clone()).unwrap_or_else(|| "shell".into());
+                    let detail = state.and_then(|state| Self::short_detail(&title, state));
+                    let pane_attention = state.is_some_and(|s| s.info.needs_attention);
+                    // Without the tab's own line, the first pane's line has its
+                    // ⌘N label and close button.
+                    let controls = (position == 0 && !own_line).then(|| label.clone());
+                    div()
+                        .id(("pane", id as usize))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .rounded(px(5.))
+                        .hover(|d| d.bg(rgba(0xffffff0c)))
+                        // Under the tab's own line, indented and smaller;
+                        // otherwise lines as tall as a tab's.
+                        .map(|d| if own_line { d.pl(px(14.)).text_size(px(11.5)) } else { d.h(px(22.)) })
+                        .on_click(cx.listener(move |this, _, _, cx| this.focus_pane(id, cx)))
+                        .child(self.icon_cell(*state))
+                        .child(
+                            Self::one_line(title)
+                                .flex_1()
+                                .min_w_0()
+                                .text_color(if is_focused { text_color } else { rgba(0xffffff80) })
+                                .when(pane_attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
+                        )
+                        .child(self.tab_end(index, &group, controls, detail, cx))
+                })
+                .collect::<Vec<_>>()
         });
 
         div()
@@ -1865,8 +1816,81 @@ impl WindowView {
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                 this.move_tab(dragged.index, index, cx)
             }))
-            .child(header)
+            .children(header)
             .children(pane_rows.into_iter().flatten())
+    }
+
+    /// The last column of a sidebar line: what it's running and, given the
+    /// tab's ⌘N `label`, that label while ⌘ is held and on hover the tab's
+    /// close button, in its place. (Fading, not hiding: GPUI can't change
+    /// layout on hover.)
+    fn tab_end(
+        &self,
+        index: usize,
+        group: &SharedString,
+        label: Option<SharedString>,
+        detail: Option<String>,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
+        let controls = label.is_some();
+        div()
+            .relative()
+            .when(controls, |d| d.min_w(px(TAB_LABEL_WIDTH)))
+            .max_w(px(110.))
+            .h_full()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .text_size(px(11.))
+            .text_color(rgba(0xffffff70))
+            .when_some(detail, |d, detail| {
+                d.child(Self::one_line(detail).min_w_0().when(controls, |d| {
+                    d.opacity(if self.command_held { 0. } else { 1. })
+                        .group_hover(group.clone(), |s| s.opacity(0.))
+                }))
+            })
+            .when_some(label, |d, label| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .right_0()
+                        .flex()
+                        .items_center()
+                        .text_xs()
+                        .text_color(rgba(0xffffff80))
+                        .opacity(if self.command_held { 1. } else { 0. })
+                        .group_hover(group.clone(), |s| s.opacity(0.))
+                        .child(label),
+                )
+                .child(
+                    // Spans the slot's height, so the button sits at its center.
+                    div().absolute().top_0().bottom_0().right_0().flex().items_center().child(
+                        div()
+                            .id(("close-tab", index))
+                            .opacity(0.)
+                            .group_hover(group.clone(), |s| s.opacity(1.))
+                            .flex()
+                            .size(px(18.))
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
+                            .text_size(px(13.))
+                            .line_height(px(18.))
+                            .text_color(rgba(0xffffffa0))
+                            .hover(|d| d.bg(rgba(0xffffff1f)).text_color(rgba(0xffffffee)))
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(&(workspace, tab)) = this.places.get(index) {
+                                    this.send(ClientMessage::CloseTab { workspace, tab }, cx);
+                                }
+                                cx.stop_propagation();
+                            })),
+                    ),
+                )
+            })
     }
 
     /// A section header: fold arrow, name, what its tabs are doing, and a
@@ -2098,16 +2122,14 @@ impl WindowView {
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // Workspaces are sections; a folded one still shows the tab on screen.
-        let sections = self.sections();
+        // Workspaces are sections (there's always one); a folded one still
+        // shows the tab on screen.
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut index = 0;
         for (position, workspace) in self.layout.workspaces.iter().enumerate() {
-            if sections {
-                rows.push(self.workspace_header(position, cx).into_any_element());
-            }
+            rows.push(self.workspace_header(position, cx).into_any_element());
             for tab in &workspace.tabs {
-                if !(sections && workspace.collapsed) || index == self.active {
+                if !workspace.collapsed || index == self.active {
                     rows.push(self.tab_row(index, tab, cx).into_any_element());
                 }
                 index += 1;
@@ -2181,10 +2203,10 @@ impl WindowView {
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(rgba(0xffffff70))
-                    .child(if self.sections() { "WORKSPACES" } else { "TABS" })
+                    .child("WORKSPACES")
                     .child(
                         div()
-                            .id("new-tab")
+                            .id("new-workspace")
                             // Shown on hover, like the sections' own +.
                             .opacity(0.)
                             .group_hover("sidebar-heading", |s| s.opacity(1.))
@@ -2193,10 +2215,7 @@ impl WindowView {
                             .hover(|d| d.bg(rgba(0xffffff14)))
                             .text_size(px(14.))
                             .child("+")
-                            // With sections, sections are what this adds.
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                if this.sections() { this.new_workspace(cx) } else { this.open_tab(cx) }
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.new_workspace(cx))),
                     ),
             )
             .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(3.)).overflow_y_scroll().children(rows))

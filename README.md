@@ -121,7 +121,9 @@ The `artty server` process owns every terminal session; app windows attach
 to it. A window's tabs are grouped into workspaces — named sections of the
 sidebar, say one per project — which the server keeps as units of their own.
 A section header shows what its tabs are doing (a waiting agent, a busy
-command), even folded; a lone unnamed workspace is just a list of tabs.
+command), even folded. There's always at least one workspace; the + by
+WORKSPACES adds another. A tab split into panes lists them, a line each
+(`list-panes = false` shows only the focused one).
 A workspace's right-click menu moves it to a new window or another one, or
 hides it: it keeps running out of sight, and "N more workspaces…" at the
 bottom of the sidebar (or ⌘⇧O) brings it back.

@@ -35,6 +35,11 @@ bell-sound = false
 # Copy text to the clipboard as soon as it's selected.
 copy-on-select = false
 
+# In the sidebar, a tab with split panes lists them, a line each (a tab you
+# named keeps its own line above them); false shows one line, for the focused
+# pane.
+list-panes = true
+
 # Foreground programs shown as coding agents in the sidebar.
 agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"]
 
