@@ -36,6 +36,53 @@ impl SearchAll {
     }
 }
 
+/// A mark telling an agent's things apart: a plain glyph in a color it's
+/// known by (not its logo).
+pub(super) fn agent_mark(agent: &str) -> (&'static str, u32) {
+    match agent {
+        "claude" => ("✳", 0xd97757),
+        "codex" => ("◇", 0x10a37f),
+        "gemini" => ("✦", 0x4796e3),
+        _ => ("●", 0x9aa0a6),
+    }
+}
+
+/// Where `query` is in `text` (bytes), as the search matches it: case
+/// ignored unless it has capitals.
+fn occurrences(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let exact = query.chars().any(char::is_uppercase);
+    let (haystack, needle) = if exact {
+        (text.to_owned(), query.to_owned())
+    } else {
+        (text.to_lowercase(), query.to_lowercase())
+    };
+    // (Lowercasing that changes lengths would misplace them: none then.)
+    if haystack.len() != text.len() {
+        return Vec::new();
+    }
+    haystack
+        .match_indices(&needle)
+        .map(|(at, found)| at..at + found.len())
+        .filter(|r| text.is_char_boundary(r.start) && text.is_char_boundary(r.end))
+        .collect()
+}
+
+/// `text` on one line, `marked` ranges standing out.
+fn marked_line(text: String, marked: Vec<std::ops::Range<usize>>) -> gpui::Div {
+    let style = gpui::HighlightStyle {
+        color: Some(rgba(0xffffffff).into()),
+        background_color: Some(rgba(0xe0af6866).into()),
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    let text = gpui::StyledText::new(text).with_highlights(marked.into_iter().map(|r| (r, style)));
+    div().overflow_hidden().line_clamp(1).text_ellipsis().child(text)
+}
+
 /// "3 hours ago", for a time in seconds since the epoch.
 fn ago(secs: u64) -> String {
     let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -211,16 +258,28 @@ impl WindowView {
                 .text_color(rgba(0xffffff60))
                 .child(label)
         };
-        let row = |i: usize| {
+        // A result: its mark (what it's from), then its lines.
+        let row = |i: usize, (mark, color): (&'static str, u32), lines: Vec<gpui::Div>| {
             div()
                 .id(("found", i))
                 .flex()
-                .flex_col()
+                .items_start()
+                .gap(px(8.))
                 .px(px(10.))
                 .py(px(4.))
                 .rounded(px(6.))
                 .when(i == search.selected, |d| d.bg(rgba(0x3478f6ff)))
                 .when(i != search.selected, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(14.))
+                        .flex()
+                        .justify_center()
+                        .text_color(rgba(color << 8 | 0xff))
+                        .child(mark),
+                )
+                .child(div().flex().flex_col().flex_1().min_w_0().children(lines))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(search) = this.search_all.as_mut() {
                         search.selected = i;
@@ -241,22 +300,30 @@ impl WindowView {
             }
             place.extend(state.and_then(|s| s.info.workspace_name.clone()));
             place.extend(state.map(|s| s.info.title.clone()));
-            items.push(
-                row(i)
-                    .child(
-                        Self::one_line(hit.text.trim().to_owned())
-                            .font_family(
-                                self.config.font_family.first().cloned().unwrap_or_default(),
-                            )
-                            .text_color(rgba(0xffffffe0)),
-                    )
-                    .child(
-                        Self::one_line(place.join(" · "))
-                            .text_size(px(11.))
-                            .text_color(rgba(0xffffff70)),
-                    )
-                    .into_any_element(),
-            );
+            // A pane running an agent: its mark; else a prompt's.
+            let mark = match state.and_then(|s| s.agent.as_deref()) {
+                Some(agent) => agent_mark(agent),
+                None => ("❯", 0x7f8590),
+            };
+            // The match where the server found it (in characters), in the
+            // line as shown (without its leading spaces).
+            let shown = hit.text.trim();
+            let lead = hit.text.len() - hit.text.trim_start().len();
+            let byte = |chars: usize| {
+                hit.text.char_indices().nth(chars).map_or(hit.text.len(), |(at, _)| at)
+            };
+            let (start, end) = (byte(hit.column), byte(hit.column + hit.length));
+            let marked = (start >= lead && end <= lead + shown.len() && start < end)
+                .then(|| start - lead..end - lead)
+                .into_iter()
+                .collect();
+            let lines = vec![
+                marked_line(shown.to_owned(), marked)
+                    .font_family(self.config.font_family.first().cloned().unwrap_or_default())
+                    .text_color(rgba(0xffffffe0)),
+                Self::one_line(place.join(" · ")).text_size(px(11.)).text_color(rgba(0xffffff70)),
+            ];
+            items.push(row(i, mark, lines).into_any_element());
         }
         if !search.sessions.is_empty() {
             items.push(
@@ -272,28 +339,17 @@ impl WindowView {
             }
             place.extend(hit.cwd.as_ref().map(|c| c.display().to_string()));
             place.push(ago(hit.modified));
-            items.push(
-                row(i)
-                    .child(
-                        Self::one_line(if hit.title.is_empty() {
-                            "(untitled)".to_owned()
-                        } else {
-                            hit.title.clone()
-                        })
-                        .text_color(rgba(0xffffffee)),
-                    )
-                    .child(
-                        Self::one_line(hit.snippet.clone())
-                            .text_size(px(11.5))
-                            .text_color(rgba(0xffffffb0)),
-                    )
-                    .child(
-                        Self::one_line(place.join(" · "))
-                            .text_size(px(11.))
-                            .text_color(rgba(0xffffff70)),
-                    )
-                    .into_any_element(),
-            );
+            let title =
+                if hit.title.is_empty() { "(untitled)".to_owned() } else { hit.title.clone() };
+            let lines = vec![
+                marked_line(title.clone(), occurrences(&title, &search.query))
+                    .text_color(rgba(0xffffffee)),
+                marked_line(hit.snippet.clone(), occurrences(&hit.snippet, &search.query))
+                    .text_size(px(11.5))
+                    .text_color(rgba(0xffffffb0)),
+                Self::one_line(place.join(" · ")).text_size(px(11.)).text_color(rgba(0xffffff70)),
+            ];
+            items.push(row(i, agent_mark(&hit.agent), lines).into_any_element());
         }
         let status = match (search.searching, items.is_empty(), search.query.trim().is_empty()) {
             (_, _, true) => Some("What every pane printed, and agents' conversations"),
@@ -367,5 +423,20 @@ impl WindowView {
                 }),
             );
         Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn occurrences_as_the_search_finds_them() {
+        assert_eq!(occurrences("Token refresh: token", "token"), [0..5, 15..20]);
+        // Capitals: exact.
+        let only = |found: Vec<std::ops::Range<usize>>| (found.len(), found.first().cloned());
+        assert_eq!(only(occurrences("Token refresh: token", "Token")), (1, Some(0..5)));
+        assert_eq!(only(occurrences("héllo wörld", "wör")), (1, Some(7..11)));
+        assert!(occurrences("anything", "  ").is_empty());
     }
 }
