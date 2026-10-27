@@ -251,9 +251,12 @@ ssh = "me@devbox"
 The connection is ssh running `artty server --stdio` there (artty must be
 installed there; ssh uses your config and keys, without password prompts).
 On Linux, artty is the server and the `artty` command (the app is macOS
-only); `./scripts/remote-install.sh DESTINATION` builds it there from this
-source with that machine's cargo and installs it in `~/.local/bin`, handing
-a running server over to the new build.
+only); `./scripts/remote-install.sh DESTINATION` builds it here for that
+machine (against glibc 2.28, so for any distribution from 2018 on; it needs
+`brew install zig`, `cargo install cargo-zigbuild` and `rustup target add
+x86_64-unknown-linux-gnu`), copies it there into `~/.local/bin`, and hands a
+running server over to the new build. With `--build-there` it builds there
+from this source with that machine's cargo instead.
 Like this Mac's, that server keeps its sessions running on its own, and it
 sends screens rather than a stream of output, so a dropped connection —
 sleep, a new network — loses nothing: artty reconnects with backoff (a
