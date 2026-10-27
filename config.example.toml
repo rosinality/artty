@@ -85,6 +85,12 @@ restore-scrollback = 1000
 # Resume coding agents that were running in restored tabs.
 resume-agents = true
 
+# How long a key sequence ("cmd-e 1" in [keys] below) waits for its next key, in
+# seconds; 0 waits as long as it takes (as Ghostty does). While it waits, the
+# keys so far show at the bottom of the window; a key that continues no
+# sequence goes on, with them, as typed.
+key-sequence-timeout = 0
+
 # How to resume an agent, by name. `session` is used when the agent's hooks
 # reported its conversation id ({session}); `latest` otherwise. Claude Code,
 # Codex and Gemini CLI are built in; add others the same way.
@@ -116,12 +122,16 @@ latest = "gemini --resume latest"
 # Key bindings over the defaults: keystrokes to an action, "none" (takes a
 # default binding away) or text to type. Keystrokes are modifiers (cmd,
 # ctrl, alt, shift) and a key joined by `-`; several, separated by spaces,
-# make a sequence. Changes apply as soon as the file is saved.
+# make a sequence. Ghostty's way works too: `cmd+e>1`, and "text:è" (with its
+# escapes: \xc3\xa8, \u{e8}, \n, \t, \e). Changes apply as soon as the file
+# is saved.
 [keys]
 # "cmd-shift-t" = "new-tab"
 # "cmd-t" = "none"
 # "shift-enter" = { send = "\u001b[13;2u" }
 # "ctrl-a c" = "new-tab"
+# "cmd+e>1" = "text:è"
+# "cmd+e>2" = "text:é"
 #
 # Actions: new-window, new-tab, close-tab, close-pane, next-tab,
 # previous-tab, rename-tab, move-tab-up, move-tab-down, new-workspace,
@@ -142,8 +152,8 @@ latest = "gemini --resume latest"
 # beside this Mac's: their workspaces and tabs work as local ones do, and
 # keep running there when the connection drops (artty reconnects by itself).
 # artty must be installed there; the connection is ssh running
-# `artty server --stdio`, with your ssh config and keys (no password
-# prompts: use a key or an agent).
+# `artty server --stdio`, with your ssh config, keys and agent; a password,
+# a code or a host key to trust is asked for in the window.
 # [[servers]]
 # name = "devbox"
 # ssh = "me@devbox"               # or a Host from ~/.ssh/config

@@ -388,6 +388,8 @@ pub struct WindowView {
     search_all: Option<search_view::SearchAll>,
     /// The workspace switcher's list is open (sidebar style `switcher`).
     switcher_open: bool,
+    /// A key sequence's keys so far (`cmd-e 1` waiting after ⌘E), shown.
+    pending_keys: Option<String>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -429,6 +431,13 @@ impl WindowView {
         let poll = every(POLL_INTERVAL, Self::poll);
         let spinner = every(SPINNER_INTERVAL, Self::spin);
 
+        // A key sequence under way: its keys so far, shown until it ends.
+        let pending = cx.observe_pending_input(window, |this, window, cx| {
+            this.pending_keys = window
+                .pending_input_keystrokes()
+                .map(|keys| keys.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" "));
+            cx.notify();
+        });
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
             this.update_secure_input(cx);
@@ -504,8 +513,9 @@ impl WindowView {
             palette: None,
             search_all: None,
             switcher_open: false,
+            pending_keys: None,
             _tasks: vec![blink, poll, spinner],
-            _subscriptions: vec![activation],
+            _subscriptions: vec![activation, pending],
         }
     }
 
@@ -3898,6 +3908,21 @@ impl Render for WindowView {
                                 .children(self.copy_mode_badge())
                                 .children(self.files_drawer(cx))
                                 .children(self.toast_overlay())
+                                .children(self.pending_keys.clone().map(|keys| {
+                                    div()
+                                        .absolute()
+                                        .bottom(px(16.))
+                                        .right(px(16.))
+                                        .px_3()
+                                        .py(px(4.))
+                                        .rounded(px(8.))
+                                        .bg(rgba(0x1e2430f2))
+                                        .border_1()
+                                        .border_color(rgba(0x8fb4ff66))
+                                        .text_size(px(12.))
+                                        .text_color(rgba(0xffffffd0))
+                                        .child(format!("{keys} …"))
+                                }))
                                 .on_drop(cx.listener(
                                     |this, paths: &gpui::ExternalPaths, window, cx| {
                                         this.drop_paths(paths, window, cx)

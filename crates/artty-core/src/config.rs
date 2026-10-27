@@ -72,8 +72,11 @@ pub struct Config {
     pub resume: BTreeMap<String, ResumeCommand>,
     pub colors: Colors,
     /// Key bindings over the defaults: keystrokes (as in `cmd-shift-t`, or
-    /// several separated by spaces) to what they do.
+    /// several separated by spaces; Ghostty's `cmd+e>1` too) to what they do.
     pub keys: BTreeMap<String, KeyAction>,
+    /// How long a key sequence (`cmd-e 1`) waits for its next key, in
+    /// seconds; 0 waits as long as it takes.
+    pub key_sequence_timeout: f32,
     /// Other machines' artty servers, shown in the sidebar beside this one's.
     pub servers: Vec<ServerConfig>,
 }
@@ -328,6 +331,7 @@ impl Default for Config {
             ]),
             colors: Colors::default(),
             keys: BTreeMap::new(),
+            key_sequence_timeout: 0.,
             servers: Vec::new(),
         }
     }

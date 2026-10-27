@@ -101,7 +101,11 @@ keyboard, bell, notifications, sessions). Everything lives in
 reloads when it changes; see [`config.example.toml`](config.example.toml).
 Its `[keys]` table rebinds keys: `"cmd-shift-t" = "new-tab"`, `"cmd-t" =
 "none"` to take a default away, or `"shift-enter" = { send = "..." }` to
-type text; the example lists every action.
+type text; the example lists every action. Keys can come in sequences —
+`"cmd-e 1" = { send = "è" }`, or as Ghostty writes it, `"cmd+e>1" =
+"text:è"` — which wait for their next key as long as it takes
+(`key-sequence-timeout` sets a limit), the keys so far shown at the bottom
+of the window meanwhile.
 
 ## Agents
 

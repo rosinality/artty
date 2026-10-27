@@ -890,6 +890,18 @@ pub(crate) enum DrawPhase {
     Focus,
 }
 
+/// How long a keystroke sequence waits for its next key, in milliseconds
+/// (0: as long as it takes). artty: set from its config.
+static PENDING_INPUT_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1000);
+
+/// How long a keystroke sequence (`ctrl-a c`) waits for its next key before
+/// the keys typed so far go on as typed; `None` waits as long as it takes.
+pub fn set_pending_input_timeout(timeout: Option<Duration>) {
+    let ms = timeout.map_or(0, |t| (t.as_millis() as u64).max(1));
+    PENDING_INPUT_TIMEOUT_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Default, Debug)]
 struct PendingInput {
     keystrokes: SmallVec<[Keystroke; 1]>,
@@ -3801,8 +3813,9 @@ impl Window {
         if !match_result.pending.is_empty() {
             currently_pending.keystrokes = match_result.pending;
             currently_pending.focus = self.focus;
-            currently_pending.timer = Some(self.spawn(cx, async move |cx| {
-                cx.background_executor.timer(Duration::from_secs(1)).await;
+            let timeout = PENDING_INPUT_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed);
+            currently_pending.timer = (timeout > 0).then(|| self.spawn(cx, async move |cx| {
+                cx.background_executor.timer(Duration::from_millis(timeout)).await;
                 cx.update(move |window, cx| {
                     let Some(currently_pending) = window
                         .pending_input
