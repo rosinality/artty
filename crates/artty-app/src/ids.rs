@@ -74,7 +74,7 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
                 tag(&mut pane.info.id);
             }
         },
-        ServerMessage::Bell { pane } => tag(pane),
+        ServerMessage::Bell { pane } | ServerMessage::DirChanged { pane } => tag(pane),
         ServerMessage::App(command) => match command {
             AppCommand::Activate { window }
             | AppCommand::OpenWindow { window }
@@ -149,6 +149,7 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
         | ClientMessage::ClearBuffer { pane }
         | ClientMessage::JumpToPrompt { pane, .. }
         | ClientMessage::CopyMode { pane, .. }
+        | ClientMessage::Unwatch { pane }
         | ClientMessage::PaneToNewTab { pane } => untag(pane),
         ClientMessage::CloseTab { workspace, .. }
         | ClientMessage::SelectTab { workspace, .. }

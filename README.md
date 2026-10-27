@@ -298,8 +298,12 @@ goes back, replacing the file there if that hasn't changed since (else you're
 asked). **Download** puts one in ~/Downloads (**Reveal**, for this Mac's),
 **Copy Path** copies where it is; drop files on the drawer to put them in
 the folder it shows — one whose name is there asks whether to replace it,
-keep both, or skip. It looks again every two seconds (a folder that hasn't
-changed costs a few bytes), or at once with ⟳. It lies over the
+keep both, or skip. The server watches the folder shown (inotify; kqueue on
+macOS) and tells the app when it changes, or when the pane's shell moves to
+another, so the drawer keeps up within a moment; it also looks again every
+30 seconds, for changes a watch can't see (a network filesystem's, from
+other machines), and every two where watching isn't to be had. ⟳ looks at
+once. It lies over the
 terminal instead of narrowing it, so nothing running there resizes.
 
 Ports: when a program in a pane listens on a TCP port (a dev server, say),

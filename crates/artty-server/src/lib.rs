@@ -8,6 +8,7 @@
 mod handover;
 mod inbox;
 mod server;
+mod watch;
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -34,6 +35,8 @@ pub(crate) enum Input {
     Connected(ClientId, Sender<ServerMessage>),
     Client(ClientId, ClientMessage),
     Disconnected(ClientId),
+    /// Folders watched for apps changed (see `watch`).
+    DirsChanged(Vec<PathBuf>),
 }
 
 /// Run the server until its last session ends. Fails if another server is

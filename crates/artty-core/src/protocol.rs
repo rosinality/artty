@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -469,6 +469,10 @@ pub enum ClientMessage {
     ReopenClosedTab {
         window: WindowId,
     },
+    /// Stop telling this app about the folder its `ListDir` for `pane` watches.
+    Unwatch {
+        pane: PaneId,
+    },
     /// Screen updates up to [`ServerMessage::Sync`] `seq` have arrived: the
     /// server sends more (it holds them back while two batches are unseen,
     /// so a slow link gets the newest screens rather than a backlog).
@@ -532,11 +536,15 @@ pub enum Query {
     },
     /// What's in a folder on the pane's machine: `path`, else the pane's
     /// current directory. Answered with [`Reply::Dir`]; without its entries
-    /// if their fingerprint is still `known`.
+    /// if their fingerprint is still `known`. With `watch`, this app is then
+    /// told when it changes ([`ServerMessage::DirChanged`]), or (without a
+    /// path) when the pane's directory does, until
+    /// [`ClientMessage::Unwatch`] or another `ListDir` for the pane.
     ListDir {
         pane: PaneId,
         path: Option<PathBuf>,
         known: Option<u64>,
+        watch: bool,
     },
     /// Part of a file on the pane's machine, from `offset`: answered with
     /// [`Reply::File`].
@@ -622,12 +630,15 @@ pub struct FileChunk {
 }
 
 /// A folder listed ([`Query::ListDir`]): where (resolved), what's in it
-/// (`None`: as `known`), and that's fingerprint.
+/// (`None`: as `known`), and that's fingerprint; and whether it's watched
+/// (it may not be: a network filesystem's changes from elsewhere aren't
+/// seen, and watches are limited).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Listing {
     pub path: PathBuf,
     pub fingerprint: u64,
     pub entries: Option<Vec<DirEntry>>,
+    pub watched: bool,
 }
 
 /// A folder's entry ([`Query::ListDir`]).
@@ -861,6 +872,11 @@ pub enum ServerMessage {
     },
     Pong {
         id: u64,
+    },
+    /// The folder watched for `pane` changed, or (watching the pane's
+    /// directory) the pane moved to another: list it again.
+    DirChanged {
+        pane: PaneId,
     },
 }
 

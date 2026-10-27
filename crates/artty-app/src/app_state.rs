@@ -752,6 +752,11 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                 }
             },
         },
+        ServerMessage::DirChanged { pane } => {
+            for view in app_views(cx) {
+                view.update(cx, |view, cx| view.dir_changed(pane, cx));
+            }
+        },
         ServerMessage::Clipboard { text } => {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
         },
@@ -1630,7 +1635,7 @@ pub fn restart(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use artty_core::protocol::{Existing, UploadError, UploadTo};
+    use artty_core::protocol::{Existing, Listing, UploadError, UploadTo};
 
     /// A server of its own (in a directory of its own), reached through a
     /// command as through ssh. `None` without the app binary built.
@@ -1926,7 +1931,7 @@ mod tests {
         // Listed: folders first; no part files left. Asked again with what
         // it knows: unchanged, no entries sent.
         std::fs::create_dir_all(into.join("sub")).unwrap();
-        let list = |known| Query::ListDir { pane, path: Some(into.clone()), known };
+        let list = |known| Query::ListDir { pane, path: Some(into.clone()), known, watch: false };
         let Reply::Dir(Ok(listing)) = ask(list(None)) else { panic!() };
         assert_eq!(listing.path, into.canonicalize().unwrap());
         let entries = listing.entries.unwrap();
@@ -1935,7 +1940,7 @@ mod tests {
         let Reply::Dir(Ok(again)) = ask(list(Some(listing.fingerprint))) else { panic!() };
         assert_eq!((again.fingerprint, again.entries), (listing.fingerprint, None));
         // Without a path: the pane's directory.
-        let pane_dir = Query::ListDir { pane, path: None, known: None };
+        let pane_dir = Query::ListDir { pane, path: None, known: None, watch: false };
         assert!(matches!(ask(pane_dir), Reply::Dir(Ok(_))));
 
         // A program copies; another asks for a page to open.
@@ -1951,6 +1956,30 @@ mod tests {
             opens,
             ServerMessage::App(AppCommand::OpenUrl { url }) if url == "https://example.com"
         ));
+
+        // A folder watched: a file made in it is told of (no asking again).
+        let watched = dir.join("watched");
+        std::fs::create_dir_all(&watched).unwrap();
+        let list = |path| ClientMessage::Query {
+            id: 9,
+            query: Query::ListDir { pane, path, known: None, watch: true },
+        };
+        let reply = exchange(list(Some(watched.clone())), &|m| {
+            matches!(m, ServerMessage::Reply { id: 9, .. }).then_some(m)
+        });
+        assert!(matches!(
+            reply,
+            ServerMessage::Reply { reply: Reply::Dir(Ok(Listing { watched: true, .. })), .. }
+        ));
+        std::fs::write(watched.join("new.txt"), b"x").unwrap();
+        let changed = |m: ServerMessage| matches!(m, ServerMessage::DirChanged { .. }).then_some(m);
+        let told = exchange(ClientMessage::Ping { id: 50 }, &changed);
+        assert!(matches!(told, ServerMessage::DirChanged { pane: p } if p == pane));
+        // Following the pane's directory: told when the shell moves.
+        exchange(list(None), &|m| matches!(m, ServerMessage::Reply { id: 9, .. }).then_some(m));
+        let cd = format!("cd {}\r", watched.display());
+        let told = exchange(ClientMessage::Input { pane, bytes: cd.into_bytes() }, &changed);
+        assert!(matches!(told, ServerMessage::DirChanged { pane: p } if p == pane));
 
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         exchange(stop, &|m| matches!(m, ServerMessage::Stopping { .. }).then_some(m));

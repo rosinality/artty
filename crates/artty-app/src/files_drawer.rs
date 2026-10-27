@@ -12,8 +12,10 @@ use artty_core::protocol::{DirEntry, Existing, UploadError, UploadTo};
 use super::*;
 
 const WIDTH: f32 = 300.;
-/// How often a drawer following its pane looks again (the shell may have
-/// moved, or files changed).
+/// How often a drawer looks again: seldom while the server watches its
+/// folder (and tells of changes; this is for a network filesystem, whose
+/// changes from elsewhere it may not see), else often.
+const REFRESH_WATCHED: Duration = Duration::from_secs(30);
 const REFRESH: Duration = Duration::from_secs(2);
 
 pub(super) struct Files {
@@ -24,6 +26,8 @@ pub(super) struct Files {
     entries: Vec<DirEntry>,
     /// The listing's fingerprint: the server answers "unchanged" to it.
     fingerprint: Option<u64>,
+    /// The server watches the folder (and tells when it changes).
+    watched: bool,
     error: Option<String>,
     /// Lists the pane's current directory (else a folder opened here).
     follow: bool,
@@ -33,7 +37,8 @@ pub(super) struct Files {
 
 impl WindowView {
     pub(super) fn toggle_files(&mut self, cx: &mut Context<Self>) {
-        if self.files.take().is_some() {
+        if let Some(files) = self.files.take() {
+            self.send(ClientMessage::Unwatch { pane: files.pane }, cx);
             return cx.notify();
         }
         let Some(pane) = self.focused_id() else { return };
@@ -42,6 +47,7 @@ impl WindowView {
             path: None,
             entries: Vec::new(),
             fingerprint: None,
+            watched: false,
             error: None,
             follow: true,
             hidden: false,
@@ -55,13 +61,14 @@ impl WindowView {
         let Some(files) = self.files.as_mut() else { return };
         files.asked = Some(Instant::now());
         let (pane, known) = (files.pane, files.fingerprint);
-        let answer = app_state::query(Query::ListDir { pane, path, known }, cx);
+        let answer = app_state::query(Query::ListDir { pane, path, known, watch: true }, cx);
         cx.spawn(async move |this, cx| {
             let reply = answer.await;
             let _ = this.update(cx, |this, cx| {
                 let Some(files) = this.files.as_mut().filter(|f| f.pane == pane) else { return };
                 match reply {
                     Ok(Reply::Dir(Ok(listing))) => {
+                        files.watched = listing.watched;
                         // (No entries: as before.)
                         if let Some(entries) = listing.entries {
                             files.path = Some(listing.path);
@@ -90,16 +97,22 @@ impl WindowView {
         let focused = self.focused_id();
         let Some(files) = self.files.as_mut() else { return };
         let moved = focused.is_some_and(|pane| pane != files.pane);
+        let mut unwatch = None;
         if moved && files.follow {
+            unwatch = Some(files.pane);
             files.pane = focused.unwrap_or(files.pane);
             files.entries.clear();
             files.path = None;
             files.fingerprint = None;
         }
-        let due = files.asked.is_none_or(|at| at.elapsed() >= REFRESH);
+        let every = if files.watched { REFRESH_WATCHED } else { REFRESH };
+        let due = files.asked.is_none_or(|at| at.elapsed() >= every);
         if moved && files.follow || due {
             let path = if files.follow { None } else { files.path.clone() };
             self.list_files(path, cx);
+        }
+        if let Some(pane) = unwatch {
+            self.send(ClientMessage::Unwatch { pane }, cx);
         }
     }
 
@@ -112,11 +125,18 @@ impl WindowView {
 
     fn follow_pane(&mut self, cx: &mut Context<Self>) {
         let focused = self.focused_id();
+        let mut unwatch = None;
         if let Some(files) = self.files.as_mut() {
             files.follow = true;
+            if focused.is_some_and(|pane| pane != files.pane) {
+                unwatch = Some(files.pane);
+            }
             files.pane = focused.unwrap_or(files.pane);
         }
         self.list_files(None, cx);
+        if let Some(pane) = unwatch {
+            self.send(ClientMessage::Unwatch { pane }, cx);
+        }
     }
 
     /// Open a file here: this Mac's as it is; another machine's to edit
@@ -129,6 +149,14 @@ impl WindowView {
         }
         // After this view's update (it shows toasts in a view, maybe this).
         cx.defer(move |cx| crate::edits::open(pane, path, cx));
+    }
+
+    /// The server says the folder listed for `pane` changed (or the pane
+    /// moved to another).
+    pub fn dir_changed(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+        if self.files.as_ref().is_some_and(|f| f.pane == pane) {
+            self.refresh_files(cx);
+        }
     }
 
     /// List the folder shown again now.

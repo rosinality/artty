@@ -239,6 +239,8 @@ pub(crate) struct Server {
     history: HashMap<PaneId, VecDeque<(f32, u64)>>,
     /// The TCP ports each pane's programs listen on, as of the last sample.
     ports: HashMap<PaneId, Vec<u16>>,
+    /// Folders apps' files drawers show.
+    watches: crate::watch::Watches,
     /// Files being sent by apps, by app and upload.
     uploads: HashMap<(ClientId, u64), Upload>,
     server_usage: Option<ServerUsage>,
@@ -458,6 +460,7 @@ impl Server {
         if let Some(error) = error {
             log::error!("config: {error}");
         }
+        let watches = crate::watch::Watches::new(inbox.clone());
         let sink: Arc<dyn Fn(PaneId, Event) + Send + Sync> =
             Arc::new(move |id, event| inbox.pane_event(id, event));
         let now = Instant::now();
@@ -494,6 +497,7 @@ impl Server {
             history: HashMap::new(),
             uploads: HashMap::new(),
             ports: HashMap::new(),
+            watches,
             server_usage: None,
             listener_fd,
             handover_to: None,
@@ -1435,8 +1439,14 @@ impl Server {
                 );
             },
             Input::Client(id, message) => self.handle_client(id, message),
+            Input::DirsChanged(dirs) => {
+                for (client, pane) in self.watches.changed(&dirs) {
+                    self.send(client, ServerMessage::DirChanged { pane });
+                }
+            },
             Input::Disconnected(id) => {
                 self.clients.remove(&id);
+                self.watches.forget(id);
                 // What it was sending is cut short: no half files.
                 for (_, receiving) in self.uploads.extract_if(|(client, _), _| *client == id) {
                     let _ = std::fs::remove_file(receiving.part);
@@ -1830,6 +1840,7 @@ impl Server {
                 }
             },
             ClientMessage::Ping { id } => self.send(client, ServerMessage::Pong { id }),
+            ClientMessage::Unwatch { pane } => self.watches.unwatch(client, pane),
             ClientMessage::Appearance { theme, cursor } => {
                 self.appearance = true;
                 if *self.theme != theme || self.cursor != cursor {
@@ -1887,8 +1898,15 @@ impl Server {
                     Query::Upload { pane: _, upload, name, data, last, to } => {
                         Reply::Upload(self.upload(client, upload, &name, &data, last, to))
                     },
-                    Query::ListDir { pane, path, known } => {
-                        Reply::Dir(self.list_dir(pane, path, known))
+                    Query::ListDir { pane, path, known, watch } => {
+                        let follows = path.is_none();
+                        let mut listing = self.list_dir(pane, path, known);
+                        if let (true, Ok(listing)) = (watch, listing.as_mut()) {
+                            let cwd = self.panes.get(&pane).and_then(|p| p.session.cwd());
+                            listing.watched =
+                                self.watches.watch(client, pane, &listing.path, follows, cwd);
+                        }
+                        Reply::Dir(listing)
                     },
                     Query::ReadFile { pane: _, path, offset } => {
                         Reply::File(read_file(&path, offset))
@@ -2160,7 +2178,7 @@ impl Server {
             hasher.finish()
         };
         let entries = (known != Some(fingerprint)).then_some(entries);
-        Ok(Listing { path, fingerprint, entries })
+        Ok(Listing { path, fingerprint, entries, watched: false })
     }
 
     fn respond(&mut self, request: Request) -> Result<Response, String> {
@@ -2627,6 +2645,12 @@ impl Server {
 
     /// Once a second: processes, statuses, `artty run` timeouts, config.
     fn poll(&mut self) {
+        // Files drawers following a pane's directory: it moved.
+        let panes = &self.panes;
+        let moved = self.watches.moved(|pane| panes.get(&pane)?.session.cwd());
+        for (client, pane) in moved {
+            self.send(client, ServerMessage::DirChanged { pane });
+        }
         // An app that went quiet (a Mac asleep, a network gone) can take a
         // long while to be noticed as disconnected: let its windows go, for
         // another app to show. (It reconnects when it's back.)
