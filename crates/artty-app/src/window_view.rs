@@ -142,6 +142,7 @@ enum MenuCommand {
     SetColor(Option<usize>),
     RootFromCurrentDirectory,
     ClearRoot,
+    ReconnectFromScratch,
 }
 
 /// The shade of a workspace color (see `WORKSPACE_COLORS`).
@@ -166,6 +167,8 @@ enum MenuTarget {
     /// A tab in the sidebar, as an index into `tabs`.
     Tab(usize),
     Workspace(WorkspaceId),
+    /// Another machine's server, by its header.
+    Server(ServerId),
 }
 
 struct ContextMenu {
@@ -1200,6 +1203,12 @@ impl WindowView {
                         self.send(ClientMessage::TabToNewWorkspace { workspace, tab }, cx)
                     },
                     _ => {},
+                }
+                return cx.notify();
+            },
+            MenuTarget::Server(server) => {
+                if command == MenuCommand::ReconnectFromScratch {
+                    app_state::reconnect_from_scratch(server, cx);
                 }
                 return cx.notify();
             },
@@ -2252,6 +2261,8 @@ impl WindowView {
         };
         let connected = status == Status::Connected;
         let install = matches!(status, Status::NeedsInstall(_));
+        let by_ssh = server != LOCAL
+            && app_state::remote_config(server, cx).is_some_and(|r| r.ssh.is_some());
         let away =
             matches!(status, Status::Waiting { .. } | Status::Off(_) | Status::NeedsLogin(_))
                 || install;
@@ -2310,6 +2321,17 @@ impl WindowView {
                         .pl(px(12.))
                         .text_size(px(10.5))
                         .text_color(rgba(0xffffff50)),
+                )
+            })
+            // A fresh ssh connection (the shared one closed first): the
+            // host's key checked again, ssh's config and keys read again.
+            .when(by_ssh, |d| {
+                d.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.open_sidebar_menu(MenuTarget::Server(server), event.position, cx);
+                        cx.stop_propagation();
+                    }),
                 )
             })
             .when(away && server != LOCAL, |d| {
@@ -2759,6 +2781,9 @@ impl WindowView {
                     item("Close Pane", "⌘W", true, MenuCommand::ClosePane),
                 ]);
                 items
+            },
+            MenuTarget::Server(_) => {
+                vec![item("Reconnect from Scratch", "", true, MenuCommand::ReconnectFromScratch)]
             },
             MenuTarget::Tab(index) => {
                 // A workspace's only tab is a workspace already.

@@ -1351,6 +1351,31 @@ fn by_ssh(server: ServerId, cx: &App) -> bool {
         .is_some_and(|r| r.ssh.is_some())
 }
 
+/// Connect to `server` from scratch: end its shared ssh connection, so ssh
+/// makes a new one — checking the host's key again, reading its config and
+/// keys again. Its connection (and forwards) end with it, and it reconnects
+/// as after any lost connection; one not connected now connects at once.
+pub fn reconnect_from_scratch(server: ServerId, cx: &mut App) {
+    let Some(exit) = remote_config(server, cx).and_then(|r| r.shared("exit", None)) else {
+        return;
+    };
+    let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
+        return;
+    };
+    connection.failures = 0;
+    let connected = connection.outgoing.is_some();
+    let exiting = cx.background_spawn(async move {
+        let _ = artty_core::remote::ssh_process(&exit).output();
+    });
+    cx.spawn(async move |cx| {
+        exiting.await;
+        if !connected {
+            let _ = cx.update(|cx| connect_remote(server, cx));
+        }
+    })
+    .detach();
+}
+
 /// Install this build of artty on `server`'s machine, then connect again.
 pub fn install_remote(server: ServerId, cx: &mut App) {
     let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
