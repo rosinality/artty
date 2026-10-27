@@ -120,3 +120,20 @@ latest = "gemini --resume latest"
 # open-settings, reopen-closed-windows, restart-to-update, restart-server,
 # quit, quit-and-end-sessions.
 # (⌘1–⌘9 always select tabs.)
+
+# Other machines' artty servers, shown in the sidebar under their names
+# beside this Mac's: their workspaces and tabs work as local ones do, and
+# keep running there when the connection drops (artty reconnects by itself).
+# artty must be installed there; the connection is ssh running
+# `artty server --stdio`, with your ssh config and keys (no password
+# prompts: use a key or an agent).
+# [[servers]]
+# name = "devbox"
+# ssh = "me@devbox"               # or a Host from ~/.ssh/config
+# artty = "~/.local/bin/artty"    # if it isn't on the login shell's PATH
+#
+# Or any command that reaches a server on its stdin and stdout, e.g. a
+# second server on this Mac, to try it out:
+# [[servers]]
+# name = "Second"
+# command = ["sh", "-c", "mkdir -p /tmp/artty-second && TMPDIR=/tmp/artty-second/ XDG_STATE_HOME=/tmp/artty-second/state exec /Applications/artty.app/Contents/MacOS/artty server --stdio"]

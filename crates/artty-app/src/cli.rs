@@ -93,6 +93,9 @@ artty, your own pane is found automatically:
                                          or move it to this build (programs keep
                                          running; a server too old to hand over
                                          restarts, and tabs and agents return)
+  artty server --stdio                   carry an app's connection to this
+                                         machine's server over stdin and stdout
+                                         (what a remote artty app runs over ssh)
   artty settings                         open the Settings window
   artty activity                         show the Activity view (processes,
                                          CPU and memory of every pane)
@@ -156,6 +159,12 @@ fn run(args: Vec<String>) -> Result<i32, String> {
         (Some("server"), Some("--handover-check"), _) => {
             println!("{}", artty_server::handover_check());
             return Ok(0);
+        },
+        (Some("server"), Some("--stdio"), _) => {
+            let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+            return artty_server::stdio_relay(&exe)
+                .map(|()| 0)
+                .map_err(|err| format!("server: {err}"));
         },
         _ => {},
     }

@@ -24,6 +24,7 @@ use gpui::{
 };
 
 use crate::app_state::{self, Shared};
+use crate::ids::{self, LOCAL, ServerId};
 use crate::keys;
 use crate::mouse::{self, Action, Button};
 use crate::terminal::{self, Metrics, hsla};
@@ -280,8 +281,17 @@ pub struct WindowView {
     font_size: f32,
     metrics: Metrics,
     window_handle: gpui::AnyWindowHandle,
-    /// The server's window this view shows, once attached.
+    /// The front server's window, once attached: the one the shown tab is in.
     window: Option<WindowId>,
+    /// The server windows this view shows, one per server, with their
+    /// layouts; the sidebar lists their workspaces in server order.
+    servers: std::collections::BTreeMap<ServerId, (WindowId, WindowLayout)>,
+    /// The server whose active tab is shown.
+    front: ServerId,
+    /// Each server's window last shown here, to show again after a reconnect.
+    remembered: HashMap<ServerId, WindowId>,
+    /// Asked a server for a new window here: show it when it comes.
+    front_on_attach: Option<ServerId>,
     /// Detach from the server's window when this view goes away.
     detach: bool,
     layout: WindowLayout,
@@ -394,11 +404,9 @@ impl WindowView {
             this.update_secure_input(cx);
             // ⌘-Tab away and back: the key-up went elsewhere.
             this.command_held = false;
-            if let Some(id) = this.window {
-                app_state::send(
-                    ClientMessage::WindowFocused { window: id, focused: this.window_active },
-                    cx,
-                );
+            for (&server, &(id, _)) in &this.servers {
+                let focused = this.window_active && server == this.front;
+                app_state::send(ClientMessage::WindowFocused { window: id, focused }, cx);
             }
             cx.notify();
         });
@@ -418,6 +426,10 @@ impl WindowView {
             reload_config: false,
             window_handle: window.window_handle(),
             window: None,
+            servers: std::collections::BTreeMap::new(),
+            front: LOCAL,
+            front_on_attach: None,
+            remembered: HashMap::new(),
             detach: true,
             layout: WindowLayout::default(),
             tabs: Vec::new(),
@@ -467,20 +479,117 @@ impl WindowView {
         self.window_handle
     }
 
-    /// The server attached this view to its window `window`.
+    /// A server attached this view to its window `window`.
     pub fn attached(
         &mut self,
         window: WindowId,
         _bounds: Option<SavedWindow>,
         cx: &mut Context<Self>,
     ) {
-        self.window = Some(window);
+        let server = ids::server_of(window);
+        self.servers.insert(server, (window, WindowLayout::default()));
+        self.remembered.insert(server, window);
+        if self.window.is_none() {
+            self.front = server;
+            self.window = Some(window);
+        }
         self.sizes.clear();
-        app_state::send(ClientMessage::WindowFocused { window, focused: self.window_active }, cx);
+        let focused = self.window_active && server == self.front;
+        app_state::send(ClientMessage::WindowFocused { window, focused }, cx);
+        if self.front_on_attach == Some(server) {
+            self.front_on_attach = None;
+            self.set_front(server, cx);
+        }
         cx.notify();
     }
 
-    pub fn set_layout(&mut self, layout: WindowLayout, cx: &mut Context<Self>) {
+    /// A server's layout of its window here.
+    pub fn set_layout(&mut self, window: WindowId, layout: WindowLayout, cx: &mut Context<Self>) {
+        match self.servers.get_mut(&ids::server_of(window)) {
+            Some(entry) if entry.0 == window => entry.1 = layout,
+            _ => return,
+        }
+        let merged = self.merged_layout();
+        self.apply_layout(merged, cx);
+    }
+
+    /// Every server's workspaces, in server order; the front server's
+    /// active one is active.
+    fn merged_layout(&self) -> WindowLayout {
+        let mut merged = WindowLayout::default();
+        for (&server, (_, layout)) in &self.servers {
+            if server == self.front {
+                merged.active = merged.workspaces.len() + layout.active;
+            }
+            merged.workspaces.extend(layout.workspaces.iter().cloned());
+            merged.hidden += layout.hidden;
+        }
+        merged
+    }
+
+    /// Show `server`'s active tab: the user went to something there.
+    fn set_front(&mut self, server: ServerId, cx: &mut Context<Self>) {
+        let Some(&(window, _)) = self.servers.get(&server) else { return };
+        if server == self.front && self.window == Some(window) {
+            return;
+        }
+        let before = self.window;
+        self.front = server;
+        self.window = Some(window);
+        // Only the front server's tab is seen.
+        if let Some(before) = before {
+            self.send(ClientMessage::WindowFocused { window: before, focused: false }, cx);
+        }
+        self.send(ClientMessage::WindowFocused { window, focused: self.window_active }, cx);
+        let merged = self.merged_layout();
+        self.apply_layout(merged, cx);
+    }
+
+    /// This view's window on `server`, if it shows one.
+    fn window_on(&self, server: ServerId) -> Option<WindowId> {
+        self.servers.get(&server).map(|(window, _)| *window)
+    }
+
+    /// The server windows this view shows.
+    pub fn server_windows(&self) -> Vec<WindowId> {
+        self.servers.values().map(|(window, _)| *window).collect()
+    }
+
+    /// The window last shown here from `server`.
+    pub fn remembered(&self, server: ServerId) -> Option<WindowId> {
+        self.remembered.get(&server).copied()
+    }
+
+    /// A server closed its window here. Returns whether nothing is left.
+    pub fn server_window_gone(&mut self, window: WindowId, cx: &mut Context<Self>) -> bool {
+        let server = ids::server_of(window);
+        self.remembered.remove(&server);
+        if self.window_on(server) == Some(window) {
+            self.server_gone(server, cx)
+        } else {
+            self.servers.is_empty()
+        }
+    }
+
+    /// A server's window went from here (its connection was lost, say).
+    /// Returns whether nothing is left.
+    pub fn server_gone(&mut self, server: ServerId, cx: &mut Context<Self>) -> bool {
+        if self.servers.remove(&server).is_none() {
+            return self.servers.is_empty();
+        }
+        if self.copy_mode.is_some_and(|pane| ids::server_of(pane) == server) {
+            self.copy_mode = None;
+        }
+        if self.front == server {
+            self.front = self.servers.keys().next().copied().unwrap_or(LOCAL);
+            self.window = self.window_on(self.front);
+        }
+        let merged = self.merged_layout();
+        self.apply_layout(merged, cx);
+        self.servers.is_empty()
+    }
+
+    fn apply_layout(&mut self, layout: WindowLayout, cx: &mut Context<Self>) {
         if layout != self.layout {
             let shown = |layout: &WindowLayout| {
                 (
@@ -515,8 +624,8 @@ impl WindowView {
         }
     }
 
-    /// The server is gone or closed this window: don't tell it we detached.
-    pub fn forget_server(&mut self) {
+    /// The servers are gone or let go already: don't detach when closing.
+    pub fn forget_servers(&mut self) {
         self.detach = false;
     }
 
@@ -623,7 +732,11 @@ impl WindowView {
 
     /// A new tab at the end of `workspace`, or of the active one.
     fn open_tab_in(&self, workspace: Option<WorkspaceId>, cx: &App) {
-        if let Some(window) = self.window {
+        let window = match workspace {
+            Some(workspace) => self.window_on(ids::server_of(workspace)),
+            None => self.window,
+        };
+        if let Some(window) = window {
             self.send(ClientMessage::NewTab { window, workspace, spec: PaneSpec::default() }, cx);
         }
     }
@@ -724,7 +837,11 @@ impl WindowView {
 
     fn choose_workspace(&mut self, cx: &mut Context<Self>) {
         let Some(picker) = self.picker.take() else { return };
-        if let (Some(choice), Some(window)) = (picker.matches().get(picker.selected), self.window) {
+        // The picker lists this Mac's workspaces.
+        if let (Some(choice), Some(window)) =
+            (picker.matches().get(picker.selected), self.window_on(LOCAL))
+        {
+            self.set_front(LOCAL, cx);
             self.send(ClientMessage::OpenWorkspace { workspace: choice.id, window }, cx);
         }
         self.marked_text = None;
@@ -893,6 +1010,7 @@ impl WindowView {
         if let Some(&(workspace, tab)) = self.places.get(tab) {
             self.close_search(cx);
             self.activity = None;
+            self.set_front(ids::server_of(workspace), cx);
             self.send(ClientMessage::SelectTab { workspace, tab }, cx);
             cx.notify();
         }
@@ -902,6 +1020,7 @@ impl WindowView {
         if Some(pane) != self.focused_id() {
             self.close_search(cx);
         }
+        self.set_front(ids::server_of(pane), cx);
         self.send(ClientMessage::FocusPane { pane }, cx);
     }
 
@@ -948,6 +1067,10 @@ impl WindowView {
         else {
             return;
         };
+        // A tab's programs run on its server: it can't move to another.
+        if ids::server_of(workspace) != ids::server_of(to_workspace) {
+            return;
+        }
         let to = if to_workspace != workspace && to < from { to_index + 1 } else { to_index };
         self.renaming = None;
         self.send(ClientMessage::MoveTab { workspace, from: from_index, to_workspace, to }, cx);
@@ -1182,6 +1305,13 @@ impl WindowView {
         if self.toast.as_ref().is_some_and(|(_, shown)| shown.elapsed() >= pane_actions::TOAST_TIME)
         {
             self.toast = None;
+            cx.notify();
+        }
+        // A server's "again in Ns" counts down.
+        if app_state::servers(cx)
+            .iter()
+            .any(|(_, _, s)| matches!(s, app_state::Status::Waiting { .. }))
+        {
             cx.notify();
         }
         let modified = config_modified();
@@ -1882,7 +2012,9 @@ impl WindowView {
             }))
             .drag_over::<DraggedPane>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
             .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, cx| {
-                if let Some(&(workspace, tab)) = this.places.get(index) {
+                if let Some(&(workspace, tab)) = this.places.get(index)
+                    && ids::server_of(workspace) == ids::server_of(dragged.pane)
+                {
                     this.send(ClientMessage::MovePane { pane: dragged.pane, workspace, tab }, cx);
                 }
             }))
@@ -1963,6 +2095,99 @@ impl WindowView {
                     ),
                 )
             })
+    }
+
+    /// A server's header, with other machines' servers: its name, how its
+    /// connection is, and a + for a new workspace there. A server that's
+    /// away reconnects on a click.
+    fn server_header(
+        &self,
+        server: ServerId,
+        name: String,
+        status: app_state::Status,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        use app_state::Status;
+        let group: SharedString = format!("server-{server}").into();
+        let (dot, note): (u32, Option<String>) = match &status {
+            Status::Connected => (0x9ece6aff, None),
+            Status::Connecting => (0xe0af68ff, Some("connecting…".to_owned())),
+            Status::Waiting { error, retry_at } => {
+                let seconds = retry_at.saturating_duration_since(Instant::now()).as_secs();
+                (0xe0af68ff, Some(format!("{error} · again in {seconds}s · click to retry")))
+            },
+            Status::Off(reason) => (0xffffff40, Some(reason.clone())),
+        };
+        let connected = status == Status::Connected;
+        let away = matches!(status, Status::Waiting { .. } | Status::Off(_));
+        div()
+            .id(("server", server as usize))
+            .group(group.clone())
+            .flex()
+            .flex_col()
+            .mt(px(if server == LOCAL { 0. } else { 10. }))
+            .px_2()
+            .pb(px(4.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(10.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(rgba(0xffffff70))
+                    .child(div().flex_none().size(px(6.)).rounded_full().bg(rgba(dot)))
+                    .child(Self::one_line(name.to_uppercase()).flex_1().min_w_0())
+                    .when(connected, |d| {
+                        d.child(
+                            div()
+                                .id(("new-workspace-on", server as usize))
+                                .opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .px_1()
+                                .rounded(px(4.))
+                                .hover(|d| d.bg(rgba(0xffffff14)))
+                                .text_size(px(14.))
+                                .child("+")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.new_workspace_on(server, cx);
+                                    cx.stop_propagation();
+                                })),
+                        )
+                    }),
+            )
+            .when_some(note, |d, note| {
+                d.child(
+                    Self::one_line(note)
+                        .pl(px(12.))
+                        .text_size(px(10.5))
+                        .text_color(rgba(0xffffff50)),
+                )
+            })
+            .when(away && server != LOCAL, |d| {
+                d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
+                    app_state::connect_remote(server, cx);
+                }))
+            })
+    }
+
+    /// A new workspace on `server`: in its window here, or in a new window
+    /// of it shown here.
+    fn new_workspace_on(&mut self, server: ServerId, cx: &mut Context<Self>) {
+        match self.window_on(server) {
+            Some(window) => {
+                self.naming_new_workspace = true;
+                self.send(
+                    ClientMessage::NewWorkspace { window, name: None, spec: PaneSpec::default() },
+                    cx,
+                );
+            },
+            None => {
+                self.front_on_attach = Some(server);
+                let view = cx.entity();
+                app_state::attach_new(server, &view, cx);
+            },
+        }
     }
 
     /// A section header: fold arrow, name, what its tabs are doing, and a
@@ -2137,15 +2362,24 @@ impl WindowView {
             .drag_over::<DraggedWorkspace>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
             .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
             .on_drop(cx.listener(move |this, dragged: &DraggedWorkspace, _, cx| {
-                if let Some(window) = this.window
+                // Within one server's sections, at its own position there.
+                let server = ids::server_of(id);
+                if let Some(window) = this.window_on(server)
                     && dragged.workspace != id
+                    && ids::server_of(dragged.workspace) == server
                 {
-                    this.send(ClientMessage::MoveWorkspace { workspace: dragged.workspace, window, to: position }, cx);
+                    let to = this.layout.workspaces[..position]
+                        .iter()
+                        .filter(|w| ids::server_of(w.id) == server)
+                        .count();
+                    this.send(ClientMessage::MoveWorkspace { workspace: dragged.workspace, window, to }, cx);
                 }
             }))
             // A tab dropped on a header goes to the start of that workspace.
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
-                if let Some(&(workspace, from)) = this.places.get(dragged.index) {
+                if let Some(&(workspace, from)) = this.places.get(dragged.index)
+                    && ids::server_of(workspace) == ids::server_of(id)
+                {
                     this.renaming = None;
                     this.send(ClientMessage::MoveTab { workspace, from, to_workspace: id, to: 0 }, cx);
                 }
@@ -2198,7 +2432,16 @@ impl WindowView {
         // shows the tab on screen.
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut index = 0;
+        // With other machines' servers, each server's workspaces go under
+        // its header (with nothing under it while it's away).
+        let servers = app_state::servers(cx);
+        let several = servers.len() > 1;
+        let mut headers = servers.into_iter().filter(|_| several).peekable();
         for (position, workspace) in self.layout.workspaces.iter().enumerate() {
+            let server = ids::server_of(workspace.id);
+            while let Some((id, name, status)) = headers.next_if(|(id, _, _)| *id <= server) {
+                rows.push(self.server_header(id, name, status, cx).into_any_element());
+            }
             rows.push(self.workspace_header(position, cx).into_any_element());
             for tab in &workspace.tabs {
                 if !workspace.collapsed || index == self.active {
@@ -2206,6 +2449,9 @@ impl WindowView {
                 }
                 index += 1;
             }
+        }
+        for (id, name, status) in headers {
+            rows.push(self.server_header(id, name, status, cx).into_any_element());
         }
         if self.layout.hidden > 0 {
             let hidden = self.layout.hidden;
@@ -2263,7 +2509,7 @@ impl WindowView {
                     .child(div().text_xs().text_color(rgba(0xffffff66)).child("⇧⌘A"))
                     .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
             )
-            .child(
+            .when(!app_state::several_servers(cx), |d| d.child(
                 div()
                     .id("sidebar-heading")
                     .group("sidebar-heading")
@@ -2289,7 +2535,7 @@ impl WindowView {
                             .child("+")
                             .on_click(cx.listener(|this, _, _, cx| this.new_workspace(cx))),
                     ),
-            )
+            ))
             .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(3.)).overflow_y_scroll().children(rows))
             .when_some(self.config_error.clone(), |d, error| {
                 d.child(
@@ -2611,10 +2857,9 @@ impl Drop for WindowView {
     fn drop(&mut self) {
         // The window closed: its tabs keep running in the server, detached.
         // (There's no `App` here; the server also notices a lost connection.)
-        if self.detach
-            && let Some(window) = self.window
-        {
-            DETACHED.with(|detached| detached.borrow_mut().push(window));
+        if self.detach {
+            let windows = self.server_windows();
+            DETACHED.with(|detached| detached.borrow_mut().extend(windows));
         }
     }
 }
@@ -2692,11 +2937,13 @@ impl Render for WindowView {
             self.scale_factor = window.scale_factor();
             self.sizes.clear();
         }
-        if let Some(id) = self.window {
+        if self.window.is_some() {
             let bounds = saved_window(window.window_bounds());
             if self.bounds_sent != Some(bounds) {
                 self.bounds_sent = Some(bounds);
-                self.send(ClientMessage::WindowBounds { window: id, bounds }, cx);
+                for id in self.server_windows() {
+                    self.send(ClientMessage::WindowBounds { window: id, bounds }, cx);
+                }
             }
         }
 

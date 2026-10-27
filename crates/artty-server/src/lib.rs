@@ -284,6 +284,38 @@ pub fn upgrade(executable: &Path) -> io::Result<Upgrade> {
 }
 
 /// Whether a server is running.
+/// `artty server --stdio`: carry an app's connection to this machine's
+/// server over stdin and stdout (as through ssh), starting the server first
+/// if it isn't running. Returns when either side closes; the server and its
+/// sessions keep running.
+pub fn stdio_relay(executable: &Path) -> io::Result<()> {
+    use std::io::{Read, Write};
+    if !running() {
+        spawn(executable, &[])?;
+    }
+    let stream = UnixStream::connect(server_socket_path())?;
+    let mut to_server = stream.try_clone()?;
+    let mut from_server = stream;
+    std::thread::spawn(move || {
+        let _ = io::copy(&mut io::stdin().lock(), &mut to_server);
+        // The app went away: let the server see it.
+        let _ = to_server.shutdown(std::net::Shutdown::Write);
+    });
+    // Stdout buffers by line; frames must go out as they come.
+    let mut stdout = io::stdout().lock();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = match from_server.read(&mut buffer) {
+            Ok(0) => return Ok(()),
+            Ok(read) => read,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        };
+        stdout.write_all(&buffer[..read])?;
+        stdout.flush()?;
+    }
+}
+
 pub fn running() -> bool {
     UnixStream::connect(server_socket_path()).is_ok()
 }

@@ -65,6 +65,55 @@ pub struct Config {
     /// Key bindings over the defaults: keystrokes (as in `cmd-shift-t`, or
     /// several separated by spaces) to what they do.
     pub keys: BTreeMap<String, KeyAction>,
+    /// Other machines' artty servers, shown in the sidebar beside this one's.
+    pub servers: Vec<ServerConfig>,
+}
+
+/// Another machine's artty server: reached over ssh, or by any command
+/// that carries the connection on its stdin and stdout.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ServerConfig {
+    /// Shown in the sidebar.
+    pub name: String,
+    /// An ssh destination (`host`, `user@host`, a `Host` from ~/.ssh/config).
+    pub ssh: Option<String>,
+    /// artty on that machine, if it isn't `artty` on the login shell's PATH.
+    pub artty: Option<String>,
+    /// Instead of ssh: a command whose stdin and stdout reach the server
+    /// (it runs `artty server --stdio` somewhere).
+    pub command: Vec<String>,
+}
+
+impl ServerConfig {
+    /// The command that reaches the server.
+    pub fn connect_command(&self) -> Option<Vec<String>> {
+        if !self.command.is_empty() {
+            return Some(self.command.clone());
+        }
+        let destination = self.ssh.as_ref()?;
+        let artty = self.artty.as_deref().unwrap_or("artty");
+        // Through a login shell, for the PATH set up in its profile.
+        let remote = format!("exec \"$SHELL\" -lc 'exec {artty} server --stdio'");
+        Some(
+            [
+                "ssh",
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                destination,
+                &remote,
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        )
+    }
 }
 
 /// Commands that resume an agent's conversation.
@@ -193,6 +242,7 @@ impl Default for Config {
             ]),
             colors: Colors::default(),
             keys: BTreeMap::new(),
+            servers: Vec::new(),
         }
     }
 }
@@ -298,6 +348,21 @@ mod tests {
         assert_eq!(config.keys["cmd-shift-t"], KeyAction::Named("new-tab".into()));
         assert_eq!(config.keys["cmd-t"], KeyAction::Named("none".into()));
         assert_eq!(config.keys["shift-enter"], KeyAction::Send { send: "\x1b[13;2u".into() });
+    }
+
+    #[test]
+    fn remote_servers() {
+        let config = Config::parse(
+            "[[servers]]\nname = \"devbox\"\nssh = \"me@devbox\"\n\n\
+             [[servers]]\nname = \"test\"\ncommand = [\"artty\", \"server\", \"--stdio\"]\n",
+        )
+        .unwrap();
+        let ssh = config.servers[0].connect_command().unwrap();
+        assert_eq!(ssh[0], "ssh");
+        assert!(ssh.contains(&"me@devbox".to_owned()));
+        assert_eq!(ssh.last().unwrap(), "exec \"$SHELL\" -lc 'exec artty server --stdio'");
+        assert_eq!(config.servers[1].connect_command().unwrap(), ["artty", "server", "--stdio"]);
+        assert_eq!(ServerConfig::default().connect_command(), None);
     }
 
     #[test]

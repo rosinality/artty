@@ -209,7 +209,7 @@ impl WindowView {
     /// Leave Activity and show a pane, wherever it is.
     fn jump_to(&mut self, workspace: u64, pane: PaneId, cx: &mut Context<Self>) {
         let here = self.layout.workspaces.iter().any(|w| w.id == workspace);
-        if let (false, Some(window)) = (here, self.window) {
+        if let (false, Some(window)) = (here, self.window_on(ids::server_of(workspace))) {
             self.send(ClientMessage::OpenWorkspace { workspace, window }, cx);
         }
         self.activity = None;

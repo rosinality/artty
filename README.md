@@ -233,6 +233,29 @@ use OSC 133 marks from the shell. fish 4 sends them natively; artty sets up zsh
 and bash automatically (your startup files still load as usual). Elsewhere —
 over ssh, say — `artty shell-integration zsh|bash` prints a script to source.
 
+## Other machines
+
+artty can show other machines' servers beside this Mac's, in the same
+window: each server's workspaces go under its name in the sidebar, and its
+tabs work as local ones do — splits, agents' status, notifications, images,
+the `artty` command inside them. Add them to the config:
+
+```toml
+[[servers]]
+name = "devbox"
+ssh = "me@devbox"
+```
+
+The connection is ssh running `artty server --stdio` there (artty must be
+installed there; ssh uses your config and keys, without password prompts).
+Like this Mac's, that server keeps its sessions running on its own, and it
+sends screens rather than a stream of output, so a dropped connection —
+sleep, a new network — loses nothing: artty reconnects with backoff (a
+click on the server's header tries at once) and shows the same tabs again.
+A server running another artty build says so in its header. Tabs and panes
+stay on their server (they can't be dragged to another); Activity and the
+workspace picker show this Mac's.
+
 ## Images
 
 Programs can show images in the terminal, with kitty's graphics protocol
