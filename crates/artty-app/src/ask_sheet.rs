@@ -42,7 +42,9 @@ impl WindowView {
         let Some(sheet) = self.asks.first() else { return };
         let (id, remember) = (sheet.question.id, sheet.remember);
         self.dismiss_ask(id, cx);
-        crate::askpass::finish(id, answer, remember, cx);
+        // After this view's update: finishing updates every view (this one
+        // too), and an entity can't be updated inside its own update.
+        cx.defer(move |cx| crate::askpass::finish(id, answer, remember, cx));
     }
 
     fn submit_ask(&mut self, cx: &mut Context<Self>) {
@@ -184,6 +186,8 @@ impl WindowView {
                 .size_full()
                 .flex()
                 .justify_center()
+                // (Not stretched to the window's height.)
+                .items_start()
                 .pt(px(80.))
                 .bg(rgba(0x00000066))
                 .child(card),
