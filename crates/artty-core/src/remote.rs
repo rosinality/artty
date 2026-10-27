@@ -103,6 +103,15 @@ pub fn askpass_request(prompt: &str) -> Option<(std::path::PathBuf, AskpassReque
     Some((socket.into(), request))
 }
 
+/// A process running `command` (ssh, or what reaches a server), finding
+/// programs where the user's shell would ([`crate::tool_path`]): ssh runs
+/// a `ProxyCommand` with this PATH.
+pub fn ssh_process(command: &[String]) -> std::process::Command {
+    let mut process = std::process::Command::new(&command[0]);
+    process.args(&command[1..]).env("PATH", crate::tool_path());
+    process
+}
+
 /// `command` with ssh allowed to ask as `prompts` says.
 fn prompting_command(mut command: Vec<String>, prompts: &Prompts) -> std::process::Command {
     if !matches!(prompts, Prompts::Never)
@@ -110,8 +119,7 @@ fn prompting_command(mut command: Vec<String>, prompts: &Prompts) -> std::proces
     {
         command.drain(at..at + 2);
     }
-    let mut process = std::process::Command::new(&command[0]);
-    process.args(&command[1..]);
+    let mut process = ssh_process(&command);
     if let Prompts::Helper(askpass) = prompts {
         process
             .env("SSH_ASKPASS", &askpass.program)

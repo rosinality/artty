@@ -431,6 +431,68 @@ fn process_args(_pid: i32) -> Option<Vec<String>> {
     None
 }
 
+/// Where to look for programs ssh runs (a `ProxyCommand` such as
+/// `cloudflared`, Homebrew's ssh): the login shell's PATH, which an app
+/// started from the Dock or Finder doesn't get (it has macOS's
+/// `/usr/bin:/bin:/usr/sbin:/sbin`), then this process's own, then
+/// Homebrew's directories. Asked of the shell once (`-l -c env`, at most ten
+/// seconds); [`warm_tool_path`] starts that early.
+pub fn tool_path() -> &'static str {
+    static PATH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let mut directories: Vec<String> = Vec::new();
+        let mut add = |path: &str| {
+            for directory in path.split(':').filter(|d| !d.is_empty()) {
+                if !directories.iter().any(|d| d == directory) {
+                    directories.push(directory.to_owned());
+                }
+            }
+        };
+        if let Some(path) = login_shell_path() {
+            add(&path);
+        }
+        add(&std::env::var("PATH").unwrap_or_default());
+        for homebrew in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            if std::path::Path::new(homebrew).is_dir() {
+                add(homebrew);
+            }
+        }
+        directories.join(":")
+    })
+}
+
+/// Find [`tool_path`] in the background now, so it's ready when needed.
+pub fn warm_tool_path() {
+    std::thread::spawn(tool_path);
+}
+
+/// The PATH the login shell sets up.
+fn login_shell_path() -> Option<String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let shell = login_shell()?;
+    let mut child = Command::new(&shell)
+        .args(["-l", "-c", "env"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().ok()?.is_none() {
+        if Instant::now() >= deadline {
+            log::warn!("{shell} -l took too long to say its PATH");
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut output = String::new();
+    std::io::Read::read_to_string(&mut child.stdout.take()?, &mut output).ok()?;
+    output.lines().find_map(|line| line.strip_prefix("PATH=")).map(str::to_owned)
+}
+
 /// The account's login shell, from the user database.
 pub(crate) fn login_shell() -> Option<String> {
     use std::ffi::CStr;

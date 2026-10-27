@@ -1122,9 +1122,7 @@ fn heartbeat(cx: &mut App) {
         // Its shared ssh connection is likely dead too, and new sessions
         // would wait on it: end it.
         if let Some(exit) = remote_config(server, cx).and_then(|r| r.shared("exit", None)) {
-            std::thread::spawn(move || {
-                std::process::Command::new(&exit[0]).args(&exit[1..]).output()
-            });
+            std::thread::spawn(move || artty_core::remote::ssh_process(&exit).output());
         }
         // Ending what carries it ends the connection: `remote_lost` follows.
         if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize)

@@ -166,6 +166,8 @@ pub fn main() {
     artty_core::logging::init();
     let command = parse_args();
     keep_awake_in_background();
+    // Programs ssh runs (a ProxyCommand's) are found as in the user's shell.
+    artty_core::warm_tool_path();
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| {
             crate::forward::stop_everything(cx);

@@ -48,10 +48,8 @@ pub fn error(server: ServerId, port: u16, cx: &App) -> Option<String> {
 /// Run a command for the shared connection; why it failed, if it did.
 fn shared(command: Option<Vec<String>>) -> Result<(), String> {
     let command = command.ok_or("only machines reached by ssh")?;
-    let output = Command::new(&command[0])
-        .args(&command[1..])
-        .output()
-        .map_err(|err| format!("ssh: {err}"))?;
+    let output =
+        artty_core::remote::ssh_process(&command).output().map_err(|err| format!("ssh: {err}"))?;
     if output.status.success() {
         return Ok(());
     }
