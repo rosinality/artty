@@ -182,8 +182,10 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
             | Query::CommandOutput { pane } => untag(pane),
             Query::DetachedWindows => {},
         },
-        ClientMessage::Control { .. } | ClientMessage::Ack { .. } | ClientMessage::Ping { .. } => {
-        },
+        ClientMessage::Control { .. }
+        | ClientMessage::Ack { .. }
+        | ClientMessage::Ping { .. }
+        | ClientMessage::Appearance { .. } => {},
     }
     server
 }

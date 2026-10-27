@@ -1284,15 +1284,28 @@ impl WindowView {
     // Timers.
 
     /// Send user input to the focused pane, keeping the cursor solid.
-    fn input(&mut self, bytes: Vec<u8>, cx: &App) {
+    fn input(&mut self, bytes: Vec<u8>, cx: &mut App) {
         if let Some(pane) = self.focused_id() {
+            self.echo(pane, &bytes, cx);
             self.send(ClientMessage::Input { pane, bytes }, cx);
         }
         self.cursor_visible = true;
         self.blink_hold = true;
     }
 
+    /// Show what's typed into `pane` before its echo comes back, where
+    /// that's on (not with typing going to every pane).
+    pub(super) fn echo(&self, pane: PaneId, bytes: &[u8], cx: &mut App) {
+        let broadcast = self.tabs.get(self.active).is_some_and(|t| t.broadcast);
+        if self.config.local_echo && !broadcast {
+            app_state::typed(pane, bytes, cx);
+        }
+    }
+
     fn blink(&mut self, cx: &mut Context<Self>) {
+        if app_state::expire_echoes(cx) {
+            cx.notify();
+        }
         if self.blink_hold {
             self.blink_hold = false;
         } else if self.blink_enabled {
@@ -3019,13 +3032,11 @@ impl Render for WindowView {
                 let flash = shared.flashes.get(&id).map_or(0., |at| {
                     1. - (at.elapsed().as_secs_f32() / FLASH.as_secs_f32()).min(1.)
                 });
-                Some(PaneView {
-                    rect,
-                    frame: screen.frame.clone(),
-                    focused: Some(id) == focused_id,
-                    link,
-                    flash,
-                })
+                let mut frame = screen.frame.clone();
+                if let Some(echo) = shared.echoes.get(&id) {
+                    echo.overlay(&mut frame);
+                }
+                Some(PaneView { rect, frame, focused: Some(id) == focused_id, link, flash })
             })
             .collect();
         self.cursor = views.iter().find(|view| view.focused).and_then(|view| view.frame.cursor);

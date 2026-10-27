@@ -269,7 +269,12 @@ output never queues up ahead of what you type (over a 100 ms link, a key
 still comes back in 100 ms while `yes` runs), and ssh compresses what goes
 through. The app pings each server every 5 s: 15 s of silence, or no answer
 within 4 s after the Mac wakes or its network changes, and it reconnects
-(ssh alone can take minutes to notice a dead network).
+(ssh alone can take minutes to notice a dead network). What you type shows
+at once, before the echo comes back, as mosh does (`local-echo`; checked
+against what the server shows, and never shown where nothing echoes, such as
+a password prompt). Activity shows each remote's round trip and traffic
+over the last minute, how long it's been connected, and what last went
+wrong. Panes there use this Mac's theme and cursor settings.
 
 ## Images
 

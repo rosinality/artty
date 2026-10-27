@@ -53,6 +53,9 @@ pub struct Config {
     /// Keep other apps from reading what's typed while artty is in front
     /// (macOS's secure keyboard entry), as for passwords.
     pub secure_keyboard_entry: bool,
+    /// Show typing at once on other machines' panes, before their echo
+    /// comes back (as mosh does), where the round trip is noticeable.
+    pub local_echo: bool,
     /// Reopen the previous tabs on launch.
     pub restore_sessions: bool,
     /// Lines of each tab's output to save and show again; 0 saves none.
@@ -143,7 +146,7 @@ impl ResumeCommand {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CursorStyle {
     #[default]
@@ -217,6 +220,7 @@ impl Default for Config {
             list_panes: true,
             confirm_multiline_paste: true,
             secure_keyboard_entry: false,
+            local_echo: true,
             restore_sessions: true,
             restore_scrollback: 1000,
             resume_agents: true,

@@ -49,6 +49,12 @@ confirm-multiline-paste = true
 # apps can't read what you type (passwords, say). Also in the artty menu.
 secure-keyboard-entry = false
 
+# On other machines' panes with a noticeable round trip, show what you type
+# at once, before the echo comes back (as mosh does). Each guess is checked
+# against what the server then shows; after an Enter nothing shows until one
+# is confirmed, so passwords typed where nothing echoes never appear.
+local-echo = true
+
 # Foreground programs shown as coding agents in the sidebar.
 agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"]
 

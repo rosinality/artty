@@ -763,6 +763,11 @@ impl Render for Settings {
                     ),
                 ),
                 Self::row(
+                    "Show typing at once on other machines",
+                    Some("Before the echo comes back, as mosh does"),
+                    self.toggle("local-echo", c.local_echo, "local-echo", cx),
+                ),
+                Self::row(
                     "Secure keyboard entry",
                     Some("Other apps can't read what you type here"),
                     self.toggle(

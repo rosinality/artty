@@ -194,6 +194,11 @@ pub(crate) struct Server {
     sink: Arc<dyn Fn(PaneId, Event) + Send + Sync>,
     started: Instant,
     config: Config,
+    /// The cursor panes get unless a program picks one: the config's, or the
+    /// app's (see `appearance`).
+    cursor: artty_core::CursorStyle,
+    /// An app sent its colors and cursor: they win over the config file's.
+    appearance: bool,
     config_modified: Option<SystemTime>,
     theme: Arc<Theme>,
     agents: Arc<[String]>,
@@ -327,6 +332,8 @@ impl Server {
             sink,
             started: now,
             theme: Arc::new(config.theme()),
+            cursor: config.cursor_style,
+            appearance: false,
             agents: config.agents.clone().into(),
             config,
             config_modified: config_modified(),
@@ -539,7 +546,7 @@ impl Server {
             env,
             scrollback: Some(self.config.scrollback),
             initial_output,
-            cursor_shape: self.config.cursor_style.shape(),
+            cursor_shape: self.cursor.shape(),
         };
         let session = Session::spawn(id, options, size, self.theme.clone(), self.sink.clone())
             .map_err(|err| format!("failed to start: {err}"))?;
@@ -1641,6 +1648,21 @@ impl Server {
                 }
             },
             ClientMessage::Ping { id } => self.send(client, ServerMessage::Pong { id }),
+            ClientMessage::Appearance { theme, cursor } => {
+                self.appearance = true;
+                if *self.theme != theme || self.cursor != cursor {
+                    self.theme = Arc::new(theme);
+                    self.cursor = cursor;
+                    for pane in self.panes.values_mut() {
+                        pane.session.set_theme(self.theme.clone());
+                        pane.session.set_cursor_shape(cursor.shape());
+                    }
+                    let all: Vec<PaneId> = self.panes.keys().copied().collect();
+                    for pane in all {
+                        self.mark_dirty(pane);
+                    }
+                }
+            },
             ClientMessage::ClearBuffer { pane } => {
                 if let Some(state) = self.panes.get(&pane) {
                     state.session.clear_buffer();
@@ -2237,11 +2259,14 @@ impl Server {
             if let Some(error) = error {
                 log::error!("config: {error}");
             } else {
-                self.theme = Arc::new(config.theme());
+                if !self.appearance {
+                    self.theme = Arc::new(config.theme());
+                    self.cursor = config.cursor_style;
+                }
                 self.agents = config.agents.clone().into();
                 for pane in self.panes.values_mut() {
                     pane.session.set_theme(self.theme.clone());
-                    pane.session.set_cursor_shape(config.cursor_style.shape());
+                    pane.session.set_cursor_shape(self.cursor.shape());
                     pane.set_agents(self.agents.clone());
                 }
                 self.config = config;
@@ -2572,7 +2597,7 @@ impl Server {
         let id = handed.session.id;
         let options = SessionOptions {
             scrollback: Some(self.config.scrollback),
-            cursor_shape: self.config.cursor_style.shape(),
+            cursor_shape: self.cursor.shape(),
             ..Default::default()
         };
         let session = Session::adopt(

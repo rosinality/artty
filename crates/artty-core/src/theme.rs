@@ -2,7 +2,7 @@ use artty_vt::ansi::{Color, NamedColor, Rgb};
 use artty_vt::term::color::Colors;
 
 /// Default colors, used wherever the running program has not overridden them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Theme {
     pub foreground: Rgb,
     pub background: Rgb,

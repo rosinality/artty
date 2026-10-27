@@ -564,15 +564,10 @@ impl WindowView {
             facts.push(plural(info.panes, "pane", "panes"));
             facts.push(plural(info.clients, "app connected", "apps connected"));
         }
-        div()
+        let row = div()
             .flex()
             .items_center()
             .gap(px(10.))
-            .mb(px(10.))
-            .px(px(10.))
-            .py(px(6.))
-            .rounded(px(7.))
-            .bg(rgba(0x0000002e))
             .child(div().flex_none().size(px(8.)).rounded_full().bg(rgba(dot)))
             .child(div().flex_none().text_color(rgba(0xffffffd0)).child(status))
             .child(
@@ -603,7 +598,83 @@ impl WindowView {
                         .child(if different { "Update Server" } else { "Restart Server" })
                         .on_click(cx.listener(|_, _, _, cx| app_state::restart_server(cx))),
                 )
-            })
+            });
+        let network = (!local).then(|| app_state::network(server, cx)).flatten();
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .mb(px(10.))
+            .px(px(10.))
+            .py(px(6.))
+            .rounded(px(7.))
+            .bg(rgba(0x0000002e))
+            .child(row)
+            .when_some(network, |d, network| d.child(Self::network_row(&network, server, cx)))
+    }
+
+    /// Another machine's link: round trips and traffic over the last minute,
+    /// how long it's been up, and what last went wrong.
+    fn network_row(
+        network: &app_state::Network,
+        server: ServerId,
+        cx: &Context<Self>,
+    ) -> gpui::Div {
+        let trips: Vec<f32> = network.round_trips.iter().copied().collect();
+        let down: Vec<f32> = network.rates.iter().map(|r| r.0).collect();
+        let (now_down, now_up) = network.rates.back().copied().unwrap_or_default();
+        let rate = |bytes: f32| format!("{}/s", crate::cli::bytes(bytes as u64));
+        let trip = match (
+            trips.last(),
+            trips.iter().copied().reduce(f32::min),
+            trips.iter().copied().reduce(f32::max),
+        ) {
+            (Some(last), Some(low), Some(high)) => {
+                format!("{last:.0} ms (min {low:.0}, max {high:.0})")
+            },
+            _ => "measuring…".to_owned(),
+        };
+        let mut facts = Vec::new();
+        if let Some(since) = network.since {
+            facts.push(format!("connected {}", crate::cli::duration(since.elapsed().as_secs())));
+        }
+        if network.reconnects > 0 {
+            let n = network.reconnects;
+            facts.push(format!("{n} reconnect{}", if n == 1 { "" } else { "s" }));
+        }
+        if let Some((error, at)) = &network.last_error {
+            facts.push(format!(
+                "last problem: {error}, {} ago",
+                crate::cli::duration(at.elapsed().as_secs())
+            ));
+        }
+        if let Some(how) = app_state::transport(server, cx) {
+            facts.push(how);
+        }
+        let label = |text: &'static str| div().flex_none().text_color(rgba(0xffffff60)).child(text);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .pl(px(18.))
+            .text_size(px(11.5))
+            .text_color(rgba(0xffffff90))
+            .child(label("Round trip"))
+            .child(sparkline(&trips, 50., 80., 14., 0x8fb4ffcc))
+            .child(div().flex_none().child(trip))
+            .child(label("Down"))
+            .child(sparkline(&down, 1024., 80., 14., 0x9ece6acc))
+            .child(div().flex_none().child(format!("{} · up {}", rate(now_down), rate(now_up))))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .line_clamp(1)
+                    .text_ellipsis()
+                    .text_color(rgba(0xffffff60))
+                    .child(facts.join(" · ")),
+            )
     }
 
     /// A row's CPU, memory and time cells.

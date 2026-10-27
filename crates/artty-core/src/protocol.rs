@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -152,6 +152,10 @@ pub fn protocol_version() -> u32 {
                 maximized: true,
                 fullscreen: true,
             }),
+        }),
+        postcard::to_stdvec(&ClientMessage::Appearance {
+            theme: crate::Theme::default(),
+            cursor: crate::CursorStyle::Bar,
         }),
         postcard::to_stdvec(&ClientMessage::CopyMode {
             pane: 78,
@@ -473,6 +477,12 @@ pub enum ClientMessage {
     /// Are you there? Answered with [`ServerMessage::Pong`].
     Ping {
         id: u64,
+    },
+    /// The app's colors and cursor, for the server's panes in place of its
+    /// own settings (another machine's server has its own config file).
+    Appearance {
+        theme: crate::Theme,
+        cursor: crate::CursorStyle,
     },
 
     /// Questions with an answer in [`ServerMessage::Reply`].

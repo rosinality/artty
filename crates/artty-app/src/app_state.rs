@@ -54,6 +54,64 @@ pub struct Connection {
     /// Checking it's still there (after a wake or a network change): lost
     /// if nothing comes by then.
     probe_until: Option<Instant>,
+    /// Bytes received and sent, counted by the reader and writer threads.
+    traffic: Arc<(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64)>,
+    /// How the link has been, for Activity.
+    pub network: Network,
+}
+
+/// A connection's last minute and history, for Activity.
+#[derive(Clone, Debug, Default)]
+pub struct Network {
+    /// Round trips (ms), one per ping.
+    pub round_trips: VecDeque<f32>,
+    /// Bytes per second received and sent, one sample a second.
+    pub rates: VecDeque<(f32, f32)>,
+    /// When it connected this time.
+    pub since: Option<Instant>,
+    pub reconnects: u32,
+    /// The last thing that went wrong, and when.
+    pub last_error: Option<(String, Instant)>,
+    /// The traffic counters as of the last sample.
+    counted: (u64, u64),
+}
+
+/// Samples kept of round trips and rates.
+const NETWORK_HISTORY: usize = 60;
+
+fn keep<T>(history: &mut VecDeque<T>, value: T) {
+    if history.len() == NETWORK_HISTORY {
+        history.pop_front();
+    }
+    history.push_back(value);
+}
+
+/// A reader or writer that counts the bytes through it.
+struct Counted<T> {
+    inner: T,
+    count: Arc<(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64)>,
+    sent: bool,
+}
+
+impl<T: std::io::Read> std::io::Read for Counted<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.count.0.fetch_add(read as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(read)
+    }
+}
+
+impl<T: Write> Write for Counted<T> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        let counter = if self.sent { &self.count.1 } else { &self.count.0 };
+        counter.fetch_add(written as u64, std::sync::atomic::Ordering::Relaxed);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +144,8 @@ impl Connection {
             ping: None,
             latency: None,
             probe_until: None,
+            traffic: Arc::default(),
+            network: Network::default(),
         }
     }
 
@@ -121,6 +181,8 @@ pub struct Shared {
     pub panes: HashMap<PaneId, PaneState>,
     /// Visual bells: when each pane last rang.
     pub flashes: HashMap<PaneId, Instant>,
+    /// Typing shown before its echo comes back, per pane (see `echo`).
+    pub echoes: HashMap<PaneId, crate::echo::Echo>,
     /// Views by the server windows they show (a view shows one window of
     /// each server it's attached to).
     windows: HashMap<WindowId, WeakEntity<WindowView>>,
@@ -144,6 +206,8 @@ pub struct Shared {
     /// the interface addresses then.
     last_tick: Option<Instant>,
     addresses: Option<Vec<String>>,
+    /// The colors and cursor sent to servers, to send again when they change.
+    appearance: Option<(artty_core::Theme, artty_core::CursorStyle)>,
 }
 
 impl Global for Shared {}
@@ -232,6 +296,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         screens: HashMap::new(),
         panes: HashMap::new(),
         flashes: HashMap::new(),
+        echoes: HashMap::new(),
         windows: HashMap::new(),
         settings: None,
         executable: std::env::current_exe().ok().and_then(|path| {
@@ -249,6 +314,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         lost_at: None,
         last_tick: None,
         addresses: None,
+        appearance: None,
     });
     connect_and_open(spec, cx);
 
@@ -259,6 +325,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
                 // Windows that closed since: detach them in the server.
                 window_view::flush_detached(cx);
                 sync_servers(cx);
+                sync_appearance(cx);
                 heartbeat(cx);
                 check_for_update(cx);
                 forget_unshown_images(cx);
@@ -392,10 +459,18 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
 /// reader thread receives what comes, and the main thread handles it.
 fn start_io(
     server: ServerId,
-    mut reader: impl std::io::Read + Send + 'static,
-    mut writer: impl Write + Send + 'static,
+    reader: impl std::io::Read + Send + 'static,
+    writer: impl Write + Send + 'static,
     cx: &mut App,
 ) -> std::io::Result<()> {
+    let traffic = cx
+        .global::<Shared>()
+        .connections
+        .get(server as usize)
+        .map(|c| c.traffic.clone())
+        .unwrap_or_default();
+    let mut reader = Counted { inner: reader, count: traffic.clone(), sent: false };
+    let mut writer = Counted { inner: writer, count: traffic, sent: true };
     let (outgoing, to_send) = std::sync::mpsc::channel::<ClientMessage>();
     std::thread::Builder::new().name(format!("artty-server-{server}-writer")).spawn(move || {
         for message in to_send {
@@ -436,7 +511,18 @@ fn start_io(
         connection.status = Status::Connected;
         connection.failures = 0;
         connection.stopped = false;
+        if connection.network.since.is_some() {
+            connection.network.reconnects += 1;
+        }
+        connection.network.since = Some(Instant::now());
     }
+    // Panes there look as set here.
+    let config = Config::load().0;
+    send_to(
+        server,
+        ClientMessage::Appearance { theme: config.theme(), cursor: config.cursor_style },
+        cx,
+    );
 
     cx.spawn(async move |cx: &mut AsyncApp| {
         while let Some(message) = received.next().await {
@@ -601,6 +687,14 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                 .or_insert_with(|| Screen { frame: Frame::default(), mode: TermMode::empty() });
             screen.mode = TermMode::from_bits_truncate(update.mode);
             update.apply(&mut screen.frame);
+            if let Some(echo) = shared.echoes.get_mut(&pane) {
+                let round_trip = shared
+                    .connections
+                    .get(ids::server_of(pane) as usize)
+                    .and_then(|c| c.latency)
+                    .unwrap_or_default();
+                echo.confirm(&screen.frame, round_trip, Instant::now());
+            }
             refresh_pane(pane, cx);
         },
         ServerMessage::Panes { panes } => {
@@ -670,6 +764,7 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
             {
                 connection.ping = None;
                 connection.latency = Some(sent.elapsed());
+                keep(&mut connection.network.round_trips, sent.elapsed().as_secs_f32() * 1000.);
             }
         },
     }
@@ -920,6 +1015,26 @@ fn sync_servers(cx: &mut App) {
     }
 }
 
+/// Send servers the colors and cursor when the settings change them.
+fn sync_appearance(cx: &mut App) {
+    let config = Config::load().0;
+    let current = (config.theme(), config.cursor_style);
+    let shared = cx.global_mut::<Shared>();
+    if shared.appearance.as_ref() == Some(&current) {
+        return;
+    }
+    // (Connections send it as they start.)
+    let first = shared.appearance.replace(current.clone()).is_none();
+    if first {
+        return;
+    }
+    let count = cx.global::<Shared>().connections.len();
+    for server in 0..count as ServerId {
+        let (theme, cursor) = current.clone();
+        send_to(server, ClientMessage::Appearance { theme, cursor }, cx);
+    }
+}
+
 /// Pings every few seconds; a remote silent for long is taken for lost
 /// (ssh can take minutes to notice a dead network). After a wake or a
 /// network change, remotes are checked at once: one waiting reconnects now,
@@ -937,6 +1052,15 @@ fn heartbeat(cx: &mut App) {
     for server in 0..count {
         let connection = &mut cx.global_mut::<Shared>().connections[server];
         let remote = connection.remote.is_some();
+        let counted = (
+            connection.traffic.0.load(std::sync::atomic::Ordering::Relaxed),
+            connection.traffic.1.load(std::sync::atomic::Ordering::Relaxed),
+        );
+        let before = std::mem::replace(&mut connection.network.counted, counted);
+        if connection.outgoing.is_some() {
+            let rate = ((counted.0 - before.0) as f32, (counted.1 - before.1) as f32);
+            keep(&mut connection.network.rates, rate);
+        }
         if connection.outgoing.is_none() {
             if changed && remote && matches!(connection.status, Status::Waiting { .. }) {
                 retry.push(server as ServerId);
@@ -1030,6 +1154,60 @@ fn interface_addresses() -> Vec<String> {
     list
 }
 
+/// How `server` is reached: "ssh me@host (compressed)", or the command.
+pub fn transport(server: ServerId, cx: &App) -> Option<String> {
+    let config = cx.global::<Shared>().connections.get(server as usize)?.remote.as_ref()?;
+    Some(match (&config.ssh, config.command.is_empty()) {
+        (_, false) => config.command.join(" "),
+        (Some(ssh), true) => format!("ssh {ssh} (compressed)"),
+        (None, true) => return None,
+    })
+}
+
+/// How `server`'s link has been, for Activity.
+pub fn network(server: ServerId, cx: &App) -> Option<Network> {
+    Some(cx.global::<Shared>().connections.get(server as usize)?.network.clone())
+}
+
+/// Typing `bytes` into `pane`: guess its echo, where that helps (another
+/// machine's pane with a noticeable round trip).
+pub fn typed(pane: PaneId, bytes: &[u8], cx: &mut App) {
+    const NOTICEABLE: Duration = Duration::from_millis(20);
+    let shared = cx.global_mut::<Shared>();
+    let slow = ids::server_of(pane) != LOCAL
+        && shared
+            .connections
+            .get(ids::server_of(pane) as usize)
+            .and_then(|c| c.latency)
+            .is_some_and(|latency| latency >= NOTICEABLE);
+    let Some(screen) = shared.screens.get(&pane).filter(|_| slow) else {
+        shared.echoes.remove(&pane);
+        return;
+    };
+    shared.echoes.entry(pane).or_default().typed(&screen.frame, screen.mode, bytes, Instant::now());
+}
+
+/// Let go of guesses no echo came for. Returns whether any went.
+pub fn expire_echoes(cx: &mut App) -> bool {
+    let now = Instant::now();
+    let shared = cx.global_mut::<Shared>();
+    let latency = |pane: PaneId| {
+        shared
+            .connections
+            .get(ids::server_of(pane) as usize)
+            .and_then(|c| c.latency)
+            .unwrap_or_default()
+    };
+    let trips: Vec<(PaneId, Duration)> = shared.echoes.keys().map(|&p| (p, latency(p))).collect();
+    let mut changed = false;
+    for (pane, trip) in trips {
+        if let Some(echo) = shared.echoes.get_mut(&pane) {
+            changed |= echo.expire(trip, now);
+        }
+    }
+    changed
+}
+
 /// How long `server`'s last ping took, for the sidebar.
 pub fn latency(server: ServerId, cx: &App) -> Option<Duration> {
     cx.global::<Shared>().connections.get(server as usize)?.latency
@@ -1108,6 +1286,7 @@ fn retry_later(server: ServerId, error: String, cx: &mut App) {
     let delay = Duration::from_secs((1u64 << connection.failures.min(5)).min(30));
     let retry_at = Instant::now() + delay;
     log::warn!("server {}: {error}; trying again in {}s", connection.name, delay.as_secs());
+    connection.network.last_error = Some((error.clone(), Instant::now()));
     connection.status = Status::Waiting { error, retry_at };
     let attempt = connection.attempt;
     cx.refresh_windows();
@@ -1403,6 +1582,23 @@ mod tests {
             }
         }
         let pane = pane.unwrap();
+        // This Mac's cursor setting, not that machine's.
+        let theme = artty_core::Theme::default();
+        send(&ClientMessage::Appearance { theme, cursor: artty_core::CursorStyle::Bar });
+        let shape = loop {
+            let (message, _, _) = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            match message {
+                ServerMessage::Sync { seq } => send(&ClientMessage::Ack { seq }),
+                ServerMessage::Frame { update, .. } if update.cursor.is_some() => {
+                    let shape = update.cursor.unwrap().shape;
+                    if shape == artty_core::vt::ansi::CursorShape::Beam {
+                        break shape;
+                    }
+                },
+                _ => {},
+            }
+        };
+        println!("cursor there: {shape:?}");
         let mut rtts = Vec::new();
         for id in 0..5 {
             let sent = Instant::now();

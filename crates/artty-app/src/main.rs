@@ -8,6 +8,8 @@ mod app_state;
 #[cfg(target_os = "macos")]
 mod boxdraw;
 mod cli;
+#[cfg(target_os = "macos")]
+mod echo;
 mod hooks;
 #[cfg(target_os = "macos")]
 mod ids;

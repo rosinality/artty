@@ -151,6 +151,7 @@ impl WindowView {
         if pane != self.focused_id().unwrap_or(pane) {
             self.focus_pane(pane, cx);
         }
+        self.echo(pane, text.as_bytes(), cx);
         self.send(ClientMessage::Input { pane, bytes: text.into_bytes() }, cx);
         window.activate_window();
     }
@@ -190,6 +191,7 @@ impl WindowView {
         } else {
             text.replace("\r\n", "\r").replace('\n', "\r")
         };
+        self.echo(pane, bytes.as_bytes(), cx);
         self.send(ClientMessage::Input { pane, bytes: bytes.into_bytes() }, cx);
         self.cursor_visible = true;
         self.blink_hold = true;
