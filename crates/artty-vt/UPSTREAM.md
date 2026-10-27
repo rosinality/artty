@@ -1,15 +1,17 @@
 # Upstream
 
-`artty-vt` is a fork of two Apache-2.0 sources. Record every upstream sync here
-so fixes can be cherry-picked.
+`artty-vt` is a fork of two Apache-2.0 sources (see LICENSE-APACHE). Record
+every upstream sync here so fixes can be cherry-picked.
 
 | Source | Upstream | Commit |
 |---|---|---|
-| `src/` (except `ansi.rs`), `tests/` | [alacritty/alacritty](https://github.com/alacritty/alacritty) `alacritty_terminal/`, tag `alacritty_terminal_v0.26.0` | `94e7c8874e526b1e67b349d9ba30ddf81669119e` |
+| `src/` (except `ansi.rs`, `vte/`), `tests/` | [alacritty/alacritty](https://github.com/alacritty/alacritty) `alacritty_terminal/`, tag `alacritty_terminal_v0.26.0` | `94e7c8874e526b1e67b349d9ba30ddf81669119e` |
 | `src/ansi.rs` | [alacritty/vte](https://github.com/alacritty/vte) `src/ansi.rs`, tag `v0.15.0` | see tag |
+| `src/vte/` | [alacritty/vte](https://github.com/alacritty/vte) `src/lib.rs`, `src/params.rs`, tag `v0.15.0` | see tag |
 
-The core `vte` parser is still used as a pinned dependency (`vte = "=0.15.0"`);
-only its `ansi` layer is vendored, so OSC sequences it ignores can be handled here.
+Both `vte`'s `ansi` layer (so OSC sequences it ignores can be handled here)
+and its parser (so APC strings — kitty graphics — are passed on instead of
+dropped) are vendored; only the parser's std build is kept.
 
 ## Local changes
 

@@ -372,3 +372,15 @@ scrollback costs the server about 6 MB.
 | `crates/artty-core` | Sessions (PTY, process inspection, command tracking, search, links), config, the control protocol, and render snapshots. |
 | `crates/artty-server` | The server that owns sessions, windows' tabs and layouts, saving and restoring them. |
 | `crates/artty-app` | The GPUI app (a client of the server) and the `artty` command. |
+
+## License
+
+artty is licensed under the [Apache License 2.0](LICENSE). It builds on:
+
+- [alacritty_terminal](https://github.com/alacritty/alacritty) and
+  [vte](https://github.com/alacritty/vte) (Apache-2.0, The Alacritty
+  Project): forked as `crates/artty-vt`; the changes are listed in its
+  [UPSTREAM.md](crates/artty-vt/UPSTREAM.md).
+- [GPUI](https://github.com/zed-industries/zed) 0.2.2 (Apache-2.0, Zed
+  Industries): vendored in `vendor/gpui` with one change, described in its
+  [ARTTY.md](vendor/gpui/ARTTY.md).
