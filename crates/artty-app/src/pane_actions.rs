@@ -42,6 +42,11 @@ impl WindowView {
         .detach();
     }
 
+    /// A short message over the terminal, for a moment (from elsewhere).
+    pub fn toast(&mut self, message: String, cx: &mut Context<Self>) {
+        self.show_toast(message, cx);
+    }
+
     /// A short message over the terminal, for a moment.
     pub(super) fn show_toast(&mut self, message: impl Into<SharedString>, cx: &mut Context<Self>) {
         self.toast = Some((message.into(), Instant::now()));
@@ -156,7 +161,7 @@ impl WindowView {
             if paths.len() == 1 { "1 file".to_owned() } else { format!("{} files", paths.len()) };
         self.show_toast(format!("Sending {files} to {name}…"), cx);
         cx.spawn(async move |this, cx| {
-            let sent = crate::transfer::send(pane, &paths, None, cx).await;
+            let sent = crate::transfer::send(pane, &paths, cx).await;
             let _ = this.update(cx, |this, cx| match sent {
                 Ok(there) => {
                     this.toast = None;

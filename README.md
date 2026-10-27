@@ -292,10 +292,14 @@ place, as anyone can make files in `/tmp`).
 Files (⌘⇧E): a drawer over the terminal's right edge lists the focused
 pane's current directory — on whichever machine the pane is — and follows
 it as the shell moves (open a folder in it to stay there; **Pane** goes back).
-Double-click a file to open it here (another machine's is fetched first);
-**Download** puts one in ~/Downloads (**Reveal**, for this Mac's), **Copy
-Path** copies where it is; drop files on the drawer to put them in the folder
-it shows (never replacing a file: `name (1)` beside it). It lies over the
+Double-click a file to open it here; another machine's opens to edit: it's
+fetched into a folder of this Mac's and opened in its app, and each save
+goes back, replacing the file there if that hasn't changed since (else you're
+asked). **Download** puts one in ~/Downloads (**Reveal**, for this Mac's),
+**Copy Path** copies where it is; drop files on the drawer to put them in
+the folder it shows — one whose name is there asks whether to replace it,
+keep both, or skip. It looks again every two seconds (a folder that hasn't
+changed costs a few bytes), or at once with ⟳. It lies over the
 terminal instead of narrowing it, so nothing running there resizes.
 
 Ports: when a program in a pane listens on a TCP port (a dev server, say),

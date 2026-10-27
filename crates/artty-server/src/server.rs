@@ -14,9 +14,9 @@ use artty_core::control::{
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
-    AppCommand, ClientMessage, DirEntry, PaneSpec, PaneState, Query, Reply, SelectionOp,
-    ServerMessage, TabLayout, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId,
-    WorkspaceLayout,
+    AppCommand, ClientMessage, DirEntry, Existing, FileChunk, Listing, PaneSpec, PaneState, Query,
+    Reply, SelectionOp, ServerMessage, TabLayout, UploadError, UploadTo, Uploaded,
+    WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
 };
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
@@ -345,6 +345,23 @@ struct Upload {
     dir: PathBuf,
     name: std::ffi::OsString,
     file: std::fs::File,
+    place: Place,
+}
+
+/// Where a file sent takes its place once whole.
+enum Place {
+    /// Its name, else `name (1)`... beside a file of it.
+    Beside,
+    /// Its name, replacing a file of it (if, given, that's unchanged since
+    /// this modification time).
+    Instead(Option<u64>),
+}
+
+/// A file's modification time, in nanoseconds since the epoch (to tell
+/// changes apart within a second).
+fn modified_time(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(modified.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_nanos() as u64)
 }
 
 /// `name` in `dir`, or, if that's taken, `name (1)`, `name (2)`... (before
@@ -397,8 +414,8 @@ fn prune_uploads(dir: &Path) {
     }
 }
 
-/// Part of a file, from `offset`, and its length.
-fn read_file(path: &Path, offset: u64) -> Result<(Vec<u8>, u64), String> {
+/// Part of a file, from `offset`, with its length and modification time.
+fn read_file(path: &Path, offset: u64) -> Result<FileChunk, String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).map_err(|err| err.to_string())?;
     let metadata = file.metadata().map_err(|err| err.to_string())?;
@@ -408,7 +425,12 @@ fn read_file(path: &Path, offset: u64) -> Result<(Vec<u8>, u64), String> {
     file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
     let mut data = Vec::with_capacity(FILE_CHUNK);
     file.take(FILE_CHUNK as u64).read_to_end(&mut data).map_err(|err| err.to_string())?;
-    Ok((data, metadata.len()))
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as u64);
+    Ok(FileChunk { data, length: metadata.len(), modified })
 }
 
 fn pbcopy(text: &str) {
@@ -1862,10 +1884,12 @@ impl Server {
                     Query::CommandOutput { pane } => Reply::Output(
                         self.panes.get(&pane).and_then(|p| p.session.command_output()),
                     ),
-                    Query::Upload { pane: _, upload, name, data, last, dir } => {
-                        Reply::Upload(self.upload(client, upload, &name, &data, last, dir))
+                    Query::Upload { pane: _, upload, name, data, last, to } => {
+                        Reply::Upload(self.upload(client, upload, &name, &data, last, to))
                     },
-                    Query::ListDir { pane, path } => Reply::Dir(self.list_dir(pane, path)),
+                    Query::ListDir { pane, path, known } => {
+                        Reply::Dir(self.list_dir(pane, path, known))
+                    },
                     Query::ReadFile { pane: _, path, offset } => {
                         Reply::File(read_file(&path, offset))
                     },
@@ -1980,8 +2004,8 @@ impl Server {
 
     /// Part of a file an app sends: on the end of the file it started.
     /// Part of a file an app sends: on the end of the file it started. It
-    /// arrives as a hidden `.part` file, named as asked (or, beside a file
-    /// of that name, `name (1)`...) once whole.
+    /// arrives as a hidden `.part` file, and takes its place once whole
+    /// (see [`UploadTo`]).
     #[allow(clippy::too_many_arguments)]
     fn upload(
         &mut self,
@@ -1990,46 +2014,96 @@ impl Server {
         name: &str,
         data: &[u8],
         last: bool,
-        dir: Option<PathBuf>,
-    ) -> Result<Option<PathBuf>, String> {
+        to: UploadTo,
+    ) -> Result<Option<Uploaded>, UploadError> {
         use std::io::Write;
+        let failed = |err: std::io::Error| UploadError::Failed(err.to_string());
         let key = (client, upload);
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.uploads.entry(key) {
-            let name = Path::new(name).file_name().ok_or("no file name")?.to_owned();
-            let dir = match dir {
-                Some(dir) if dir.is_dir() => dir,
-                Some(dir) => return Err(format!("{} isn't a folder", dir.display())),
-                None => {
-                    let cache = uploads_dir().ok_or("no home directory")?;
+        if let std::collections::hash_map::Entry::Vacant(vacant) = self.uploads.entry(key) {
+            // In place of a file: its name, whatever the file sent was called.
+            let name = match &to {
+                UploadTo::File { path, .. } => path.as_path(),
+                _ => Path::new(name),
+            };
+            let name = name
+                .file_name()
+                .ok_or_else(|| UploadError::Failed("no file name".into()))?
+                .to_owned();
+            let (dir, place) = match to {
+                UploadTo::Cache => {
+                    let cache = uploads_dir()
+                        .ok_or_else(|| UploadError::Failed("no home directory".into()))?;
                     prune_uploads(&cache);
                     let stamp = SystemTime::now()
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .map_or(0, |d| d.as_secs());
                     let dir = cache.join(format!("{stamp}-{client}-{upload}"));
-                    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-                    dir
+                    std::fs::create_dir_all(&dir).map_err(failed)?;
+                    (dir, Place::Beside)
+                },
+                UploadTo::Folder { dir, existing } => {
+                    if !dir.is_dir() {
+                        return Err(UploadError::Failed(format!(
+                            "{} isn't a folder",
+                            dir.display()
+                        )));
+                    }
+                    let taken = dir.join(&name).exists();
+                    let place = match existing {
+                        Existing::Refuse if taken => return Err(UploadError::Exists),
+                        Existing::Rename => Place::Beside,
+                        Existing::Refuse | Existing::Replace => Place::Instead(None),
+                    };
+                    (dir, place)
+                },
+                UploadTo::File { path, modified } => {
+                    if modified.is_some() && modified != modified_time(&path) {
+                        return Err(UploadError::Changed);
+                    }
+                    let dir = path
+                        .parent()
+                        .ok_or_else(|| UploadError::Failed("no folder".into()))?
+                        .to_owned();
+                    (dir, Place::Instead(modified))
                 },
             };
             let part = dir.join(format!(".{}.{client}-{upload}.part", name.to_string_lossy()));
-            let file = std::fs::File::create(&part).map_err(|err| err.to_string())?;
-            entry.insert(Upload { part, dir, name, file });
+            let file = std::fs::File::create(&part).map_err(failed)?;
+            vacant.insert(Upload { part, dir, name, file, place });
         }
         let receiving = self.uploads.get_mut(&key).expect("just made");
         if let Err(err) = receiving.file.write_all(data) {
             let receiving = self.uploads.remove(&key).expect("there");
             let _ = std::fs::remove_file(receiving.part);
-            return Err(err.to_string());
+            return Err(failed(err));
         }
         if !last {
             return Ok(None);
         }
         let receiving = self.uploads.remove(&key).expect("there");
-        let path = free_name(&receiving.dir, &receiving.name);
+        let path = match receiving.place {
+            Place::Beside => free_name(&receiving.dir, &receiving.name),
+            Place::Instead(expected) => {
+                let path = receiving.dir.join(&receiving.name);
+                // Changed meanwhile, after all?
+                if expected.is_some() && expected != modified_time(&path) {
+                    let _ = std::fs::remove_file(&receiving.part);
+                    return Err(UploadError::Changed);
+                }
+                // As the file it replaces was (a script stays runnable).
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    let _ = std::fs::set_permissions(&receiving.part, metadata.permissions());
+                }
+                path
+            },
+        };
+        drop(receiving.file);
         std::fs::rename(&receiving.part, &path).map_err(|err| {
             let _ = std::fs::remove_file(&receiving.part);
-            err.to_string()
+            failed(err)
         })?;
-        Ok(Some(path))
+        let modified = modified_time(&path).unwrap_or_default();
+        Ok(Some(Uploaded { path, modified }))
     }
 
     /// What's in `path` (else the pane's current directory): folders
@@ -2038,7 +2112,8 @@ impl Server {
         &self,
         pane: PaneId,
         path: Option<PathBuf>,
-    ) -> Result<(PathBuf, Vec<DirEntry>), String> {
+        known: Option<u64>,
+    ) -> Result<Listing, String> {
         let path = match path {
             Some(path) => path,
             None => self
@@ -2074,7 +2149,18 @@ impl Server {
         entries.sort_by(|a, b| {
             b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
         });
-        Ok((path, entries))
+        // Unchanged since the app's last look: no need to send it again.
+        let fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut hasher);
+            for entry in &entries {
+                (&entry.name, entry.dir, entry.link, entry.size, entry.modified).hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let entries = (known != Some(fingerprint)).then_some(entries);
+        Ok(Listing { path, fingerprint, entries })
     }
 
     fn respond(&mut self, request: Request) -> Result<Response, String> {

@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -528,15 +528,15 @@ pub enum Query {
         name: String,
         data: Vec<u8>,
         last: bool,
-        /// Into this folder (not replacing a file there: another name is
-        /// found), else a folder of its own in the cache.
-        dir: Option<PathBuf>,
+        to: UploadTo,
     },
     /// What's in a folder on the pane's machine: `path`, else the pane's
-    /// current directory. Answered with [`Reply::Dir`].
+    /// current directory. Answered with [`Reply::Dir`]; without its entries
+    /// if their fingerprint is still `known`.
     ListDir {
         pane: PaneId,
         path: Option<PathBuf>,
+        known: Option<u64>,
     },
     /// Part of a file on the pane's machine, from `offset`: answered with
     /// [`Reply::File`].
@@ -557,13 +557,77 @@ pub enum Reply {
     Search(Result<bool, String>),
     /// A command line (if known) and its output.
     Output(Option<(Option<String>, String)>),
-    /// Taken (`None`), or the whole file's path; or why not.
-    Upload(Result<Option<PathBuf>, String>),
-    /// The bytes from the offset asked for, and the file's length; or why
-    /// not.
-    File(Result<(Vec<u8>, u64), String>),
-    /// The folder listed (resolved), and what's in it; or why not.
-    Dir(Result<(PathBuf, Vec<DirEntry>), String>),
+    /// Taken (`None`), or the whole file, where it went; or why not.
+    Upload(Result<Option<Uploaded>, UploadError>),
+    File(Result<FileChunk, String>),
+    Dir(Result<Listing, String>),
+}
+
+/// Where a file sent to a pane's machine goes ([`Query::Upload`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum UploadTo {
+    /// A folder of its own in the cache.
+    Cache,
+    /// Into `dir`, as its name; `existing` says what if that's taken.
+    Folder { dir: PathBuf, existing: Existing },
+    /// In place of `path` (a file edited here), if it's unchanged since
+    /// `modified` (nanoseconds since the epoch; `None`: whatever it is now).
+    File { path: PathBuf, modified: Option<u64> },
+}
+
+/// What to do when a file of the name is there.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Existing {
+    /// Ask: the upload fails with [`UploadError::Exists`] (at once).
+    Refuse,
+    Replace,
+    /// Keep both: `name (1)` beside it.
+    Rename,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Uploaded {
+    pub path: PathBuf,
+    /// Its modification time there, nanoseconds since the epoch.
+    pub modified: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum UploadError {
+    /// A file of the name is there ([`Existing::Refuse`]).
+    Exists,
+    /// The file changed there since it was fetched ([`UploadTo::File`]).
+    Changed,
+    Failed(String),
+}
+
+impl std::fmt::Display for UploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exists => f.write_str("a file of that name is there"),
+            Self::Changed => f.write_str("it changed there since"),
+            Self::Failed(err) => f.write_str(err),
+        }
+    }
+}
+
+/// Part of a file ([`Query::ReadFile`]): the bytes from the offset asked
+/// for, the file's length, and its modification time (nanoseconds since
+/// the epoch).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileChunk {
+    pub data: Vec<u8>,
+    pub length: u64,
+    pub modified: u64,
+}
+
+/// A folder listed ([`Query::ListDir`]): where (resolved), what's in it
+/// (`None`: as `known`), and that's fingerprint.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Listing {
+    pub path: PathBuf,
+    pub fingerprint: u64,
+    pub entries: Option<Vec<DirEntry>>,
 }
 
 /// A folder's entry ([`Query::ListDir`]).

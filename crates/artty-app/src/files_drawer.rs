@@ -7,7 +7,7 @@
 
 use std::path::PathBuf;
 
-use artty_core::protocol::DirEntry;
+use artty_core::protocol::{DirEntry, Existing, UploadError, UploadTo};
 
 use super::*;
 
@@ -22,6 +22,8 @@ pub(super) struct Files {
     /// The folder listed, once known.
     path: Option<PathBuf>,
     entries: Vec<DirEntry>,
+    /// The listing's fingerprint: the server answers "unchanged" to it.
+    fingerprint: Option<u64>,
     error: Option<String>,
     /// Lists the pane's current directory (else a folder opened here).
     follow: bool,
@@ -39,6 +41,7 @@ impl WindowView {
             pane,
             path: None,
             entries: Vec::new(),
+            fingerprint: None,
             error: None,
             follow: true,
             hidden: false,
@@ -51,20 +54,24 @@ impl WindowView {
     fn list_files(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
         let Some(files) = self.files.as_mut() else { return };
         files.asked = Some(Instant::now());
-        let pane = files.pane;
-        let answer = app_state::query(Query::ListDir { pane, path }, cx);
+        let (pane, known) = (files.pane, files.fingerprint);
+        let answer = app_state::query(Query::ListDir { pane, path, known }, cx);
         cx.spawn(async move |this, cx| {
             let reply = answer.await;
             let _ = this.update(cx, |this, cx| {
                 let Some(files) = this.files.as_mut().filter(|f| f.pane == pane) else { return };
                 match reply {
-                    Ok(Reply::Dir(Ok((path, entries)))) => {
-                        if files.path.as_ref() != Some(&path) || files.entries != entries {
-                            files.path = Some(path);
+                    Ok(Reply::Dir(Ok(listing))) => {
+                        // (No entries: as before.)
+                        if let Some(entries) = listing.entries {
+                            files.path = Some(listing.path);
                             files.entries = entries;
+                            files.fingerprint = Some(listing.fingerprint);
                             cx.notify();
                         }
-                        files.error = None;
+                        if files.error.take().is_some() {
+                            cx.notify();
+                        }
                     },
                     Ok(Reply::Dir(Err(error))) => {
                         files.error = Some(error);
@@ -87,6 +94,7 @@ impl WindowView {
             files.pane = focused.unwrap_or(files.pane);
             files.entries.clear();
             files.path = None;
+            files.fingerprint = None;
         }
         let due = files.asked.is_none_or(|at| at.elapsed() >= REFRESH);
         if moved && files.follow || due {
@@ -111,29 +119,23 @@ impl WindowView {
         self.list_files(None, cx);
     }
 
-    /// Open a file here: as it is on this Mac, else fetched first.
+    /// Open a file here: this Mac's as it is; another machine's to edit
+    /// here, each save sent back (see `edits`).
     fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         let Some(pane) = self.files.as_ref().map(|f| f.pane) else { return };
-        let server = ids::server_of(pane);
-        if server == LOCAL {
+        if ids::server_of(pane) == LOCAL {
             let _ = std::process::Command::new("open").arg(&path).spawn();
             return;
         }
-        let name = app_state::server_name(server, cx);
-        let file = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        self.show_toast(format!("Fetching {file} from {name}…"), cx);
-        cx.spawn(async move |this, cx| {
-            let fetched = crate::transfer::fetch(pane, &name, &path, cx).await;
-            let _ = this.update(cx, |this, cx| match fetched {
-                Ok(here) => {
-                    this.toast = None;
-                    cx.notify();
-                    let _ = std::process::Command::new("open").arg(here).spawn();
-                },
-                Err(err) => this.show_toast(format!("Couldn't fetch {file}: {err}"), cx),
-            });
-        })
-        .detach();
+        // After this view's update (it shows toasts in a view, maybe this).
+        cx.defer(move |cx| crate::edits::open(pane, path, cx));
+    }
+
+    /// List the folder shown again now.
+    fn refresh_files(&mut self, cx: &mut Context<Self>) {
+        let Some(files) = self.files.as_ref() else { return };
+        let path = if files.follow { None } else { files.path.clone() };
+        self.list_files(path, cx);
     }
 
     /// Download a file to ~/Downloads and show it there; this Mac's is
@@ -159,25 +161,72 @@ impl WindowView {
         .detach();
     }
 
-    /// Files dropped on the drawer: into the folder it shows.
-    fn drop_into_folder(&mut self, paths: &gpui::ExternalPaths, cx: &mut Context<Self>) {
+    /// Files dropped on the drawer: into the folder it shows; one of a name
+    /// that's there asks whether to replace it.
+    fn drop_into_folder(
+        &mut self,
+        paths: &gpui::ExternalPaths,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some((pane, Some(dir))) = self.files.as_ref().map(|f| (f.pane, f.path.clone())) else {
             return;
         };
         let paths = paths.paths().to_vec();
-        let name = app_state::server_name(ids::server_of(pane), cx);
-        let files =
-            if paths.len() == 1 { "1 file".to_owned() } else { format!("{} files", paths.len()) };
-        self.show_toast(format!("Sending {files} to {name}…"), cx);
-        cx.spawn(async move |this, cx| {
-            let sent = crate::transfer::send(pane, &paths, Some(dir), cx).await;
-            let _ = this.update(cx, |this, cx| {
-                match sent {
-                    Ok(_) => this.show_toast(format!("Sent {files}"), cx),
-                    Err(err) => this.show_toast(format!("Couldn't send: {err}"), cx),
+        let server = app_state::server_name(ids::server_of(pane), cx);
+        let count = |n: usize| if n == 1 { "1 file".to_owned() } else { format!("{n} files") };
+        self.show_toast(format!("Sending {} to {server}…", count(paths.len())), cx);
+        let folder = dir
+            .file_name()
+            .map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned());
+        cx.spawn_in(window, async move |this, cx| {
+            let (mut sent, mut skipped, mut failed) = (0, 0, None);
+            for path in paths {
+                let name =
+                    path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                let mut existing = Existing::Refuse;
+                loop {
+                    let to = UploadTo::Folder { dir: dir.clone(), existing };
+                    match crate::transfer::send_file(pane, &path, to, cx).await {
+                        Ok(_) => sent += 1,
+                        Err(UploadError::Exists) => {
+                            let asked = cx.update(|window, cx| {
+                                window.prompt(
+                                    gpui::PromptLevel::Warning,
+                                    &format!("“{name}” is already in {folder}"),
+                                    Some("Replace it, or keep both (this one as a numbered copy)?"),
+                                    &["Replace", "Keep Both", "Skip"],
+                                    cx,
+                                )
+                            });
+                            existing = match asked {
+                                Ok(answer) => match answer.await {
+                                    Ok(0) => Existing::Replace,
+                                    Ok(1) => Existing::Rename,
+                                    _ => {
+                                        skipped += 1;
+                                        break;
+                                    },
+                                },
+                                Err(_) => break,
+                            };
+                            continue;
+                        },
+                        Err(err) => failed = Some(format!("{name}: {err}")),
+                    }
+                    break;
                 }
-                let path = this.files.as_ref().and_then(|f| f.path.clone());
-                this.list_files(path, cx);
+            }
+            let _ = this.update(cx, |this, cx| {
+                let mut said = vec![format!("Sent {}", count(sent))];
+                if skipped > 0 {
+                    said.push(format!("skipped {skipped}"));
+                }
+                match failed {
+                    Some(err) => this.show_toast(format!("Couldn't send {err}"), cx),
+                    None => this.show_toast(said.join(", "), cx),
+                }
+                this.refresh_files(cx);
             });
         })
         .detach();
@@ -245,6 +294,10 @@ impl WindowView {
                             }
                         },
                     )))
+                    .child(
+                        small_button("files-refresh".into(), "⟳", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh_files(cx))),
+                    )
                     .child(
                         small_button("files-follow".into(), "Pane", files.follow)
                             .on_click(cx.listener(|this, _, _, cx| this.follow_pane(cx))),
@@ -385,8 +438,8 @@ impl WindowView {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
                 .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.bg(rgba(0x22304af4)))
-                .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
-                    this.drop_into_folder(paths, cx);
+                .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                    this.drop_into_folder(paths, window, cx);
                     cx.stop_propagation();
                 }))
                 .child(header)

@@ -13,6 +13,8 @@ mod cli;
 #[cfg(target_os = "macos")]
 mod echo;
 #[cfg(target_os = "macos")]
+mod edits;
+#[cfg(target_os = "macos")]
 mod forward;
 mod hooks;
 #[cfg(target_os = "macos")]

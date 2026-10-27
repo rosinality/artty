@@ -1073,6 +1073,7 @@ fn sync_appearance(cx: &mut App) {
 /// one connected must answer within seconds.
 fn heartbeat(cx: &mut App) {
     crate::forward::tick(cx);
+    crate::edits::tick(cx);
     const PING_EVERY: Duration = Duration::from_secs(5);
     const SILENCE: Duration = Duration::from_secs(15);
     const PROBE: Duration = Duration::from_secs(4);
@@ -1629,6 +1630,7 @@ pub fn restart(cx: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use artty_core::protocol::{Existing, UploadError, UploadTo};
 
     /// A server of its own (in a directory of its own), reached through a
     /// command as through ssh. `None` without the app binary built.
@@ -1863,52 +1865,78 @@ mod tests {
             name: "../notes.txt".into(),
             data: data.to_vec(),
             last,
-            dir: None,
+            to: UploadTo::Cache,
         };
         assert!(matches!(ask(upload(b"hello ", false)), Reply::Upload(Ok(None))));
         let Reply::Upload(Ok(Some(there))) = ask(upload(b"there", true)) else { panic!() };
         // Its own name, in a folder of its own in the cache.
+        let there = there.path;
         assert_eq!(there.file_name().unwrap(), "notes.txt");
         assert!(there.starts_with(&dir), "{there:?}");
         let read = ask(Query::ReadFile { pane, path: there.clone(), offset: 6 });
-        assert!(matches!(read, Reply::File(Ok((data, 11))) if data == b"there"));
+        assert!(matches!(read, Reply::File(Ok(c)) if c.data == b"there" && c.length == 11));
         let folder = ask(Query::ReadFile { pane, path: dir.clone(), offset: 0 });
         assert!(matches!(folder, Reply::File(Err(_))), "a folder isn't a file");
 
-        // Into a folder: named as sent, then beside it as "name (1)".
+        // Into a folder: asked about a name that's there (at once), then
+        // replacing it or beside it as "name (1)".
         let into = dir.join("into");
         std::fs::create_dir_all(&into).unwrap();
-        let mut send_into = |upload, data: &[u8]| {
+        let mut send = |upload, data: &[u8], to: UploadTo| {
             let query = Query::Upload {
                 pane,
                 upload,
                 name: "a.txt".into(),
                 data: data.to_vec(),
                 last: true,
-                dir: Some(into.clone()),
+                to,
             };
             match ask(query) {
-                Reply::Upload(Ok(Some(path))) => path,
+                Reply::Upload(result) => result.map(|done| done.unwrap()),
                 other => panic!("{other:?}"),
             }
         };
-        assert_eq!(send_into(2, b"one"), into.join("a.txt"));
-        assert_eq!(send_into(3, b"two"), into.join("a (1).txt"));
-        // Listed: folders first; hidden part files gone once whole.
+        let folder = |existing| UploadTo::Folder { dir: into.clone(), existing };
+        assert_eq!(send(2, b"one", folder(Existing::Refuse)).unwrap().path, into.join("a.txt"));
+        assert_eq!(send(3, b"two", folder(Existing::Refuse)), Err(UploadError::Exists));
+        assert_eq!(send(4, b"two", folder(Existing::Rename)).unwrap().path, into.join("a (1).txt"));
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::Permissions::from_mode(0o755);
+            std::fs::set_permissions(into.join("a.txt"), mode).unwrap();
+        }
+        let replaced = send(5, b"three", folder(Existing::Replace)).unwrap();
+        assert_eq!(std::fs::read(&replaced.path).unwrap(), b"three");
+        // As the file it replaced: still runnable.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&replaced.path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
+        // Edited here: back in place if unchanged there since; else refused,
+        // unless sent regardless.
+        let file = |modified| UploadTo::File { path: into.join("a.txt"), modified };
+        let saved = send(6, b"edited", file(Some(replaced.modified))).unwrap();
+        assert_eq!(std::fs::read(&saved.path).unwrap(), b"edited");
+        assert_eq!(send(7, b"stale", file(Some(saved.modified - 1))), Err(UploadError::Changed));
+        assert_eq!(std::fs::read(into.join("a.txt")).unwrap(), b"edited");
+        send(8, b"forced", file(None)).unwrap();
+        assert_eq!(std::fs::read(into.join("a.txt")).unwrap(), b"forced");
+
+        // Listed: folders first; no part files left. Asked again with what
+        // it knows: unchanged, no entries sent.
         std::fs::create_dir_all(into.join("sub")).unwrap();
-        let Reply::Dir(Ok((listed, entries))) =
-            ask(Query::ListDir { pane, path: Some(into.clone()) })
-        else {
-            panic!()
-        };
-        assert_eq!(listed, into.canonicalize().unwrap());
-        let names: Vec<(&str, bool, u64)> = entries
-            .iter()
-            .map(|e| (e.name.as_str(), e.dir, if e.dir { 0 } else { e.size }))
-            .collect();
-        assert_eq!(names, [("sub", true, 0), ("a (1).txt", false, 3), ("a.txt", false, 3)]);
+        let list = |known| Query::ListDir { pane, path: Some(into.clone()), known };
+        let Reply::Dir(Ok(listing)) = ask(list(None)) else { panic!() };
+        assert_eq!(listing.path, into.canonicalize().unwrap());
+        let entries = listing.entries.unwrap();
+        let names: Vec<(&str, bool)> = entries.iter().map(|e| (e.name.as_str(), e.dir)).collect();
+        assert_eq!(names, [("sub", true), ("a (1).txt", false), ("a.txt", false)]);
+        let Reply::Dir(Ok(again)) = ask(list(Some(listing.fingerprint))) else { panic!() };
+        assert_eq!((again.fingerprint, again.entries), (listing.fingerprint, None));
         // Without a path: the pane's directory.
-        assert!(matches!(ask(Query::ListDir { pane, path: None }), Reply::Dir(Ok(_))));
+        let pane_dir = Query::ListDir { pane, path: None, known: None };
+        assert!(matches!(ask(pane_dir), Reply::Dir(Ok(_))));
 
         // A program copies; another asks for a page to open.
         let copy = "printf '\\033]52;c;%s\\a' $(printf copied | base64)\r";
