@@ -21,9 +21,7 @@ pub fn script(shell: &str) -> Option<&'static str> {
 
 /// Write the scripts to a per-user directory and return it.
 pub fn install() -> io::Result<PathBuf> {
-    // SAFETY: getuid can't fail.
-    let uid = unsafe { libc::getuid() };
-    let dir = std::env::temp_dir().join(format!("artty-shell-integration-{uid}"));
+    let dir = crate::control::private_dir().join("artty-shell-integration");
     std::fs::create_dir_all(dir.join("zsh"))?;
     std::fs::write(dir.join("artty.zsh"), ZSH_SCRIPT)?;
     std::fs::write(dir.join("artty.bash"), BASH_SCRIPT)?;

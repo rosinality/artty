@@ -30,6 +30,8 @@ mod settings;
 #[cfg(target_os = "macos")]
 mod terminal;
 #[cfg(target_os = "macos")]
+mod transfer;
+#[cfg(target_os = "macos")]
 mod window_view;
 
 #[cfg(target_os = "macos")]

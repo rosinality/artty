@@ -735,6 +735,18 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                 activate(window, cx);
             },
             AppCommand::Restart => restart(cx),
+            // Web pages only: a program on another machine mustn't open
+            // this Mac's files or apps.
+            AppCommand::OpenUrl { url } => {
+                if url.starts_with("https://") || url.starts_with("http://") {
+                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                } else {
+                    log::warn!("not opening {url} for server {server}: not a web page");
+                }
+            },
+        },
+        ServerMessage::Clipboard { text } => {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text))
         },
         ServerMessage::Reply { id, reply } => {
             if let Some(waiter) = cx.global_mut::<Shared>().replies.remove(&id) {
@@ -821,7 +833,15 @@ fn deliver(server: ServerId, message: ClientMessage, cx: &App) {
     }
 }
 
-fn next_id(cx: &mut App) -> u64 {
+/// What a server is called (this Mac's, for local panes).
+pub fn server_name(server: ServerId, cx: &App) -> String {
+    cx.global::<Shared>()
+        .connections
+        .get(server as usize)
+        .map_or_else(|| "this Mac".to_owned(), |c| c.name.clone())
+}
+
+pub fn next_id(cx: &mut App) -> u64 {
     let shared = cx.global_mut::<Shared>();
     let id = shared.next_request;
     shared.next_request += 1;
@@ -1662,6 +1682,83 @@ mod tests {
             bytes / 5 / 1024
         );
         let _ = child.kill();
+    }
+
+    /// Files go to a pane's machine in parts and come back; a program's
+    /// copy (OSC 52) and `artty open` come to the app.
+    #[test]
+    fn files_clipboard_and_links_reach_the_app() {
+        let Some((mut opened, dir)) = scratch_server("files") else { return };
+        let pane = attach_window(&mut opened);
+        let artty_core::remote::Opened { mut child, mut reader, mut writer, .. } = opened;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(message) = read_message::<ServerMessage>(&mut reader) {
+                if tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        // Send, then wait for the message `wanted` picks (acknowledging
+        // screens meanwhile).
+        let mut exchange =
+            |message: ClientMessage, wanted: &dyn Fn(ServerMessage) -> Option<ServerMessage>| {
+                write_message(&mut writer, &message).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let wait = deadline.saturating_duration_since(Instant::now());
+                    match rx.recv_timeout(wait).expect("an answer") {
+                        ServerMessage::Sync { seq } => {
+                            write_message(&mut writer, &ClientMessage::Ack { seq }).unwrap()
+                        },
+                        message => {
+                            if let Some(message) = wanted(message) {
+                                return message;
+                            }
+                        },
+                    }
+                }
+            };
+        let reply = |m: ServerMessage| matches!(m, ServerMessage::Reply { id: 9, .. }).then_some(m);
+        let mut ask = |query: Query| match exchange(ClientMessage::Query { id: 9, query }, &reply) {
+            ServerMessage::Reply { reply, .. } => reply,
+            _ => unreachable!(),
+        };
+        let upload = |data: &[u8], last| Query::Upload {
+            pane,
+            upload: 1,
+            name: "../notes.txt".into(),
+            data: data.to_vec(),
+            last,
+        };
+        assert!(matches!(ask(upload(b"hello ", false)), Reply::Upload(Ok(None))));
+        let Reply::Upload(Ok(Some(there))) = ask(upload(b"there", true)) else { panic!() };
+        // Its own name, in a folder of its own in the cache.
+        assert_eq!(there.file_name().unwrap(), "notes.txt");
+        assert!(there.starts_with(&dir), "{there:?}");
+        let read = ask(Query::ReadFile { pane, path: there.clone(), offset: 6 });
+        assert!(matches!(read, Reply::File(Ok((data, 11))) if data == b"there"));
+        let folder = ask(Query::ReadFile { pane, path: dir.clone(), offset: 0 });
+        assert!(matches!(folder, Reply::File(Err(_))), "a folder isn't a file");
+
+        // A program copies; another asks for a page to open.
+        let copy = "printf '\\033]52;c;%s\\a' $(printf copied | base64)\r";
+        let copied = exchange(ClientMessage::Input { pane, bytes: copy.into() }, &|m| {
+            matches!(m, ServerMessage::Clipboard { .. }).then_some(m)
+        });
+        assert!(matches!(copied, ServerMessage::Clipboard { text } if text == "copied"));
+        let open = Request::OpenUrl { url: "https://example.com".into() };
+        let control = ClientMessage::Control { id: 3, request: encode_request(&open) };
+        let opens = exchange(control, &|m| matches!(m, ServerMessage::App(_)).then_some(m));
+        assert!(matches!(
+            opens,
+            ServerMessage::App(AppCommand::OpenUrl { url }) if url == "https://example.com"
+        ));
+
+        let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
+        exchange(stop, &|m| matches!(m, ServerMessage::Stopping { .. }).then_some(m));
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Panes that never stop printing, in windows no app shows, don't hold

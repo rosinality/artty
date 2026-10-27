@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -518,6 +518,23 @@ pub enum Query {
     CommandOutput {
         pane: PaneId,
     },
+    /// Part of a file for the pane's machine (dropped on the pane): `data`
+    /// goes on the end of upload `upload`'s file, named `name`. Answered
+    /// with [`Reply::Upload`], the file's path once `last`.
+    Upload {
+        pane: PaneId,
+        upload: u64,
+        name: String,
+        data: Vec<u8>,
+        last: bool,
+    },
+    /// Part of a file on the pane's machine, from `offset`: answered with
+    /// [`Reply::File`].
+    ReadFile {
+        pane: PaneId,
+        path: PathBuf,
+        offset: u64,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -530,6 +547,11 @@ pub enum Reply {
     Search(Result<bool, String>),
     /// A command line (if known) and its output.
     Output(Option<(Option<String>, String)>),
+    /// Taken (`None`), or the whole file's path; or why not.
+    Upload(Result<Option<PathBuf>, String>),
+    /// The bytes from the offset asked for, and the file's length; or why
+    /// not.
+    File(Result<(Vec<u8>, u64), String>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -680,6 +702,10 @@ pub enum AppCommand {
     OpenSettings,
     /// Quit and reopen the app (sessions keep running).
     Restart,
+    /// Open a web page, for a program on the server (`artty open`).
+    OpenUrl {
+        url: String,
+    },
 }
 
 /// Server → app.
@@ -719,6 +745,10 @@ pub enum ServerMessage {
     },
     /// Something for the app to do, from the `artty` command.
     App(AppCommand),
+    /// A program copied this (OSC 52): onto the app's clipboard.
+    Clipboard {
+        text: String,
+    },
     Reply {
         id: u64,
         reply: Reply,

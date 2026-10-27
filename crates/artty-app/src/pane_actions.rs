@@ -138,22 +138,73 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         let Some((pane, _)) = self.pane_at(window.mouse_position()) else { return };
+        if pane != self.focused_id().unwrap_or(pane) {
+            self.focus_pane(pane, cx);
+        }
+        window.activate_window();
+        let paths = paths.paths().to_vec();
+        if paths.is_empty() {
+            return;
+        }
+        let server = crate::ids::server_of(pane);
+        if server == crate::ids::LOCAL {
+            return self.type_paths(pane, &paths, cx);
+        }
+        // On another machine: send them there first.
+        let name = app_state::server_name(server, cx);
+        let files =
+            if paths.len() == 1 { "1 file".to_owned() } else { format!("{} files", paths.len()) };
+        self.show_toast(format!("Sending {files} to {name}…"), cx);
+        cx.spawn(async move |this, cx| {
+            let sent = crate::transfer::send(pane, &paths, cx).await;
+            let _ = this.update(cx, |this, cx| match sent {
+                Ok(there) => {
+                    this.toast = None;
+                    this.type_paths(pane, &there, cx);
+                },
+                Err(err) => this.show_toast(format!("Couldn't send: {err}"), cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Type paths into a pane, quoted for a shell.
+    fn type_paths(&mut self, pane: PaneId, paths: &[std::path::PathBuf], cx: &mut Context<Self>) {
         let mut text = paths
-            .paths()
             .iter()
             .map(|path| shell_quote(&path.to_string_lossy()))
             .collect::<Vec<_>>()
             .join(" ");
-        if text.is_empty() {
-            return;
-        }
         text.push(' ');
-        if pane != self.focused_id().unwrap_or(pane) {
-            self.focus_pane(pane, cx);
-        }
         self.echo(pane, text.as_bytes(), cx);
         self.send(ClientMessage::Input { pane, bytes: text.into_bytes() }, cx);
-        window.activate_window();
+    }
+
+    /// Open a link from a pane: on this Mac; a file on another machine is
+    /// fetched first.
+    pub(super) fn open_link(&mut self, pane: PaneId, link: String, cx: &mut Context<Self>) {
+        let server = crate::ids::server_of(pane);
+        let remote_file =
+            (server != crate::ids::LOCAL).then(|| artty_core::path_from_file_url(&link)).flatten();
+        let Some(path) = remote_file else {
+            let _ = std::process::Command::new("open").arg(&link).spawn();
+            return;
+        };
+        let name = app_state::server_name(server, cx);
+        let file = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+        self.show_toast(format!("Fetching {file} from {name}…"), cx);
+        cx.spawn(async move |this, cx| {
+            let fetched = crate::transfer::fetch(pane, &name, &path, cx).await;
+            let _ = this.update(cx, |this, cx| match fetched {
+                Ok(here) => {
+                    this.toast = None;
+                    cx.notify();
+                    let _ = std::process::Command::new("open").arg(here).spawn();
+                },
+                Err(err) => this.show_toast(format!("Couldn't fetch {file}: {err}"), cx),
+            });
+        })
+        .detach();
     }
 
     /// Paste into the focused pane. Several lines into a program that would

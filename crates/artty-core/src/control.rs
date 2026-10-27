@@ -4,7 +4,8 @@
 //! Programs inside artty find the socket in `$ARTTY_SOCKET` and their own tab
 //! in `$ARTTY_SESSION_ID`.
 
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -24,11 +25,68 @@ fn socket_dirs() -> Vec<PathBuf> {
     if temp == fallback { vec![temp] } else { vec![temp, fallback] }
 }
 
+/// A directory only this user can use, for the server's socket and what
+/// panes run (the `artty` command, shell integration). macOS's temporary
+/// directory is the user's own; elsewhere `/tmp` is everyone's, so it's
+/// `/tmp/artty-UID`, made private and checked to be (as tmux does: anyone
+/// could have made it first), else `~/.cache/artty/run`.
+pub fn private_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        return std::env::temp_dir();
+    }
+    // SAFETY: getuid can't fail.
+    let uid = unsafe { libc::getuid() };
+    let shared = std::env::temp_dir().join(format!("artty-{uid}"));
+    if make_private(&shared, uid).is_ok() {
+        return shared;
+    }
+    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from);
+    let own = home.join(".cache/artty/run");
+    if let Err(err) = make_private(&own, uid) {
+        log::error!("no private directory ({}: {err})", own.display());
+    }
+    own
+}
+
+/// Make `dir` (mode 0700) unless it's there, and check it's `uid`'s alone:
+/// a directory, not a link, no one else's, and no one else may write in it.
+fn make_private(dir: &Path, uid: u32) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir) {
+        Ok(()) => {},
+        Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {},
+        Err(err) => return Err(err),
+    }
+    let metadata = std::fs::symlink_metadata(dir)?;
+    if !metadata.is_dir() || metadata.uid() != uid {
+        return Err(io::Error::other("someone else's"));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 /// The artty server's socket. Everything goes through it: the app's windows,
 /// the `artty` command, and agent hooks.
 pub fn server_socket_path() -> PathBuf {
     // SAFETY: getuid can't fail.
     let uid = unsafe { libc::getuid() };
+    if !cfg!(target_os = "macos") {
+        let path = private_dir().join("server.sock");
+        // Servers from before kept theirs in /tmp itself: keep reaching
+        // one that's still running (it's ours: anyone could put one there).
+        let legacy = std::env::temp_dir().join("artty-server.sock");
+        let ours = |path: &Path| {
+            use std::os::unix::fs::{FileTypeExt, MetadataExt};
+            std::fs::symlink_metadata(path)
+                .is_ok_and(|m| m.file_type().is_socket() && m.uid() == uid)
+        };
+        if !path.exists() && ours(&legacy) {
+            return legacy;
+        }
+        return path;
+    }
     let path = std::env::temp_dir().join("artty-server.sock");
     if path.as_os_str().len() <= MAX_SOCKET_PATH {
         path
@@ -74,6 +132,10 @@ pub enum Request {
     List,
     /// Open the Settings window.
     Settings,
+    /// Open a web page in the app's machine's browser.
+    OpenUrl {
+        url: String,
+    },
     /// Show the Activity view in the frontmost window.
     Activity,
     /// Quit the app and start it again (e.g. after a rebuild); sessions keep
@@ -437,5 +499,27 @@ mod tests {
         assert!(matches!(status, Request::Status { state: AgentState::Waiting, .. }));
         let response = serde_json::to_string(&Response::Tab { id: 7 }).unwrap();
         assert_eq!(response, r#"{"result":"tab","id":7}"#);
+    }
+
+    #[test]
+    fn private_dirs_are_made_private_and_links_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: getuid can't fail.
+        let uid = unsafe { libc::getuid() };
+        let base = std::env::temp_dir().join(format!("artty-private-{}", std::process::id()));
+        let dir = base.join("a");
+        make_private(&dir, uid).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        // Made open by someone (or an old version): closed again.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        make_private(&dir, uid).unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        // A link put in its place, or someone else's: refused.
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(make_private(&link, uid).is_err());
+        assert!(make_private(&dir, uid + 1).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

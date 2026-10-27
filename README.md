@@ -266,6 +266,16 @@ shows its round trip. Tabs and panes stay on their server (they can't be
 dragged to another); Activity and the workspace picker (⌘⇧O) show every
 server's.
 
+Panes on another machine still reach this Mac: files dropped on one are sent
+through the connection (into `~/.cache/artty/uploads` there, kept a week)
+and their paths typed; a `file://` link to a file there (⌘-click, e.g. from
+`ls --hyperlink`) is fetched and opened here, marked as downloaded; what a
+program copies (OSC 52) lands on this Mac's clipboard; and web pages it
+opens — `artty open URL`, which panes there have as `$BROWSER` — open in
+this Mac's browser (web pages only). There, artty keeps its socket and
+scripts in `/tmp/artty-UID`, made private (other users can't take its
+place, as anyone can make files in `/tmp`).
+
 Slow and flaky links: the server holds back screen updates while two
 batches are unacknowledged, then sends the newest screens — so a flood of
 output never queues up ahead of what you type (over a 100 ms link, a key

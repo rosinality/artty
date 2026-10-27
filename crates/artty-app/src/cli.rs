@@ -25,6 +25,7 @@ pub const COMMANDS: &[&str] = &[
     "close",
     "rename",
     "settings",
+    "open",
     "restart",
     "server",
     "remote",
@@ -109,6 +110,9 @@ artty, your own pane is found automatically:
                                          machine's server over stdin and stdout
                                          (what a remote artty app runs over ssh)
   artty settings                         open the Settings window
+  artty open URL                         open a web page in the browser of the
+                                         Mac showing artty (panes on other
+                                         machines have it as $BROWSER)
   artty activity                         show the Activity view (processes,
                                          CPU and memory of every pane)
   artty restart                          quit and reopen artty (e.g. to run a new
@@ -306,6 +310,10 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             }
         },
         "settings" => Request::Settings,
+        "open" => match rest.as_slice() {
+            [url] => Request::OpenUrl { url: url.clone() },
+            _ => return Err("open: give one URL".into()),
+        },
         "activity" => Request::Activity,
         "restart" => Request::Restart,
         "read" => {

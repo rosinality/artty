@@ -79,7 +79,7 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
             AppCommand::Activate { window }
             | AppCommand::OpenWindow { window }
             | AppCommand::ShowActivity { window } => tag(window),
-            AppCommand::OpenSettings | AppCommand::Restart => {},
+            AppCommand::OpenSettings | AppCommand::Restart | AppCommand::OpenUrl { .. } => {},
         },
         ServerMessage::Reply { reply, .. } => match reply {
             Reply::Windows(windows) => {
@@ -91,7 +91,9 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
             | Reply::Text(_)
             | Reply::Path(_)
             | Reply::Search(_)
-            | Reply::Output(_) => {},
+            | Reply::Output(_)
+            | Reply::Upload(_)
+            | Reply::File(_) => {},
         },
         ServerMessage::Image(image) => tag(&mut image.id),
         ServerMessage::Welcome { .. }
@@ -99,7 +101,8 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
         | ServerMessage::Control { .. }
         | ServerMessage::Stopping { .. }
         | ServerMessage::Sync { .. }
-        | ServerMessage::Pong { .. } => {},
+        | ServerMessage::Pong { .. }
+        | ServerMessage::Clipboard { .. } => {},
     }
 }
 
@@ -179,7 +182,9 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
             Query::LinkSpan { pane, .. }
             | Query::SelectionText { pane }
             | Query::Cwd { pane }
-            | Query::CommandOutput { pane } => untag(pane),
+            | Query::CommandOutput { pane }
+            | Query::Upload { pane, .. }
+            | Query::ReadFile { pane, .. } => untag(pane),
             Query::DetachedWindows => {},
         },
         ClientMessage::Control { .. }

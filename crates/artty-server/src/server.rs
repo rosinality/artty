@@ -40,6 +40,9 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const FRAMES_IN_FLIGHT: u64 = 2;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the socket is marked as used, for /tmp cleaners (which leave
+/// what's newer than days).
+const TOUCH_INTERVAL: Duration = Duration::from_secs(3600);
 /// A server with no sessions and no app exits after this long.
 const IDLE_EXIT: Duration = Duration::from_secs(20);
 /// How much CPU and memory history each pane keeps, one sample a second.
@@ -220,12 +223,16 @@ pub(crate) struct Server {
     restarting: bool,
     last_poll: Instant,
     last_save: Instant,
+    /// When the socket was last marked as used ([`touch`]).
+    last_touch: Option<Instant>,
     last_saved: Option<String>,
     /// Previous CPU samples (pid → time used, when), for CPU percentages.
     cpu_samples: HashMap<i32, (u64, Instant)>,
     /// Every pane's processes as of the last sample, with history.
     usage: Vec<PaneProcesses>,
     history: HashMap<PaneId, VecDeque<(f32, u64)>>,
+    /// Files being sent by apps, by app and upload: where, and open.
+    uploads: HashMap<(ClientId, u64), (PathBuf, std::fs::File)>,
     server_usage: Option<ServerUsage>,
     /// The listening socket's descriptor, kept open across a hand-over.
     listener_fd: i32,
@@ -253,12 +260,37 @@ fn config_modified() -> Option<SystemTime> {
 /// link to this executable.
 fn cli_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let dir = std::env::temp_dir().join("artty-bin");
+    let link = |dir: &Path| {
+        let link = dir.join("artty");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&exe, &link)
+    };
+    // Panes started by servers from before have /tmp/artty-bin on their
+    // PATH (on Linux): keep it leading to this build, if it's ours.
+    let legacy = std::env::temp_dir().join("artty-bin");
+    if !cfg!(target_os = "macos") && owned(&legacy) {
+        let _ = link(&legacy);
+    }
+    let dir = artty_core::control::private_dir().join("artty-bin");
     std::fs::create_dir_all(&dir).ok()?;
-    let link = dir.join("artty");
-    let _ = std::fs::remove_file(&link);
-    std::os::unix::fs::symlink(exe, &link).ok()?;
+    link(&dir).ok()?;
     Some(dir)
+}
+
+/// Whether `path` is this user's (and not a link to something).
+fn owned(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: getuid can't fail.
+    let uid = unsafe { libc::getuid() };
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir() && m.uid() == uid)
+}
+
+/// Mark `path` as used now, so cleaners of old files in /tmp leave it.
+fn touch(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return };
+    // SAFETY: a valid C string; null times mean now.
+    unsafe { libc::utimes(path.as_ptr(), std::ptr::null()) };
 }
 
 /// A workspace's automatic name for a directory: its git repository's, else
@@ -297,6 +329,51 @@ fn osascript_notify(title: &str, body: &str) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn();
+}
+
+/// The largest part of a file read at once ([`Query::ReadFile`]).
+const FILE_CHUNK: usize = 256 * 1024;
+
+/// Uploads are kept for a week.
+const UPLOADS_KEPT: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// Where files apps send go (in a folder of their own each).
+fn uploads_dir() -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let base = match std::env::var_os("XDG_CACHE_HOME") {
+        Some(cache) => PathBuf::from(cache),
+        None if cfg!(target_os = "macos") => home.join("Library/Caches"),
+        None => home.join(".cache"),
+    };
+    Some(base.join("artty").join("uploads"))
+}
+
+/// Forget uploads older than [`UPLOADS_KEPT`].
+fn prune_uploads(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t.elapsed().is_ok_and(|age| age > UPLOADS_KEPT));
+        if old {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Part of a file, from `offset`, and its length.
+fn read_file(path: &Path, offset: u64) -> Result<(Vec<u8>, u64), String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    let metadata = file.metadata().map_err(|err| err.to_string())?;
+    if !metadata.is_file() {
+        return Err("not a file".into());
+    }
+    file.seek(SeekFrom::Start(offset)).map_err(|err| err.to_string())?;
+    let mut data = Vec::with_capacity(FILE_CHUNK);
+    file.take(FILE_CHUNK as u64).read_to_end(&mut data).map_err(|err| err.to_string())?;
+    Ok((data, metadata.len()))
 }
 
 fn pbcopy(text: &str) {
@@ -353,10 +430,12 @@ impl Server {
             restarting: false,
             last_poll: now,
             last_save: now,
+            last_touch: None,
             last_saved: None,
             cpu_samples: HashMap::new(),
             usage: Vec::new(),
             history: HashMap::new(),
+            uploads: HashMap::new(),
             server_usage: None,
             listener_fd,
             handover_to: None,
@@ -537,6 +616,16 @@ impl Server {
         if let Some(dir) = &self.cli_dir {
             let path = std::env::var("PATH").unwrap_or_default();
             env.insert("PATH".to_owned(), format!("{}:{path}", dir.display()));
+            // Off a Mac, web pages programs open (logins, docs) open on the
+            // app's machine, unless a browser is set.
+            // (Programs split it into words.)
+            let artty = dir.join("artty").display().to_string();
+            if !cfg!(target_os = "macos")
+                && std::env::var_os("BROWSER").is_none()
+                && !artty.contains(char::is_whitespace)
+            {
+                env.insert("BROWSER".to_owned(), format!("{artty} open"));
+            }
         }
         let size =
             near.and_then(|p| self.panes.get(&p)).map_or(DEFAULT_SIZE, |pane| pane.session.size());
@@ -1288,6 +1377,10 @@ impl Server {
             Input::Client(id, message) => self.handle_client(id, message),
             Input::Disconnected(id) => {
                 self.clients.remove(&id);
+                // What it was sending is cut short: no half files.
+                for ((_, _), (path, _)) in self.uploads.extract_if(|(client, _), _| *client == id) {
+                    let _ = std::fs::remove_file(path);
+                }
                 // Its windows keep running, detached.
                 for window in self.windows.values_mut().filter(|w| w.client == Some(id)) {
                     window.client = None;
@@ -1373,7 +1466,19 @@ impl Server {
                     self.notify_user(id, None, &message);
                 }
             },
-            Notice::ClipboardStore(_, text) => pbcopy(&text),
+            Notice::ClipboardStore(_, text) => {
+                // To the clipboard of the app showing it (this machine's
+                // may be a server's, with no clipboard).
+                let client = self
+                    .window_of(id)
+                    .and_then(|w| self.windows.get(&w)?.client)
+                    .or_else(|| self.app_client());
+                match client {
+                    Some(client) => self.send(client, ServerMessage::Clipboard { text }),
+                    None if cfg!(target_os = "macos") => pbcopy(&text),
+                    None => log::info!("pane {id} copied, with no app to take it"),
+                }
+            },
             Notice::ClipboardLoad(_, format) => pane.session.reply_clipboard(&format, &pbpaste()),
             Notice::Exited => {
                 self.close_pane(id);
@@ -1715,6 +1820,12 @@ impl Server {
                     Query::CommandOutput { pane } => Reply::Output(
                         self.panes.get(&pane).and_then(|p| p.session.command_output()),
                     ),
+                    Query::Upload { pane: _, upload, name, data, last } => {
+                        Reply::Upload(self.upload(client, upload, &name, &data, last))
+                    },
+                    Query::ReadFile { pane: _, path, offset } => {
+                        Reply::File(read_file(&path, offset))
+                    },
                 };
                 self.send(client, ServerMessage::Reply { id, reply });
             },
@@ -1822,6 +1933,44 @@ impl Server {
         self.frontmost()
             .and_then(|w| self.windows.get(&w)?.client)
             .or_else(|| self.clients.keys().next().copied())
+    }
+
+    /// Part of a file an app sends: on the end of the file it started.
+    fn upload(
+        &mut self,
+        client: ClientId,
+        upload: u64,
+        name: &str,
+        data: &[u8],
+        last: bool,
+    ) -> Result<Option<PathBuf>, String> {
+        use std::io::Write;
+        let key = (client, upload);
+        if let std::collections::hash_map::Entry::Vacant(entry) = self.uploads.entry(key) {
+            let name = Path::new(name).file_name().ok_or("no file name")?;
+            let dir = uploads_dir().ok_or("no home directory")?;
+            prune_uploads(&dir);
+            let stamp = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let dir = dir.join(format!("{stamp}-{client}-{upload}"));
+            std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+            let path = dir.join(name);
+            let file = std::fs::File::create(&path).map_err(|err| err.to_string())?;
+            entry.insert((path, file));
+        }
+        let (path, file) = self.uploads.get_mut(&key).expect("just made");
+        if let Err(err) = file.write_all(data) {
+            let (path, _) = self.uploads.remove(&key).expect("there");
+            let _ = std::fs::remove_file(path);
+            return Err(err.to_string());
+        }
+        if !last {
+            return Ok(None);
+        }
+        let path = path.clone();
+        self.uploads.remove(&key);
+        Ok(Some(path))
     }
 
     fn respond(&mut self, request: Request) -> Result<Response, String> {
@@ -1963,6 +2112,20 @@ impl Server {
                 let client = self.windows[&window].client.unwrap();
                 self.send(client, ServerMessage::App(AppCommand::ShowActivity { window }));
                 Response::Ok
+            },
+            Request::OpenUrl { url } => match self.app_client() {
+                Some(client) => {
+                    self.send(client, ServerMessage::App(AppCommand::OpenUrl { url }));
+                    Response::Ok
+                },
+                None if cfg!(target_os = "macos") => {
+                    std::process::Command::new("open")
+                        .arg(&url)
+                        .spawn()
+                        .map_err(|err| err.to_string())?;
+                    Response::Ok
+                },
+                None => return Err("no artty app is attached to open it".into()),
             },
             Request::Settings => {
                 let client = self.app_client().ok_or("the artty app isn't running")?;
@@ -2251,6 +2414,13 @@ impl Server {
 
     /// Once a second: processes, statuses, `artty run` timeouts, config.
     fn poll(&mut self) {
+        if self.last_touch.is_none_or(|t| t.elapsed() >= TOUCH_INTERVAL) {
+            self.last_touch = Some(Instant::now());
+            touch(&self.socket);
+            if let Some(dir) = self.socket.parent().filter(|_| !cfg!(target_os = "macos")) {
+                touch(dir);
+            }
+        }
         for pane in self.panes.values_mut() {
             pane.process = pane.session.process();
             pane.refresh();

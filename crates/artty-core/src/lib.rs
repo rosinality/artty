@@ -25,7 +25,7 @@ pub use config::{Colors, Config, CursorStyle, KeyAction, ResumeCommand, ServerCo
 pub use frame::{
     Frame, FrameCursor, FrameImage, FrameLine, FrameRect, FrameRun, FrameUnderline, UnderlineStyle,
 };
-pub use process::{ProcessInfo, ProcessSample, process_tree, processes};
+pub use process::{ProcessInfo, ProcessSample, path_from_file_url, process_tree, processes};
 pub use session::{Notice, Session, SessionHandover, SessionId, SessionOptions, TerminalSize};
 pub use shell::{CommandRecord, ShellPhase};
 pub use state::{

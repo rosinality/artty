@@ -392,7 +392,7 @@ pub(crate) fn login_shell() -> Option<String> {
 }
 
 /// Decode an OSC 7 `file://host/path` URL into a path.
-pub(crate) fn path_from_file_url(url: &str) -> Option<PathBuf> {
+pub fn path_from_file_url(url: &str) -> Option<PathBuf> {
     let rest = url.strip_prefix("file://")?;
     let path = &rest[rest.find('/')?..];
     let mut bytes = Vec::with_capacity(path.len());

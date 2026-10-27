@@ -1241,8 +1241,8 @@ impl WindowView {
             MenuCommand::Copy => self.copy(&Copy, window, cx),
             MenuCommand::Paste => self.paste(&Paste, window, cx),
             MenuCommand::OpenLink => {
-                if let Some(link) = &menu.link {
-                    let _ = std::process::Command::new("open").arg(link).spawn();
+                if let Some(link) = menu.link {
+                    self.open_link(pane, link, cx);
                 }
             },
             MenuCommand::CopyLink => {
@@ -1565,9 +1565,9 @@ impl WindowView {
         if event.button == MouseButton::Left && event.modifiers.platform {
             let (line, column, _) = self.cell_at(id, event.position);
             let answer = app_state::query(Query::LinkSpan { pane: id, line, column }, cx);
-            cx.spawn(async move |_, _| {
+            cx.spawn(async move |this, cx| {
                 if let Ok(Reply::Link(Some((link, _, _)))) = answer.await {
-                    let _ = std::process::Command::new("open").arg(&link).spawn();
+                    let _ = this.update(cx, |this, cx| this.open_link(id, link, cx));
                 }
             })
             .detach();
