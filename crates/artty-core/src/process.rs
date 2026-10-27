@@ -275,6 +275,64 @@ pub fn processes() -> Vec<ProcessSample> {
     Vec::new()
 }
 
+/// The TCP ports each of `pids` listens on (those listening; the sockets
+/// they hold, matched to the system's listening sockets). Linux only: a
+/// Mac's ports are this Mac's, needing no forwarding.
+#[cfg(target_os = "linux")]
+pub fn listening_ports(pids: &[i32]) -> std::collections::HashMap<i32, Vec<u16>> {
+    use std::collections::HashMap;
+    // Listening sockets: their inodes, and ports.
+    let mut ports_by_inode: HashMap<u64, u16> = HashMap::new();
+    for table in ["/proc/net/tcp", "/proc/net/tcp6"] {
+        if let Ok(text) = std::fs::read_to_string(table) {
+            ports_by_inode.extend(listening_sockets(&text));
+        }
+    }
+    let mut ports = HashMap::new();
+    if ports_by_inode.is_empty() {
+        return ports;
+    }
+    for &pid in pids {
+        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+        let mut theirs: Vec<u16> = fds
+            .flatten()
+            .filter_map(|fd| {
+                let link = std::fs::read_link(fd.path()).ok()?;
+                let inode = link.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?;
+                ports_by_inode.get(&inode.parse().ok()?).copied()
+            })
+            .collect();
+        theirs.sort_unstable();
+        theirs.dedup();
+        if !theirs.is_empty() {
+            ports.insert(pid, theirs);
+        }
+    }
+    ports
+}
+
+/// From a `/proc/net/tcp` (or `tcp6`) table: the listening sockets'
+/// inodes, and their ports.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn listening_sockets(table: &str) -> impl Iterator<Item = (u64, u16)> + '_ {
+    table.lines().skip(1).filter_map(|line| {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // Number, local address, remote address, state (0A: listening),
+        // queues, timer, retransmits, uid, timeout, inode, ...
+        let [_, local, _, "0A", _, _, _, _, _, inode, ..] = fields.as_slice() else {
+            return None;
+        };
+        let port = u16::from_str_radix(local.rsplit(':').next()?, 16).ok()?;
+        let inode = inode.parse::<u64>().ok().filter(|&inode| inode != 0)?;
+        Some((inode, port))
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn listening_ports(_pids: &[i32]) -> std::collections::HashMap<i32, Vec<u16>> {
+    std::collections::HashMap::new()
+}
+
 /// `root` and its descendants. `root` itself may be missing from the samples
 /// (a pane's `login` process runs as root); its descendants are still found.
 pub fn process_tree(samples: &[ProcessSample], root: i32) -> Vec<&ProcessSample> {
@@ -411,6 +469,19 @@ pub fn path_from_file_url(url: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listening_sockets_from_the_table() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 41234 1 0000000000000000 100 0 0 10 0
+   1: 0100007F:1F90 0100007F:D1C2 01 00000000:00000000 00:00000000 00000000  1000        0 41299 1 0000000000000000 20 4 30 10 -1
+   2: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 0 1 0000000000000000 100 0 0 10 0";
+        let tcp6 = "  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000001000000:1F91 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 52345 1 0000000000000000 100 0 0 10 0";
+        // Listening ones only (not connections), with an inode.
+        assert_eq!(listening_sockets(tcp).collect::<Vec<_>>(), [(41234, 8080)]);
+        assert_eq!(listening_sockets(tcp6).collect::<Vec<_>>(), [(52345, 8081)]);
+    }
 
     #[test]
     fn file_urls() {

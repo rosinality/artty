@@ -231,6 +231,8 @@ pub(crate) struct Server {
     /// Every pane's processes as of the last sample, with history.
     usage: Vec<PaneProcesses>,
     history: HashMap<PaneId, VecDeque<(f32, u64)>>,
+    /// The TCP ports each pane's programs listen on, as of the last sample.
+    ports: HashMap<PaneId, Vec<u16>>,
     /// Files being sent by apps, by app and upload: where, and open.
     uploads: HashMap<(ClientId, u64), (PathBuf, std::fs::File)>,
     server_usage: Option<ServerUsage>,
@@ -436,6 +438,7 @@ impl Server {
             usage: Vec::new(),
             history: HashMap::new(),
             uploads: HashMap::new(),
+            ports: HashMap::new(),
             server_usage: None,
             listener_fd,
             handover_to: None,
@@ -2317,12 +2320,34 @@ impl Server {
                 }
             };
         let mut usage = Vec::new();
-        for info in self.pane_infos() {
-            let Some(pane) = self.panes.get(&info.id) else { continue };
-            let Some(shell) = pane.session.shell_pid() else { continue };
+        let infos = self.pane_infos();
+        let trees: HashMap<PaneId, Vec<&artty_core::ProcessSample>> = infos
+            .iter()
+            .filter_map(|info| {
+                let shell = self.panes.get(&info.id)?.session.shell_pid()?;
+                Some((info.id, process_tree(&samples, shell)))
+            })
+            .collect();
+        let pids: Vec<i32> = trees.values().flatten().map(|p| p.pid).collect();
+        let mut ports = artty_core::listening_ports(&pids);
+        self.ports = trees
+            .iter()
+            .map(|(&pane, tree)| {
+                let mut theirs: Vec<u16> =
+                    tree.iter().filter_map(|p| ports.get(&p.pid)).flatten().copied().collect();
+                theirs.sort_unstable();
+                theirs.dedup();
+                (pane, theirs)
+            })
+            .filter(|(_, theirs)| !theirs.is_empty())
+            .collect();
+        for info in infos {
+            let (Some(pane), Some(tree)) = (self.panes.get(&info.id), trees.get(&info.id)) else {
+                continue;
+            };
             let foreground = pane.process.foreground_group;
-            let rows: Vec<ProcessRow> = process_tree(&samples, shell)
-                .into_iter()
+            let rows: Vec<ProcessRow> = tree
+                .iter()
                 .map(|p| ProcessRow {
                     pid: p.pid,
                     ppid: p.ppid,
@@ -2331,6 +2356,7 @@ impl Server {
                     memory_bytes: p.memory,
                     foreground: Some(p.pgid) == foreground,
                     elapsed_secs: (unix_now - p.started).max(0.) as u64,
+                    ports: ports.remove(&p.pid).unwrap_or_default(),
                 })
                 .collect();
             let cpu_percent = rows.iter().map(|r| r.cpu_percent).fold(0., |a, b| a + b);
@@ -2486,7 +2512,8 @@ impl Server {
             },
             _ => None,
         };
-        PaneState { info, icon: icon.to_owned(), progress, agent: pane.agent_name() }
+        let ports = self.ports.get(&info.id).cloned().unwrap_or_default();
+        PaneState { info, icon: icon.to_owned(), progress, agent: pane.agent_name(), ports }
     }
 
     /// Send each app its windows' layouts, pane states and screen updates.

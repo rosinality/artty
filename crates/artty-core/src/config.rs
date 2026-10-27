@@ -56,6 +56,9 @@ pub struct Config {
     /// Show typing at once on other machines' panes, before their echo
     /// comes back (as mosh does), where the round trip is noticeable.
     pub local_echo: bool,
+    /// Forward other machines' ports here as their programs start
+    /// listening (else from the sidebar or Activity, on request).
+    pub auto_forward_ports: bool,
     /// Reopen the previous tabs on launch.
     pub restore_sessions: bool,
     /// Lines of each tab's output to save and show again; 0 saves none.
@@ -97,6 +100,34 @@ impl ServerConfig {
         let artty = self.artty.as_deref().unwrap_or("artty");
         // Through a login shell, for the PATH set up in its profile.
         self.ssh_command(&format!("exec \"$SHELL\" -lc 'exec {artty} server --stdio'"))
+    }
+
+    /// ssh forwarding this Mac's `local` port to `remote` there, until its
+    /// input closes (so it ends with the app that started it).
+    pub fn ssh_forward_command(&self, local: u16, remote: u16) -> Option<Vec<String>> {
+        let destination = self.ssh.as_ref()?;
+        Some(
+            [
+                "ssh",
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=15",
+                "-o",
+                "ServerAliveCountMax=3",
+                "-L",
+                &format!("127.0.0.1:{local}:localhost:{remote}"),
+                destination,
+                "cat >/dev/null",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+        )
     }
 
     /// ssh running `remote` there (for one reached by ssh).
@@ -225,6 +256,7 @@ impl Default for Config {
             confirm_multiline_paste: true,
             secure_keyboard_entry: false,
             local_echo: true,
+            auto_forward_ports: false,
             restore_sessions: true,
             restore_scrollback: 1000,
             resume_agents: true,

@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -122,6 +122,7 @@ pub fn protocol_version() -> u32 {
                 icon: "z".into(),
                 progress: Some(61),
                 agent: Some("a".into()),
+                ports: vec![3000],
             }],
         }),
         postcard::to_stdvec(&ServerMessage::Image(ImageData {
@@ -631,6 +632,8 @@ pub struct PaneState {
     pub icon: String,
     pub progress: Option<u8>,
     pub agent: Option<String>,
+    /// TCP ports its programs listen on (on Linux), for forwarding.
+    pub ports: Vec<u16>,
 }
 
 /// A screen update: everything but the lines, plus the lines that changed.
@@ -889,7 +892,8 @@ mod tests {
             shell_integration: true,
             kitty_keyboard: false,
         };
-        let state = PaneState { info, icon: String::new(), progress: None, agent: None };
+        let state =
+            PaneState { info, icon: String::new(), progress: None, agent: None, ports: vec![] };
         let tab = TabLayout {
             title: None,
             root: Node::Pane(3),

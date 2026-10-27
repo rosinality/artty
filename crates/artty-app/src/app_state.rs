@@ -837,6 +837,11 @@ fn deliver(server: ServerId, message: ClientMessage, cx: &App) {
     }
 }
 
+/// How another machine's server is reached.
+pub fn remote_config(server: ServerId, cx: &App) -> Option<ServerConfig> {
+    cx.global::<Shared>().connections.get(server as usize)?.remote.clone()
+}
+
 /// What a server is called (this Mac's, for local panes).
 pub fn server_name(server: ServerId, cx: &App) -> String {
     cx.global::<Shared>()
@@ -1064,6 +1069,7 @@ fn sync_appearance(cx: &mut App) {
 /// network change, remotes are checked at once: one waiting reconnects now,
 /// one connected must answer within seconds.
 fn heartbeat(cx: &mut App) {
+    crate::forward::tick(cx);
     const PING_EVERY: Duration = Duration::from_secs(5);
     const SILENCE: Duration = Duration::from_secs(15);
     const PROBE: Duration = Duration::from_secs(4);
@@ -1402,6 +1408,7 @@ fn retry_later(server: ServerId, error: String, cx: &mut App) {
 /// Take a configured server's windows out of every view and forget what
 /// it showed.
 fn drop_remote(server: ServerId, cx: &mut App) {
+    crate::forward::stop_all(server, cx);
     if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) {
         connection.close();
         connection.attempt += 1;

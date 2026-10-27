@@ -904,7 +904,8 @@ impl WindowView {
                             .min_w_0()
                             .text_color(if row.foreground { rgba(0xffffffd8) } else { rgba(0xffffff90) })
                             .when(row.foreground, |d| d.font_weight(FontWeight::MEDIUM)),
-                    ),
+                    )
+                    .children(row.ports.iter().map(|&port| self.port_chip(server, port, cx).flex_none())),
             )
             .child(div().w(px(GRAPH_WIDTH)).flex_none())
             .child(div().w(px(PID_WIDTH)).flex_none().flex().justify_end().text_color(rgba(0xffffff90)).child(pid.to_string()))

@@ -429,6 +429,9 @@ pub struct ProcessRow {
     /// In the pane's foreground process group (what the user is running).
     pub foreground: bool,
     pub elapsed_secs: u64,
+    /// TCP ports it listens on (on Linux).
+    #[serde(default)]
+    pub ports: Vec<u16>,
 }
 
 impl Response {

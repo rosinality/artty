@@ -55,6 +55,11 @@ secure-keyboard-entry = false
 # is confirmed, so passwords typed where nothing echoes never appear.
 local-echo = true
 
+# Forward other machines' ports to this Mac as soon as their programs start
+# listening (a dev server's port, say). Off, the sidebar and Activity show
+# them, to forward with a click.
+auto-forward-ports = false
+
 # Foreground programs shown as coding agents in the sidebar.
 agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"]
 

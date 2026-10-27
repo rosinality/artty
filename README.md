@@ -279,6 +279,14 @@ this Mac's browser (web pages only). There, artty keeps its socket and
 scripts in `/tmp/artty-UID`, made private (other users can't take its
 place, as anyone can make files in `/tmp`).
 
+Ports: when a program in a pane listens on a TCP port (a dev server, say),
+the tab shows it (`:3000`; on Linux, where the server finds them). Click it
+to open it in the browser — another machine's is forwarded here first, by
+ssh, on the same port when it's free (`3000 → 3001` when it isn't); × stops
+forwarding. Forwards end with the app. `auto-forward-ports = true` forwards
+each as it starts listening. Activity shows them by process, and `artty ps`
+lists them.
+
 Slow and flaky links: the server holds back screen updates while two
 batches are unacknowledged, then sends the newest screens — so a flood of
 output never queues up ahead of what you type (over a 100 ms link, a key

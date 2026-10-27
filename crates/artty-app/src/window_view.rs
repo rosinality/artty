@@ -1902,6 +1902,10 @@ impl WindowView {
         let states: Vec<Option<&PaneState>> =
             ids.iter().map(|id| self.pane_state(*id, cx)).collect();
         let focused = self.pane_state(tab.focused, cx);
+        let mut ports: Vec<u16> =
+            states.iter().flatten().flat_map(|s| s.ports.iter().copied()).collect();
+        ports.sort_unstable();
+        ports.dedup();
         // The row shows the most urgent pane, preferring the focused one.
         let summary = ids
             .iter()
@@ -2056,6 +2060,86 @@ impl WindowView {
             .when(tab.broadcast, |d| d.border_1().border_color(rgba(0xe0af6899)))
             .children(header)
             .children(pane_rows.into_iter().flatten())
+            .children(self.ports_row(ids::server_of(tab.focused), ports, cx))
+    }
+
+    /// The ports a tab's programs listen on, to open (forwarded from another
+    /// machine first).
+    fn ports_row(
+        &self,
+        server: ServerId,
+        ports: Vec<u16>,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        (!ports.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .pl(px(20.))
+                .pb(px(2.))
+                .children(ports.into_iter().map(|port| self.port_chip(server, port, cx)))
+        })
+    }
+
+    /// A port: a click opens it in the browser, forwarding it here first if
+    /// it's another machine's; × stops forwarding it.
+    pub(super) fn port_chip(
+        &self,
+        server: ServerId,
+        port: u16,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let remote = server != LOCAL;
+        let local = crate::forward::local_port(server, port, cx);
+        let failed = remote && local.is_none() && crate::forward::error(server, port, cx).is_some();
+        let label = match local {
+            Some(local) if remote && local != port => format!("{port} → {local}"),
+            _ => format!(":{port}"),
+        };
+        let color = match (failed, remote && local.is_some()) {
+            (true, _) => rgba(0xf7768ecc),
+            (false, true) => rgba(0x9ece6aee),
+            (false, false) => rgba(0xffffff90),
+        };
+        let id = format!("port-{server}-{port}");
+        div()
+            .id(SharedString::from(id.clone()))
+            .flex()
+            .items_center()
+            .gap(px(3.))
+            .px(px(5.))
+            .rounded(px(4.))
+            .text_size(px(10.5))
+            .bg(rgba(0xffffff0d))
+            .hover(|d| d.bg(rgba(0xffffff1f)))
+            .text_color(color)
+            .child(label)
+            .when(remote && local.is_some(), |d| {
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("{id}-stop")))
+                        .text_color(rgba(0xffffff70))
+                        .hover(|d| d.text_color(rgba(0xffffffee)))
+                        .child("×")
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            crate::forward::stop(server, port, cx);
+                            cx.stop_propagation();
+                        })),
+                )
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if let Some(error) = crate::forward::error(server, port, cx).filter(|_| failed) {
+                    this.show_toast(
+                        format!("Port {port} wasn't forwarded: {error}; trying again"),
+                        cx,
+                    );
+                }
+                if let Err(err) = crate::forward::open(server, port, cx) {
+                    this.show_toast(format!("Couldn't forward port {port}: {err}"), cx);
+                }
+            }))
     }
 
     /// The last column of a sidebar line: what it's running and, given the

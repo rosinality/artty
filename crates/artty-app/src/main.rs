@@ -10,6 +10,8 @@ mod boxdraw;
 mod cli;
 #[cfg(target_os = "macos")]
 mod echo;
+#[cfg(target_os = "macos")]
+mod forward;
 mod hooks;
 #[cfg(target_os = "macos")]
 mod ids;
