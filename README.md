@@ -30,9 +30,9 @@ cargo run -p artty -- -e htop      # run a command in the first tab
 cargo test --workspace
 ```
 
-The app bundle gets the icon (`scripts/make-icon.py` redraws it) and native
-notifications. A rebuild replaces the bundle atomically, so a running artty is
-never modified underneath itself; it notices the new build and offers
+The app bundle gets the icon (`scripts/make-icon.sh` renders it from
+`assets/icon.svg`) and native notifications. A rebuild replaces the bundle
+atomically, so a running artty is never modified underneath itself; it notices the new build and offers
 "Restart to update". That restarts the app only — sessions keep running in
 the server. When the server is from an older build too, the window offers to
 move it to the new build (artty → Restart Server): the server hands every
