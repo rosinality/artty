@@ -4,6 +4,7 @@
 
 use artty_core::ServerConfig;
 use artty_core::protocol::ServerMessage;
+use artty_core::remote::Prompts;
 
 use super::*;
 
@@ -210,8 +211,10 @@ impl Settings {
         adding.error = None;
         cx.notify();
         let probe = server.clone();
+        let askpass = crate::askpass::askpass(&server.name, cx);
         let checking = cx.background_spawn(async move {
-            let mut opened = artty_core::remote::open(&probe)?;
+            let prompts = askpass.as_ref().map_or(Prompts::Never, Prompts::Helper);
+            let mut opened = artty_core::remote::open(&probe, prompts)?;
             let _ = opened.child.kill();
             let _ = opened.child.wait();
             match opened.welcome {

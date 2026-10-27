@@ -31,6 +31,8 @@ use crate::terminal::{self, Metrics, hsla};
 
 #[path = "activity.rs"]
 mod activity;
+#[path = "ask_sheet.rs"]
+mod ask_sheet;
 #[path = "copy_mode.rs"]
 mod copy_mode;
 #[path = "pane_actions.rs"]
@@ -358,6 +360,8 @@ pub struct WindowView {
     copy_mode: Option<PaneId>,
     /// A short message over the terminal, and when it appeared.
     toast: Option<(SharedString, Instant)>,
+    /// Questions ssh asks while logging in, the first shown.
+    asks: Vec<ask_sheet::AskSheet>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -468,6 +472,7 @@ impl WindowView {
             activity: None,
             copy_mode: None,
             toast: None,
+            asks: Vec::new(),
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -1056,7 +1061,7 @@ impl WindowView {
     /// Secure keyboard entry: on while it's set and an artty window is active.
     fn update_secure_input(&self, cx: &App) {
         crate::secure_input::set(
-            self.config.secure_keyboard_entry
+            (self.config.secure_keyboard_entry || self.asking_secret())
                 && (self.window_active || cx.active_window().is_some()),
         );
     }
@@ -1420,6 +1425,10 @@ impl WindowView {
                 self.select(digit - 1, cx);
                 cx.stop_propagation();
             }
+            return;
+        }
+        if self.asking() {
+            self.ask_key(event, cx);
             return;
         }
         if self.context_menu.take().is_some() {
@@ -2240,14 +2249,12 @@ impl WindowView {
             },
             Status::Installing => (0xe0af68ff, Some("installing artty there…".to_owned())),
             Status::NeedsLogin(reason) => (0xe0af68ff, Some(format!("{reason} · click to log in"))),
-            Status::LoggingIn { .. } => {
-                (0xe0af68ff, Some("logging in (in a tab of this Mac's)…".to_owned()))
-            },
         };
         let connected = status == Status::Connected;
         let install = matches!(status, Status::NeedsInstall(_));
-        let login = matches!(status, Status::NeedsLogin(_));
-        let away = matches!(status, Status::Waiting { .. } | Status::Off(_)) || install || login;
+        let away =
+            matches!(status, Status::Waiting { .. } | Status::Off(_) | Status::NeedsLogin(_))
+                || install;
         div()
             .id(("server", server as usize))
             .group(group.clone())
@@ -2309,8 +2316,6 @@ impl WindowView {
                 d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
                     if install {
                         app_state::install_remote(server, cx)
-                    } else if login {
-                        app_state::log_in(server, cx)
                     } else {
                         app_state::connect_remote(server, cx)
                     }
@@ -3443,6 +3448,7 @@ impl Render for WindowView {
             )
             .children(self.context_menu_overlay(window.viewport_size(), cx))
             .children(self.picker_overlay(cx))
+            .children(self.ask_overlay(cx))
     }
 }
 
@@ -3495,6 +3501,10 @@ impl EntityInputHandler for WindowView {
         cx: &mut Context<Self>,
     ) {
         self.marked_text = None;
+        if self.asking() {
+            self.ask_text(text, cx);
+            return;
+        }
         if let Some(picker) = self.picker.as_mut() {
             picker.query.push_str(text);
             picker.selected = 0;

@@ -20,18 +20,127 @@ pub struct Opened {
     pub welcome: ServerMessage,
 }
 
-/// Run the command reaching the server and wait for its greeting.
-pub fn open(config: &ServerConfig) -> Result<Opened, String> {
+/// How ssh may ask for what logging in needs (a password, a code, whether
+/// to trust a machine's key).
+pub enum Prompts<'a> {
+    /// Not at all: ssh fails instead.
+    Never,
+    /// On the terminal this runs in (the `artty` command).
+    Terminal,
+    /// Through a program ssh runs for each question (`SSH_ASKPASS`): the
+    /// app's, which asks in a window.
+    Helper(&'a Askpass),
+}
+
+/// The app's way of asking for ssh: `program` run as `SSH_ASKPASS`, told
+/// where to ask (`socket`, with `token` as proof it's ssh started by the
+/// app) and for what (`name`); `key` tells this connection's questions
+/// apart, so its wait for a greeting pauses while one is open
+/// ([`set_prompting`]).
+pub struct Askpass {
+    pub program: std::path::PathBuf,
+    pub socket: std::path::PathBuf,
+    pub token: String,
+    pub name: String,
+    pub key: u64,
+}
+
+/// Connections with a question open, by [`Askpass::key`].
+static PROMPTING: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether the connection `key` has a question open (the user may take a
+/// while to answer: its wait for a greeting pauses meanwhile).
+pub fn set_prompting(key: u64, open: bool) {
+    let mut prompting = PROMPTING.lock().unwrap_or_else(|p| p.into_inner());
+    prompting.retain(|&k| k != key);
+    if open {
+        prompting.push(key);
+    }
+}
+
+fn prompting(key: u64) -> bool {
+    PROMPTING.lock().unwrap_or_else(|p| p.into_inner()).contains(&key)
+}
+
+/// The environment telling the askpass helper (`artty` run by ssh) where to
+/// ask; [`askpass_request`] reads it back.
+pub const ASKPASS_SOCKET: &str = "ARTTY_ASKPASS_SOCKET";
+const ASKPASS_TOKEN: &str = "ARTTY_ASKPASS_TOKEN";
+const ASKPASS_NAME: &str = "ARTTY_ASKPASS_NAME";
+const ASKPASS_KEY: &str = "ARTTY_ASKPASS_KEY";
+
+/// A question ssh asks, as the helper passes it to the app.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AskpassRequest {
+    pub token: String,
+    /// The machine's name, as shown.
+    pub name: String,
+    pub key: u64,
+    pub prompt: String,
+    /// `SSH_ASKPASS_PROMPT`: `confirm` (yes or no), `none` (only a notice,
+    /// as "touch your security key"), or empty (an answer to type).
+    pub kind: String,
+}
+
+/// The app's answer: what to tell ssh, or nothing (cancelled).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct AskpassAnswer {
+    pub answer: Option<String>,
+}
+
+/// Running as ssh's askpass helper (with `prompt`): the question, with
+/// where to ask it, if this process is one.
+pub fn askpass_request(prompt: &str) -> Option<(std::path::PathBuf, AskpassRequest)> {
+    let socket = std::env::var_os(ASKPASS_SOCKET)?;
+    std::env::var_os("SSH_ASKPASS")?;
+    let request = AskpassRequest {
+        token: std::env::var(ASKPASS_TOKEN).ok()?,
+        name: std::env::var(ASKPASS_NAME).unwrap_or_default(),
+        key: std::env::var(ASKPASS_KEY).ok()?.parse().ok()?,
+        prompt: prompt.to_owned(),
+        kind: std::env::var("SSH_ASKPASS_PROMPT").unwrap_or_default(),
+    };
+    Some((socket.into(), request))
+}
+
+/// `command` with ssh allowed to ask as `prompts` says.
+fn prompting_command(mut command: Vec<String>, prompts: &Prompts) -> std::process::Command {
+    if !matches!(prompts, Prompts::Never)
+        && let Some(at) = command.windows(2).position(|w| w[0] == "-o" && w[1] == "BatchMode=yes")
+    {
+        command.drain(at..at + 2);
+    }
+    let mut process = std::process::Command::new(&command[0]);
+    process.args(&command[1..]);
+    if let Prompts::Helper(askpass) = prompts {
+        process
+            .env("SSH_ASKPASS", &askpass.program)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env(ASKPASS_SOCKET, &askpass.socket)
+            .env(ASKPASS_TOKEN, &askpass.token)
+            .env(ASKPASS_NAME, &askpass.name)
+            .env(ASKPASS_KEY, askpass.key.to_string());
+    }
+    process
+}
+
+/// Run the command reaching the server and wait for its greeting; ssh may
+/// ask for a login as `prompts` says.
+pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
     use std::io::BufRead;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let command = config.connect_command().ok_or("set ssh (or command) for it in the settings")?;
-    let mut child = Command::new(&command[0])
-        .args(&command[1..])
+    let program = command[0].clone();
+    let key = match &prompts {
+        Prompts::Helper(askpass) => Some(askpass.key),
+        _ => None,
+    };
+    let mut child = prompting_command(command, &prompts)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| format!("{}: {err}", command[0]))?;
+        .map_err(|err| format!("{program}: {err}"))?;
     // What it says on stderr is the reason, when it fails (its last few
     // lines: fish follows its error with the command and a marker).
     let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -57,11 +166,19 @@ pub fn open(config: &ServerConfig) -> Result<Opened, String> {
     {
         let (greeted, pid) = (greeted.clone(), child.id() as i32);
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(30));
-            if !greeted.load(std::sync::atomic::Ordering::SeqCst) {
-                // SAFETY: plain syscall on our own child.
-                unsafe { libc::kill(pid, libc::SIGTERM) };
+            // (Not counting time a question waits for the user.)
+            let mut waited = 0;
+            while waited < 30 {
+                std::thread::sleep(Duration::from_secs(1));
+                if greeted.load(std::sync::atomic::Ordering::SeqCst) {
+                    return;
+                }
+                if !key.is_some_and(prompting) {
+                    waited += 1;
+                }
             }
+            // SAFETY: plain syscall on our own child.
+            unsafe { libc::kill(pid, libc::SIGTERM) };
         });
     }
     let mut writer = child.stdin.take().ok_or("no stdin")?;
@@ -130,10 +247,12 @@ impl Installed {
 /// running). Linux with glibc 2.28 or later only.
 pub fn install(
     config: &ServerConfig,
+    prompts: Prompts,
     build: impl Fn(&str) -> Option<std::path::PathBuf>,
 ) -> Result<Installed, String> {
-    // What it runs: Linux on which CPU, with which C library.
-    let probe = run(config, "uname -sm; ldd --version 2>&1 | head -n 1", None)?;
+    // What it runs: Linux on which CPU, with which C library. (Only this
+    // may need a login: the rest shares its connection.)
+    let probe = run_asking(config, "uname -sm; ldd --version 2>&1 | head -n 1", None, &prompts)?;
     let mut lines = probe.lines();
     let system = lines.next().unwrap_or_default();
     let libc = lines.next().unwrap_or_default();
@@ -181,10 +300,18 @@ fn run(
     remote: &str,
     stdin: Option<std::fs::File>,
 ) -> Result<String, String> {
-    use std::process::{Command, Stdio};
+    run_asking(config, remote, stdin, &Prompts::Never)
+}
+
+fn run_asking(
+    config: &ServerConfig,
+    remote: &str,
+    stdin: Option<std::fs::File>,
+    prompts: &Prompts,
+) -> Result<String, String> {
+    use std::process::Stdio;
     let command = config.ssh_command(remote).ok_or("it isn't reached by ssh")?;
-    let output = Command::new(&command[0])
-        .args(&command[1..])
+    let output = prompting_command(command, prompts)
         .stdin(stdin.map_or_else(Stdio::null, Stdio::from))
         .output()
         .map_err(|err| format!("ssh: {err}"))?;
@@ -199,6 +326,38 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssh_asks_only_when_it_may() {
+        let config = ServerConfig { ssh: Some("me@devbox".into()), ..Default::default() };
+        let args = |prompts: &Prompts| -> Vec<String> {
+            let command = config.connect_command().unwrap();
+            prompting_command(command, prompts)
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        assert!(args(&Prompts::Never).iter().any(|a| a == "BatchMode=yes"));
+        assert!(!args(&Prompts::Terminal).iter().any(|a| a == "BatchMode=yes"));
+        let askpass = Askpass {
+            program: "/a/artty".into(),
+            socket: "/s".into(),
+            token: "t".into(),
+            name: "devbox".into(),
+            key: 3,
+        };
+        let command =
+            prompting_command(config.connect_command().unwrap(), &Prompts::Helper(&askpass));
+        let env: Vec<_> =
+            command.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "SSH_ASKPASS_REQUIRE" && v.as_deref() == Some("force".as_ref()))
+        );
+        assert!(
+            env.iter().any(|(k, v)| k == "ARTTY_ASKPASS_KEY" && v.as_deref() == Some("3".as_ref()))
+        );
+    }
 
     #[test]
     fn the_setting_follows_what_was_installed() {

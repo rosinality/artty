@@ -118,9 +118,8 @@ impl ServerConfig {
 
     /// One ssh connection to the machine, shared: the app's, forwards'
     /// and installs' sessions all go through it (OpenSSH's ControlMaster),
-    /// so a login that needs a password or a code is made once
-    /// ([`ServerConfig::login_command`]). It outlives its last session by
-    /// ten minutes.
+    /// so a login that needs a password or a code is made once. It
+    /// outlives its last session by ten minutes.
     ///
     /// `operation`, given to it: `check` (whether it's up), `exit`, or
     /// `forward`/`cancel` with `forward` (`-L` arguments).
@@ -132,23 +131,6 @@ impl ServerConfig {
         if let Some(forward) = forward {
             command.extend(["-L".to_owned(), forward.to_owned()]);
         }
-        command.push(destination.clone());
-        Some(command)
-    }
-
-    /// An interactive ssh that logs in (asking for what the machine wants:
-    /// a password, a code, whether to trust its key) and leaves the shared
-    /// connection running for the app.
-    pub fn login_command(&self) -> Option<Vec<String>> {
-        let destination = self.ssh.as_ref()?;
-        let mut command = vec!["ssh".to_owned()];
-        // As the others, but asking, and making the shared connection.
-        for option in SHARED.iter().filter(|o| !o.starts_with("BatchMode")) {
-            command.extend(["-o".to_owned(), option.replace("=auto", "=yes")]);
-        }
-        command.extend(["-o".to_owned(), format!("ControlPath={}", control_path())]);
-        // Into the background once logged in; no command.
-        command.extend(["-f", "-N"].map(str::to_owned));
         command.push(destination.clone());
         Some(command)
     }
@@ -438,20 +420,15 @@ mod tests {
     }
 
     #[test]
-    fn ssh_shares_one_connection_and_logs_in_once() {
+    fn ssh_shares_one_connection() {
         let server = ServerConfig { ssh: Some("me@devbox".into()), ..Default::default() };
         let has = |command: &[String], option: &str| command.iter().any(|o| o == option);
         let connect = server.connect_command().unwrap();
         assert!(has(&connect, "BatchMode=yes") && has(&connect, "ControlMaster=auto"));
         assert!(connect.iter().any(|o| o.starts_with("ControlPath=") && o.ends_with("/%C")));
-        // Logging in asks, makes the shared connection, and leaves it be.
-        let login = server.login_command().unwrap();
-        assert!(!has(&login, "BatchMode=yes") && has(&login, "ControlMaster=yes"));
-        assert!(has(&login, "-f") && has(&login, "-N") && login.last().unwrap() == "me@devbox");
         let forward = server.shared("forward", Some("127.0.0.1:1:localhost:2")).unwrap();
         let tail: Vec<&str> = forward.iter().rev().take(5).rev().map(String::as_str).collect();
         assert_eq!(tail, ["-O", "forward", "-L", "127.0.0.1:1:localhost:2", "me@devbox"]);
-        assert_eq!(ServerConfig::default().login_command(), None);
     }
 
     #[test]

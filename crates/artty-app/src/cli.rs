@@ -873,7 +873,7 @@ fn remote(args: &[String]) -> Result<i32, String> {
         Some("install") => {
             let mut server = find(args.get(1))?;
             eprintln!("Installing this build of artty on {}…", server.name);
-            let installed = artty_core::remote::install(&server, linux_build)
+            let installed = artty_core::remote::install(&server, terminal_prompts(), linux_build)
                 .map_err(|err| format!("couldn't install on {}: {err}", server.name))?;
             if let Some(artty) = installed.artty_setting(server.artty.as_deref()) {
                 server.artty = artty;
@@ -891,6 +891,15 @@ fn remote(args: &[String]) -> Result<i32, String> {
     }
 }
 
+/// ssh may ask for a login on the terminal, if there is one.
+fn terminal_prompts() -> artty_core::remote::Prompts<'static> {
+    // SAFETY: plain syscall.
+    match unsafe { libc::isatty(0) } == 1 {
+        true => artty_core::remote::Prompts::Terminal,
+        false => artty_core::remote::Prompts::Never,
+    }
+}
+
 /// Connect to a server and say how it went.
 fn remote_test(server: &artty_core::ServerConfig) -> Result<(), String> {
     use artty_core::protocol::ServerMessage;
@@ -899,7 +908,7 @@ fn remote_test(server: &artty_core::ServerConfig) -> Result<(), String> {
         server.name,
         server.connect_command().unwrap_or_default().join(" ")
     );
-    let mut opened = artty_core::remote::open(server)
+    let mut opened = artty_core::remote::open(server, terminal_prompts())
         .map_err(|err| format!("couldn't reach {}: {err}", server.name))?;
     let _ = opened.child.kill();
     let _ = opened.child.wait();
@@ -916,6 +925,33 @@ fn remote_test(server: &artty_core::ServerConfig) -> Result<(), String> {
             server.name, server.name
         )),
         _ => Err(format!("{}: unexpected answer", server.name)),
+    }
+}
+
+/// Run as ssh's askpass helper: ask the app (which shows the question in a
+/// window) and print the answer for ssh. Fails (status 1) when cancelled.
+pub fn askpass(socket: &std::path::Path, request: &artty_core::remote::AskpassRequest) -> i32 {
+    use std::io::{BufRead, Write};
+    let asked = (|| -> std::io::Result<Option<String>> {
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
+        let mut line = serde_json::to_string(request)?;
+        line.push('\n');
+        stream.write_all(line.as_bytes())?;
+        let mut answer = String::new();
+        std::io::BufReader::new(stream).read_line(&mut answer)?;
+        let answer: artty_core::remote::AskpassAnswer = serde_json::from_str(&answer)?;
+        Ok(answer.answer)
+    })();
+    match asked {
+        Ok(Some(answer)) => {
+            println!("{answer}");
+            0
+        },
+        Ok(None) => 1,
+        Err(err) => {
+            eprintln!("artty: couldn't ask: {err}");
+            1
+        },
     }
 }
 

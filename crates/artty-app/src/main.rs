@@ -6,6 +6,8 @@ mod app;
 #[cfg(target_os = "macos")]
 mod app_state;
 #[cfg(target_os = "macos")]
+mod askpass;
+#[cfg(target_os = "macos")]
 mod boxdraw;
 mod cli;
 #[cfg(target_os = "macos")]
@@ -41,6 +43,13 @@ pub use app::{bind_default_keys, menus};
 
 #[cfg(target_os = "macos")]
 fn main() {
+    // Run by ssh, for a question while logging in: ask the app.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [prompt] = args.as_slice()
+        && let Some((socket, request)) = artty_core::remote::askpass_request(prompt)
+    {
+        std::process::exit(cli::askpass(&socket, &request));
+    }
     app::main()
 }
 

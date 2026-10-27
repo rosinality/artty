@@ -169,8 +169,10 @@ pub fn main() {
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| {
             crate::forward::stop_everything(cx);
+            crate::askpass::stop(cx);
             cx.quit()
         });
+        crate::askpass::start(cx);
         cx.on_action(|_: &QuitAndEndSessions, cx| app_state::quit_and_end_sessions(cx));
         cx.on_action(|_: &NewWindow, cx| app_state::new_window(cx));
         cx.on_action(|_: &ReopenClosedWindows, cx| app_state::reopen_closed_windows(cx));

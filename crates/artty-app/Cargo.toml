@@ -22,6 +22,7 @@ futures = "0.3"
 gpui = { version = "0.2.2", features = ["runtime_shaders"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico", "qoi"] }
 block2 = "0.6"
+security-framework = "3"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSBundle", "NSLocale", "NSString", "NSError", "NSProcessInfo"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNUserNotificationCenter", "UNNotificationContent", "UNNotificationRequest", "UNNotificationSound", "UNNotificationTrigger"] }

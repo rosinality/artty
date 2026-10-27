@@ -252,11 +252,14 @@ The connection is ssh running `artty server --stdio` there (ssh uses your
 config, keys and agent). Everything artty does there — the connection,
 forwards, installs — shares one ssh connection per machine (OpenSSH's
 ControlMaster, its socket in `~/.ssh/artty`; it lasts ten minutes past its
-last use), so connecting again is quick, and a machine that wants a
-password, a code, or a yes to its key is logged in to once: its header says
-so — click it, and a tab of this Mac's runs ssh to ask; once logged in, the
-app connects through that. (After the connection is lost — a network gone
-— that shared connection is closed too, so such a machine asks again.) On Linux, artty is the server
+last use), so connecting again is quick, and a machine that wants a password, a
+passphrase, a code, or a yes to its key asks once, in the window: ssh hands
+artty its questions (as `SSH_ASKPASS`), and a sheet asks them — typing
+there is secure keyboard entry, and a password or passphrase can be
+remembered in the Keychain (tried once; asked again if it's refused).
+(After the connection is lost — a network gone — the shared connection is
+closed too, so such a machine asks again.) `artty remote test` and
+`install` ask on the terminal instead. On Linux, artty is the server
 and the `artty` command (the app is macOS only), and this app installs it:
 when artty isn't there, or runs another build, the server's header says so
 — click it (or run `artty remote install NAME`) and the app copies its build

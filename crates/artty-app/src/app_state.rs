@@ -16,6 +16,7 @@ use artty_core::protocol::{
     AppCommand, ClientMessage, Hello, PaneSpec, PaneState, Query, Reply, ServerMessage, WindowId,
     decode_response, encode_request, read_message, write_message,
 };
+use artty_core::remote::Prompts;
 use artty_core::vt::term::TermMode;
 use artty_core::{Config, Frame, SavedWindow, ServerConfig};
 use futures::StreamExt;
@@ -130,13 +131,8 @@ pub enum Status {
     /// this app can install it ([`install_remote`]).
     NeedsInstall(String),
     Installing,
-    /// ssh needs the user: a password, a code, whether to trust the
-    /// machine's key ([`log_in`]).
+    /// Logging in failed, or was cancelled: trying again asks again.
     NeedsLogin(String),
-    /// A tab of this Mac's is logging in; connecting once that's done.
-    LoggingIn {
-        since: Instant,
-    },
 }
 
 impl Connection {
@@ -637,7 +633,7 @@ fn server_lost(cx: &mut App) {
 }
 
 /// Every live window view, each once.
-fn app_views(cx: &App) -> Vec<gpui::Entity<WindowView>> {
+pub fn app_views(cx: &App) -> Vec<gpui::Entity<WindowView>> {
     let mut views: Vec<(WindowId, gpui::Entity<WindowView>)> = Vec::new();
     for (&window, view) in &cx.global::<Shared>().windows {
         if let Some(view) = view.upgrade() {
@@ -1077,7 +1073,6 @@ fn sync_appearance(cx: &mut App) {
 /// one connected must answer within seconds.
 fn heartbeat(cx: &mut App) {
     crate::forward::tick(cx);
-    check_logins(cx);
     const PING_EVERY: Duration = Duration::from_secs(5);
     const SILENCE: Duration = Duration::from_secs(15);
     const PROBE: Duration = Duration::from_secs(4);
@@ -1269,7 +1264,11 @@ pub fn connect_remote(server: ServerId, cx: &mut App) {
     connection.attempt += 1;
     let attempt = connection.attempt;
     cx.refresh_windows();
-    let opening = cx.background_spawn(async move { artty_core::remote::open(&config) });
+    let askpass = crate::askpass::askpass(&server_name(server, cx), cx);
+    let opening = cx.background_spawn(async move {
+        let prompts = askpass.as_ref().map_or(Prompts::Never, Prompts::Helper);
+        artty_core::remote::open(&config, prompts)
+    });
     cx.spawn(async move |cx| {
         let opened = opening.await;
         let _ = cx.update(|cx| remote_opened(server, attempt, opened, cx));
@@ -1339,88 +1338,11 @@ fn remote_opened(
     cx.refresh_windows();
 }
 
-/// Whether ssh failed for want of the user (artty's ssh asks nothing).
+/// Whether ssh failed for want of a login (wrong, or not given).
 fn needs_login(error: &str) -> bool {
     ["Permission denied", "Host key verification failed", "authentication", "password"]
         .iter()
         .any(|sign| error.contains(sign))
-}
-
-/// Log in to `server`'s machine in a tab of this Mac's (ssh asks there for
-/// what the machine wants), then connect through the shared connection
-/// that leaves.
-pub fn log_in(server: ServerId, cx: &mut App) {
-    let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
-        return;
-    };
-    let Some(command) = connection.remote.as_ref().and_then(|r| r.login_command()) else {
-        return;
-    };
-    let name = connection.name.clone();
-    connection.status = Status::LoggingIn { since: Instant::now() };
-    cx.refresh_windows();
-    // Say how it went; on failure, wait, so it can be read.
-    let script = "\"$@\"; status=$?; echo; if [ $status = 0 ]; then \
-        echo \"Logged in: artty connects now.\"; sleep 2; \
-        else echo \"ssh failed ($status). Press Return to close.\"; read _; fi";
-    let mut shell = vec!["sh".to_owned(), "-c".to_owned(), script.to_owned(), "sh".to_owned()];
-    shell.extend(command);
-    let request = Request::NewWorkspace {
-        name: Some(format!("Log in to {name}")),
-        cwd: None,
-        command: shell,
-    };
-    let answer = control_on(LOCAL, request, cx);
-    cx.spawn(async move |_| {
-        if let Ok(Response::Error { message }) = answer.await {
-            log::error!("couldn't open a tab to log in to {name}: {message}");
-        }
-    })
-    .detach();
-}
-
-/// While logging in: connect once the shared connection is up (asked
-/// every two seconds), or give up after ten minutes.
-fn check_logins(cx: &mut App) {
-    let count = cx.global::<Shared>().connections.len();
-    for server in 0..count as ServerId {
-        let connection = &mut cx.global_mut::<Shared>().connections[server as usize];
-        let Status::LoggingIn { since } = connection.status else { continue };
-        if since.elapsed() >= Duration::from_secs(600) {
-            connection.status = Status::NeedsLogin("the login took too long".to_owned());
-            cx.refresh_windows();
-            continue;
-        }
-        if since.elapsed().as_secs() % 2 != 0 {
-            continue;
-        }
-        let Some(check) = connection.remote.as_ref().and_then(|r| r.shared("check", None)) else {
-            continue;
-        };
-        let checking = cx.background_spawn(async move {
-            std::process::Command::new(&check[0])
-                .args(&check[1..])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        });
-        cx.spawn(async move |cx| {
-            if checking.await {
-                let _ = cx.update(|cx| {
-                    let logging_in = cx
-                        .global::<Shared>()
-                        .connections
-                        .get(server as usize)
-                        .is_some_and(|c| matches!(c.status, Status::LoggingIn { .. }));
-                    if logging_in {
-                        connect_remote(server, cx);
-                    }
-                });
-            }
-        })
-        .detach();
-    }
 }
 
 fn by_ssh(server: ServerId, cx: &App) -> bool {
@@ -1444,7 +1366,7 @@ pub fn install_remote(server: ServerId, cx: &mut App) {
     connection.status = Status::Installing;
     cx.refresh_windows();
     let installing = cx.background_spawn(async move {
-        artty_core::remote::install(&config, crate::cli::linux_build)
+        artty_core::remote::install(&config, Prompts::Never, crate::cli::linux_build)
     });
     cx.spawn(async move |cx| {
         let installed = installing.await;
@@ -1708,7 +1630,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        Some((artty_core::remote::open(&config).unwrap(), dir))
+        Some((artty_core::remote::open(&config, Prompts::Never).unwrap(), dir))
     }
 
     /// Attach a new window; returns its first pane once laid out.
@@ -1760,7 +1682,7 @@ mod tests {
         let Ok(destination) = std::env::var("ARTTY_TEST_SSH") else { return };
         let config =
             ServerConfig { name: "test".into(), ssh: Some(destination), ..Default::default() };
-        let opened = artty_core::remote::open(&config).unwrap();
+        let opened = artty_core::remote::open(&config, Prompts::Never).unwrap();
         let artty_core::remote::Opened { mut child, mut reader, writer, .. } = opened;
         let writer = Arc::new(std::sync::Mutex::new(writer));
         let send =
