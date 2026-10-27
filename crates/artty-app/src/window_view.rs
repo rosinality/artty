@@ -284,6 +284,8 @@ struct Search {
     query: String,
     /// `Some(false)`: no match; `Some(true)`: showing a match.
     found: Option<bool>,
+    /// Which match, of how many; and whether the pane has history at all.
+    counts: Option<artty_core::protocol::SearchFound>,
     error: Option<String>,
 }
 
@@ -1576,7 +1578,8 @@ impl WindowView {
 
     fn open_search(&mut self, cx: &mut Context<Self>) {
         if self.search.is_none() {
-            self.search = Some(Search { query: String::new(), found: None, error: None });
+            self.search =
+                Some(Search { query: String::new(), found: None, counts: None, error: None });
         }
         cx.notify();
     }
@@ -1598,7 +1601,8 @@ impl WindowView {
                 if let Some(search) = this.search.as_mut() {
                     match result {
                         Ok(found) => {
-                            search.found = (!search.query.is_empty()).then_some(found);
+                            search.found = (!search.query.is_empty()).then_some(found.found);
+                            search.counts = Some(found);
                             search.error = None;
                         },
                         Err(error) => search.error = Some(error),
@@ -3334,18 +3338,33 @@ impl WindowView {
 
     /// The find bar, at the top right of the focused pane. Positions are
     /// relative to the terminal area's container.
-    fn search_bar(&self, origin: Point<Pixels>) -> Option<impl IntoElement> {
+    fn search_bar(
+        &self,
+        origin: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
         let search = self.search.as_ref()?;
-        let rect = self.rect_of(self.focused_id()?)?;
+        let pane = self.focused_id()?;
+        let rect = self.rect_of(pane)?;
         let mut query = search.query.clone();
         if let Some(marked) = &self.marked_text {
             query.push_str(marked);
         }
+        // Which of how many: "3 of 17".
+        let counts = search.counts.as_ref().filter(|c| c.found && !search.query.is_empty());
+        let position = counts.map(|c| {
+            let more = if c.more { "+" } else { "" };
+            format!("{} of {}{more}", c.index, c.total)
+        });
         let (status, status_color) = match (&search.error, search.found) {
             (Some(_), _) => ("invalid pattern".to_owned(), rgba(0xf7768eff)),
             (None, Some(false)) => ("no match".to_owned(), rgba(0xf7768eff)),
             _ => ("⏎ older · ⇧⏎ newer · esc".to_owned(), rgba(0xffffff60)),
         };
+        // A full-screen agent keeps its history itself, out of the
+        // terminal's reach: its conversations can be searched instead.
+        let agent = self.pane_state(pane, cx).and_then(|s| s.agent.clone());
+        let elsewhere = agent.filter(|_| search.counts.as_ref().is_some_and(|c| !c.history));
         // The container's right edge is the area's plus its padding.
         let container_right = self.area.x + self.area.width + PADDING;
         Some(
@@ -3372,7 +3391,35 @@ impl WindowView {
                         .text_color(rgba(0xffffffee))
                         .child(format!("{query}▏")),
                 )
-                .child(div().text_color(status_color).child(status)),
+                .when_some(position, |d, position| {
+                    d.child(div().flex_none().text_color(rgba(0xffffffd0)).child(position))
+                })
+                .child(div().text_color(status_color).child(status))
+                .when_some(elsewhere, |d, agent| {
+                    let (mark, color) = search_view::agent_mark(&agent);
+                    d.child(
+                        div()
+                            .id("search-agent-history")
+                            .flex()
+                            .gap(px(4.))
+                            .px(px(6.))
+                            .rounded(px(4.))
+                            .text_color(rgba(0xffffffb0))
+                            .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffee)))
+                            .child(div().text_color(rgba(color << 8 | 0xff)).child(mark))
+                            .child("No history here: search its conversations ⌘⇧F")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let query = this.search.as_ref().map(|s| s.query.clone());
+                                this.close_search(cx);
+                                this.open_search_all(cx);
+                                if let (Some(query), Some(all)) = (query, this.search_all.as_mut())
+                                {
+                                    all.set_query(query);
+                                }
+                                this.search_all_now(cx);
+                            })),
+                    )
+                }),
         )
     }
 
@@ -3847,7 +3894,7 @@ impl Render for WindowView {
                                     .size_full(),
                                 )
                                 .children(self.divider_handles(container, cx))
-                                .children(self.search_bar(container))
+                                .children(self.search_bar(container, cx))
                                 .children(self.copy_mode_badge())
                                 .children(self.files_drawer(cx))
                                 .children(self.toast_overlay())

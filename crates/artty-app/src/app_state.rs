@@ -2009,6 +2009,39 @@ mod tests {
         // Shown, selected: the screen changes.
         let reveal = ClientMessage::Reveal { pane, line: hit.line, column: 0, length: 12 };
         exchange(reveal, &|m| matches!(m, ServerMessage::Frame { .. }).then_some(m));
+        // ⌘F counts: which match of how many (newest first, going up).
+        let print = b"printf 'zq-c%s\\n' ount ount ount\r".to_vec();
+        exchange(ClientMessage::Input { pane, bytes: print }, &|m| {
+            matches!(m, ServerMessage::Frame { .. }).then_some(m)
+        });
+        let find = |restart| ClientMessage::Search {
+            id: 9,
+            pane,
+            query: "zq-count".into(),
+            older: true,
+            restart,
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let first = loop {
+            let reply = exchange(find(true), &|m| {
+                matches!(m, ServerMessage::Reply { id: 9, .. }).then_some(m)
+            });
+            let ServerMessage::Reply { reply: Reply::Search(Ok(found)), .. } = reply else {
+                panic!()
+            };
+            if found.total == 3 {
+                break found;
+            }
+            assert!(Instant::now() < deadline, "{found:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert_eq!((first.found, first.index, first.more), (true, 3, false));
+        let reply = exchange(find(false), &|m| {
+            matches!(m, ServerMessage::Reply { id: 9, .. }).then_some(m)
+        });
+        let ServerMessage::Reply { reply: Reply::Search(Ok(next)), .. } = reply else { panic!() };
+        assert_eq!((next.index, next.total), (2, 3));
+
         let transcripts = dir.join(".claude/projects/-tmp-x");
         std::fs::create_dir_all(&transcripts).unwrap();
         std::fs::write(

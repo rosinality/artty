@@ -27,6 +27,10 @@ enum Found<'a> {
 }
 
 impl SearchAll {
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+    }
+
     fn rows(&self) -> Vec<Found<'_>> {
         self.lines
             .iter()
@@ -109,6 +113,11 @@ impl WindowView {
             });
         }
         cx.notify();
+    }
+
+    /// Search now, for what's typed.
+    pub(super) fn search_all_now(&mut self, cx: &mut Context<Self>) {
+        self.schedule_search_all(true, cx);
     }
 
     /// Search a moment after typing stops (or at once).

@@ -1784,9 +1784,15 @@ impl Server {
                             state.session.clear_selection();
                         }
                         if query.is_empty() {
-                            Ok(false)
+                            Ok(artty_core::protocol::SearchFound {
+                                found: false,
+                                index: 0,
+                                total: 0,
+                                more: false,
+                                history: true,
+                            })
                         } else {
-                            state.session.search(&query, older)
+                            state.session.search_counted(&query, older)
                         }
                     },
                     None => Err("no such pane".into()),

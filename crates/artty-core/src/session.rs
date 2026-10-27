@@ -602,6 +602,39 @@ impl Session {
         crate::state::styled_text(&self.term.lock(), lines)
     }
 
+    /// [`Session::search`], then where the match is among them all: its
+    /// number from the top and how many there are (counting stops at so
+    /// many); and whether there's history beyond the screen at all.
+    pub fn search_counted(
+        &mut self,
+        query: &str,
+        older: bool,
+    ) -> Result<crate::protocol::SearchFound, String> {
+        const MOST: usize = 10_000;
+        let found = self.search(query, older)?;
+        let (_, regex) = self.search.as_mut().expect("just searched");
+        let term = self.term.lock();
+        let current = term.selection.as_ref().and_then(|s| s.to_range(&term)).map(|r| r.start);
+        let start = Point::new(term.topmost_line(), Column(0));
+        let end = Point::new(term.bottommost_line(), term.last_column());
+        let (mut index, mut total) = (0, 0);
+        for each in RegexIter::new(start, end, Direction::Right, &term, regex).take(MOST + 1) {
+            total += 1;
+            if Some(*each.start()) == current {
+                index = total;
+            }
+        }
+        let alternate = term.mode().contains(artty_vt::term::TermMode::ALT_SCREEN);
+        let history = term.history_size() > 0 && !alternate;
+        Ok(crate::protocol::SearchFound {
+            found,
+            index: if found { index } else { 0 },
+            total: total.min(MOST),
+            more: total > MOST,
+            history,
+        })
+    }
+
     /// Find `query` (a regex) and select the match, starting from the current
     /// match or the bottom. `older` searches up through history. Returns
     /// whether something matched; an invalid regex is an error.

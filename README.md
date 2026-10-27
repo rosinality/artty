@@ -79,7 +79,7 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘⌥C | Copy the output of the command in view (or the last one) |
 | ⌘⇧C | Copy mode: move with vi keys (hjkl, w b e, 0 $, gg G, ⌃U ⌃D, [ ] for prompts), select with v / V / ⌃V, copy with y, leave with esc |
 | Drop files on a pane | Type their paths, quoted |
-| ⌘F, ⌘G / ⌘⇧G | Find (regex, all matches highlighted); next older / newer |
+| ⌘F, ⌘G / ⌘⇧G | Find (regex, all matches highlighted, "3 of 17"); next older / newer. A full-screen agent (Claude Code) keeps its history itself, out of the terminal's reach: Find offers to search its conversations (⌘⇧F) instead |
 | ⌘= / ⌘- / ⌘0 | Font size |
 | ⌘-click | Open a link (underlined while ⌘ is held) |
 | Drag, double-, triple-click, ⇧-click | Select, select word, select line, extend |

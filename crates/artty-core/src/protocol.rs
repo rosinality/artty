@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -586,8 +586,8 @@ pub enum Reply {
     Link(Option<(String, usize, usize)>),
     Text(Option<String>),
     Path(Option<PathBuf>),
-    /// Search: matched, or the pattern's error.
-    Search(Result<bool, String>),
+    /// Search: what matched, or the pattern's error.
+    Search(Result<SearchFound, String>),
     /// A command line (if known) and its output.
     Output(Option<(Option<String>, String)>),
     /// Taken (`None`), or the whole file, where it went; or why not.
@@ -596,6 +596,21 @@ pub enum Reply {
     Dir(Result<Listing, String>),
     Found(Vec<OutputHit>),
     Sessions(Vec<SessionHit>),
+}
+
+/// A pane's search ([`ClientMessage::Search`]): whether a match is shown,
+/// which of how many it is, and whether the pane has history beyond its
+/// screen at all (a full-screen program's, as an agent's, isn't the
+/// terminal's to search).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SearchFound {
+    pub found: bool,
+    /// 1-based, counted from the top of the history; 0 with no match.
+    pub index: usize,
+    pub total: usize,
+    /// There are more than `total` (counting stopped).
+    pub more: bool,
+    pub history: bool,
 }
 
 /// A line of a pane's output with what was searched for
