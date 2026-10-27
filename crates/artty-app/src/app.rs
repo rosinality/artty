@@ -165,6 +165,7 @@ pub fn bind_default_keys(cx: &mut App) {
 pub fn main() {
     artty_core::logging::init();
     let command = parse_args();
+    keep_awake_in_background();
     Application::new().run(move |cx: &mut App| {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &QuitAndEndSessions, cx| app_state::quit_and_end_sessions(cx));
@@ -183,4 +184,17 @@ pub fn main() {
         app_state::init(PaneSpec { command, ..Default::default() }, cx);
         cx.activate(true);
     });
+}
+
+/// Keep App Nap away: in the background, macOS would stretch the app's
+/// timers, and with them its pings to servers (which take a silent app as
+/// gone) and its notice of lost connections. The Mac still sleeps when idle.
+fn keep_awake_in_background() {
+    use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
+    let activity = NSProcessInfo::processInfo().beginActivityWithOptions_reason(
+        NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+        &NSString::from_str("Keeping connections to servers alive"),
+    );
+    // For the app's whole life.
+    std::mem::forget(activity);
 }

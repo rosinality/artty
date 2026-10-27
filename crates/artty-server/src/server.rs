@@ -40,6 +40,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 const FRAMES_IN_FLIGHT: u64 = 2;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
+/// An app silent this long (it pings every 5 s) is taken as gone.
+const CLIENT_SILENCE: Duration = Duration::from_secs(60);
 /// How often the socket is marked as used, for /tmp cleaners (which leave
 /// what's newer than days).
 const TOUCH_INTERVAL: Duration = Duration::from_secs(3600);
@@ -172,6 +174,10 @@ struct Client {
     /// Batches of screen updates sent, and acknowledged.
     batches_sent: u64,
     batches_acked: u64,
+    /// When it last said anything; and whether it pings (apps do, every
+    /// few seconds), so its silence means it's gone.
+    last_heard: Instant,
+    pings: bool,
 }
 
 impl Client {
@@ -1374,6 +1380,8 @@ impl Server {
                         images_sent: HashSet::new(),
                         batches_sent: 0,
                         batches_acked: 0,
+                        last_heard: Instant::now(),
+                        pings: false,
                     },
                 );
             },
@@ -1495,6 +1503,10 @@ impl Server {
     }
 
     fn handle_client(&mut self, client: ClientId, message: ClientMessage) {
+        if let Some(c) = self.clients.get_mut(&client) {
+            c.last_heard = Instant::now();
+            c.pings |= matches!(message, ClientMessage::Ping { .. });
+        }
         match message {
             ClientMessage::AttachWindow { window, spec, bounds } => {
                 let window = match window
@@ -2439,6 +2451,19 @@ impl Server {
 
     /// Once a second: processes, statuses, `artty run` timeouts, config.
     fn poll(&mut self) {
+        // An app that went quiet (a Mac asleep, a network gone) can take a
+        // long while to be noticed as disconnected: let its windows go, for
+        // another app to show. (It reconnects when it's back.)
+        let silent: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(_, c)| c.pings && c.last_heard.elapsed() >= CLIENT_SILENCE)
+            .map(|(&id, _)| id)
+            .collect();
+        for id in silent {
+            log::info!("app {id} silent for {}s: disconnecting it", CLIENT_SILENCE.as_secs());
+            self.handle(Input::Disconnected(id));
+        }
         if self.last_touch.is_none_or(|t| t.elapsed() >= TOUCH_INTERVAL) {
             self.last_touch = Some(Instant::now());
             touch(&self.socket);
