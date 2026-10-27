@@ -90,7 +90,8 @@ actions!(
         PaneToNewTab,
         ToggleBroadcast,
         ReopenClosedTab,
-        ToggleFiles
+        ToggleFiles,
+        ToggleSidebar
     ]
 );
 
@@ -370,6 +371,8 @@ pub struct WindowView {
     asks: Vec<ask_sheet::AskSheet>,
     /// The files drawer (⌘⇧E), when open.
     files: Option<files_drawer::Files>,
+    /// The sidebar folded away (⌘B): the terminal takes its width.
+    sidebar_hidden: bool,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -447,7 +450,7 @@ impl WindowView {
             tabs: Vec::new(),
             places: Vec::new(),
             active: 0,
-            area: Self::area_rect(window),
+            area: Self::area_rect(window, SIDEBAR_WIDTH),
             pane_rects: Vec::new(),
             dividers: Vec::new(),
             drag: None,
@@ -482,6 +485,7 @@ impl WindowView {
             toast: None,
             asks: Vec::new(),
             files: None,
+            sidebar_hidden: false,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -671,14 +675,40 @@ impl WindowView {
     // Geometry.
 
     /// The area panes fill, in window coordinates; matches `render`.
-    fn area_rect(window: &Window) -> Rect {
+    fn area_rect(window: &Window, sidebar: f32) -> Rect {
         let viewport = window.viewport_size();
         Rect {
-            x: SIDEBAR_WIDTH + PADDING,
+            x: sidebar + PADDING,
             y: TITLEBAR_HEIGHT,
-            width: (f32::from(viewport.width) - SIDEBAR_WIDTH - 2. * PADDING).max(1.),
+            width: (f32::from(viewport.width) - sidebar - 2. * PADDING).max(1.),
             height: (f32::from(viewport.height) - TITLEBAR_HEIGHT - PADDING).max(1.),
         }
+    }
+
+    /// The sidebar's width: none while folded away.
+    fn sidebar_width(&self) -> f32 {
+        if self.sidebar_hidden { 0. } else { SIDEBAR_WIDTH }
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_hidden = !self.sidebar_hidden;
+        cx.notify();
+    }
+
+    /// While the sidebar is folded away, what it would show of tabs that
+    /// matter: how many need you (waiting for an answer, or asking for
+    /// attention), how many are working.
+    fn away_counts(&self, cx: &App) -> (usize, usize) {
+        let panes = self.tabs.iter().flat_map(|tab| tab.root.panes());
+        let (mut need, mut working) = (0, 0);
+        for pane in panes {
+            match self.pane_state(pane, cx) {
+                Some(s) if s.icon == "waiting" || s.info.needs_attention => need += 1,
+                Some(s) if s.icon == "busy" => working += 1,
+                _ => {},
+            }
+        }
+        (need, working)
     }
 
     fn size_for(&self, rect: Rect) -> TerminalSize {
@@ -966,7 +996,7 @@ impl WindowView {
             .id("picker")
             .absolute()
             .top(px(70.))
-            .left(px(SIDEBAR_WIDTH + 40.))
+            .left(px(self.sidebar_width() + 40.))
             .w(px(420.))
             .occlude()
             .flex()
@@ -2617,6 +2647,46 @@ impl WindowView {
             )
     }
 
+    /// In the titlebar while the sidebar is folded away: a button back, and
+    /// how many tabs need you (a click goes to one) or are working.
+    fn folded_sidebar_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let (need, working) = self.away_counts(cx);
+        div()
+            .absolute()
+            .left(px(76.))
+            .top_0()
+            .h_full()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(11.5))
+            .child(
+                div()
+                    .id("show-sidebar")
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .text_color(rgba(0xffffff90))
+                    .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffee)))
+                    .child("⇥")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            )
+            .when(need > 0, |d| {
+                d.child(
+                    div()
+                        .id("need-you")
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .text_color(rgba(0xe0af68ff))
+                        .hover(|d| d.bg(rgba(0xe0af6826)))
+                        .child(format!("● {need} need you"))
+                        .on_click(cx.listener(|this, _, _, cx| this.jump_to_attention(cx))),
+                )
+            })
+            .when(working > 0, |d| {
+                d.child(div().text_color(rgba(0xffffff60)).child(format!("{working} working")))
+            })
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Workspaces are sections (there's always one); a folded one still
         // shows the tab on screen.
@@ -2678,6 +2748,20 @@ impl WindowView {
             .pt(px(44.))
             // The titlebar goes on above the sidebar, behind the window buttons.
             .child(Self::titlebar("sidebar-titlebar").absolute().top_0().left_0().right_0().h(px(TITLEBAR_HEIGHT)))
+            .child(
+                div()
+                    .id("hide-sidebar")
+                    .absolute()
+                    .top(px(7.))
+                    .right(px(8.))
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .text_size(px(11.5))
+                    .text_color(rgba(0xffffff70))
+                    .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffee)))
+                    .child("⇤")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            )
             .px(px(8.))
             .pb(px(10.))
             .text_size(px(12.5))
@@ -3123,7 +3207,7 @@ impl Render for WindowView {
         if self.reload_config {
             self.apply_config(window);
         }
-        self.area = Self::area_rect(window);
+        self.area = Self::area_rect(window, self.sidebar_width());
         self.window_active = window.is_window_active();
         if self.scale_factor != window.scale_factor() {
             // Another display: tell programs the new pixel sizes.
@@ -3226,7 +3310,7 @@ impl Render for WindowView {
         let focus = self.focus.clone();
         let entity = cx.entity();
         // The terminal container starts right of the sidebar, below the title bar.
-        let container = point(px(SIDEBAR_WIDTH), px(TITLEBAR_HEIGHT));
+        let container = point(px(self.sidebar_width()), px(TITLEBAR_HEIGHT));
 
         div()
             .track_focus(&self.focus)
@@ -3237,6 +3321,7 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_files(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, action: &SendText, _, cx| {
                 if !this.showing_activity() {
                     this.input(action.text.clone().into_bytes(), cx);
@@ -3383,7 +3468,7 @@ impl Render for WindowView {
             .size_full()
             .bg(tint)
             .font_family(".SystemUIFont")
-            .child(self.sidebar(cx))
+            .when(!self.sidebar_hidden, |d| d.child(self.sidebar(cx)))
             .child(
                 div()
                     .flex()
@@ -3392,6 +3477,7 @@ impl Render for WindowView {
                     .min_w_0()
                     .child(
                         Self::titlebar("titlebar")
+                            .relative()
                             .flex()
                             .flex_none()
                             .h(px(TITLEBAR_HEIGHT))
@@ -3400,6 +3486,10 @@ impl Render for WindowView {
                             .justify_center()
                             .text_size(px(13.))
                             .text_color(rgba(0xffffffb8))
+                            // Folded away: the window's buttons are here, then
+                            // the sidebar's way back and what it would show.
+                            .when(self.sidebar_hidden, |d| d.pl(px(170.)).pr(px(170.)))
+                            .children(self.sidebar_hidden.then(|| self.folded_sidebar_bar(cx)))
                             .child(Self::one_line(title).min_w_0()),
                     )
                     .when(self.showing_activity(), |d| {
@@ -3604,6 +3694,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
         KeyBinding::new("cmd-shift-a", ShowActivity, None),
         KeyBinding::new("cmd-shift-e", ToggleFiles, None),
+        KeyBinding::new("cmd-b", ToggleSidebar, None),
         KeyBinding::new("ctrl-cmd-]", NextWorkspace, None),
         KeyBinding::new("ctrl-cmd-[", PreviousWorkspace, None),
         KeyBinding::new("cmd-w", ClosePane, None),

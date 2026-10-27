@@ -65,6 +65,8 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘⇧N | New workspace (name it, then Enter) |
 | ⌘⇧O | Open a workspace: a hidden one, or one in another window |
 | ⇧⌘A | Activity: every pane's processes, CPU and memory |
+| ⇧⌘E | Files: the focused pane's folder, on its machine |
+| ⌘B | Fold the sidebar away, and back (folded, the titlebar says how many tabs need you; a click goes there) |
 | ⌃⌘[ / ⌃⌘] | Previous / next workspace |
 | Click / double-click / drag a workspace header | Fold it / rename it / reorder workspaces |
 | Right-click (or ⌃-click) | In a pane: copy, paste, links, split, rename, clear, close. On a tab or workspace in the sidebar: rename, move to a new workspace, fold, close |

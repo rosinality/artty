@@ -13,7 +13,7 @@ use crate::window_view::{
     PreviousPane, PreviousTab, PreviousWorkspace, RenameTab, ReopenClosedTab, ResetFontSize,
     ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp, ShowActivity, SplitDown,
     SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleBroadcast,
-    ToggleFiles, ToggleZoom,
+    ToggleFiles, ToggleSidebar, ToggleZoom,
 };
 
 actions!(
@@ -125,6 +125,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Jump to Tab Needing Attention", JumpToAttention),
                 MenuItem::action("Activity", ShowActivity),
                 MenuItem::action("Files", ToggleFiles),
+                MenuItem::action("Toggle Sidebar", ToggleSidebar),
                 MenuItem::separator(),
                 MenuItem::action("Rename Tab…", RenameTab),
                 MenuItem::action("Move Tab Up", MoveTabUp),
