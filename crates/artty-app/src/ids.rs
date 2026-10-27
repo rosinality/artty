@@ -30,6 +30,12 @@ fn untag(id: u64) -> u64 {
     id & MASK
 }
 
+/// The id as its server knows it, for requests (which aren't untagged on
+/// their way, as messages are).
+pub fn local_id(id: u64) -> u64 {
+    untag(id)
+}
+
 fn tag_node(server: ServerId, node: &mut Node) {
     match node {
         Node::Pane(id) => *id = tag(server, *id),

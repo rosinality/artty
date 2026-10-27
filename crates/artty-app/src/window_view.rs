@@ -37,6 +37,8 @@ mod ask_sheet;
 mod copy_mode;
 #[path = "files_drawer.rs"]
 mod files_drawer;
+#[path = "palette.rs"]
+mod palette;
 #[path = "pane_actions.rs"]
 mod pane_actions;
 
@@ -91,7 +93,9 @@ actions!(
         ToggleBroadcast,
         ReopenClosedTab,
         ToggleFiles,
-        ToggleSidebar
+        ToggleSidebar,
+        GoTo,
+        RunCommand
     ]
 );
 
@@ -373,6 +377,8 @@ pub struct WindowView {
     files: Option<files_drawer::Files>,
     /// The sidebar folded away (⌘B): the terminal takes its width.
     sidebar_hidden: bool,
+    /// The palette (⌘P, ⌘⇧P), when open.
+    palette: Option<palette::Palette>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -486,6 +492,7 @@ impl WindowView {
             asks: Vec::new(),
             files: None,
             sidebar_hidden: false,
+            palette: None,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -1462,7 +1469,7 @@ impl WindowView {
 
     // Keyboard.
 
-    fn key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform {
             if let Some(digit) = keystroke.key.parse::<usize>().ok().filter(|d| (1..=9).contains(d))
@@ -1475,6 +1482,10 @@ impl WindowView {
         }
         if self.asking() {
             self.ask_key(event, cx);
+            return;
+        }
+        if self.palette.is_some() {
+            self.palette_key(event, window, cx);
             return;
         }
         if self.context_menu.take().is_some() {
@@ -3322,6 +3333,12 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_files(cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(
+                cx.listener(|this, _: &GoTo, window, cx| this.open_palette(false, window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &RunCommand, window, cx| this.open_palette(true, window, cx)),
+            )
             .on_action(cx.listener(|this, action: &SendText, _, cx| {
                 if !this.showing_activity() {
                     this.input(action.text.clone().into_bytes(), cx);
@@ -3572,6 +3589,7 @@ impl Render for WindowView {
             )
             .children(self.context_menu_overlay(window.viewport_size(), cx))
             .children(self.picker_overlay(cx))
+            .children(self.palette_overlay(cx))
             .children(self.ask_overlay(cx))
     }
 }
@@ -3627,6 +3645,10 @@ impl EntityInputHandler for WindowView {
         self.marked_text = None;
         if self.asking() {
             self.ask_text(text, cx);
+            return;
+        }
+        if self.palette.is_some() {
+            self.palette_text(text, cx);
             return;
         }
         if let Some(picker) = self.picker.as_mut() {
@@ -3695,6 +3717,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-a", ShowActivity, None),
         KeyBinding::new("cmd-shift-e", ToggleFiles, None),
         KeyBinding::new("cmd-b", ToggleSidebar, None),
+        KeyBinding::new("cmd-p", GoTo, None),
+        KeyBinding::new("cmd-shift-p", RunCommand, None),
         KeyBinding::new("ctrl-cmd-]", NextWorkspace, None),
         KeyBinding::new("ctrl-cmd-[", PreviousWorkspace, None),
         KeyBinding::new("cmd-w", ClosePane, None),

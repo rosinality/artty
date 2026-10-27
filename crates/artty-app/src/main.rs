@@ -16,6 +16,8 @@ mod echo;
 mod edits;
 #[cfg(target_os = "macos")]
 mod forward;
+#[cfg(target_os = "macos")]
+mod fuzzy;
 mod hooks;
 #[cfg(target_os = "macos")]
 mod ids;

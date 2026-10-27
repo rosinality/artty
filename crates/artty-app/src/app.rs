@@ -7,12 +7,12 @@ use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 
 use crate::window_view::{
     ClosePane, CloseTab, Copy, CopyCommandOutput, CopyMode, DecreaseFontSize, EqualizePanes, Find,
-    FindNext, FindPrevious, FocusDown, FocusLeft, FocusRight, FocusUp, IncreaseFontSize,
+    FindNext, FindPrevious, FocusDown, FocusLeft, FocusRight, FocusUp, GoTo, IncreaseFontSize,
     JumpToAttention, JumpToNextPrompt, JumpToPreviousPrompt, MoveTabDown, MoveTabUp, NewTab,
     NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, PaneToNewTab, Paste,
     PreviousPane, PreviousTab, PreviousWorkspace, RenameTab, ReopenClosedTab, ResetFontSize,
-    ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp, ShowActivity, SplitDown,
-    SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleBroadcast,
+    ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp, RunCommand, ShowActivity,
+    SplitDown, SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleBroadcast,
     ToggleFiles, ToggleSidebar, ToggleZoom,
 };
 
@@ -126,6 +126,8 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Activity", ShowActivity),
                 MenuItem::action("Files", ToggleFiles),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
+                MenuItem::action("Go to…", GoTo),
+                MenuItem::action("Run Command…", RunCommand),
                 MenuItem::separator(),
                 MenuItem::action("Rename Tab…", RenameTab),
                 MenuItem::action("Move Tab Up", MoveTabUp),
