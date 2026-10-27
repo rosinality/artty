@@ -2151,9 +2151,14 @@ impl WindowView {
                 (0xe0af68ff, Some(format!("{error} · again in {seconds}s · click to retry")))
             },
             Status::Off(reason) => (0xffffff40, Some(reason.clone())),
+            Status::NeedsInstall(reason) => {
+                (0xe0af68ff, Some(format!("{reason} · click to install this build")))
+            },
+            Status::Installing => (0xe0af68ff, Some("installing artty there…".to_owned())),
         };
         let connected = status == Status::Connected;
-        let away = matches!(status, Status::Waiting { .. } | Status::Off(_));
+        let install = matches!(status, Status::NeedsInstall(_));
+        let away = matches!(status, Status::Waiting { .. } | Status::Off(_)) || install;
         div()
             .id(("server", server as usize))
             .group(group.clone())
@@ -2212,8 +2217,9 @@ impl WindowView {
                 )
             })
             .when(away && server != LOCAL, |d| {
-                d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
-                    app_state::connect_remote(server, cx);
+                d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| match install {
+                    true => app_state::install_remote(server, cx),
+                    false => app_state::connect_remote(server, cx),
                 }))
             })
     }

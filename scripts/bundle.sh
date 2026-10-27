@@ -1,6 +1,8 @@
 #!/bin/sh
 # Build target/release/artty.app: a release build wrapped in a macOS app bundle
-# with an icon, signed ad hoc so it runs locally.
+# with an icon, signed ad hoc so it runs locally. With zig and cargo-zigbuild
+# (and Rust's x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu targets), it
+# also carries Linux builds, for the app to install on other machines.
 #
 #   ./scripts/bundle.sh             build (or rebuild) the bundle
 #   ./scripts/bundle.sh --install   also link /Applications/artty.app to it, so
@@ -25,6 +27,21 @@ esac
 
 cargo build --release -p artty
 
+# Linux builds (against glibc 2.28: any distribution from 2018 on).
+LINUX=""
+if command -v cargo-zigbuild >/dev/null 2>&1 || [ -x "$HOME/.cargo/bin/cargo-zigbuild" ]; then
+  for CPU in x86_64 aarch64; do
+    if rustup target list --installed | grep -qx "$CPU-unknown-linux-gnu"; then
+      cargo zigbuild --release -p artty --target "$CPU-unknown-linux-gnu.2.28"
+      LINUX="$LINUX $CPU"
+    else
+      echo "(no Linux build for $CPU: rustup target add $CPU-unknown-linux-gnu)"
+    fi
+  done
+else
+  echo "(no Linux builds: brew install zig && cargo install cargo-zigbuild)"
+fi
+
 # Assemble the new bundle next to the old one, then swap it in with a rename:
 # a running artty keeps its (now unlinked) files and is never modified in place.
 APP="$PWD/target/release/artty.app"
@@ -33,6 +50,10 @@ rm -rf "$NEW"
 mkdir -p "$NEW/Contents/MacOS" "$NEW/Contents/Resources"
 cp target/release/artty "$NEW/Contents/MacOS/artty"
 cp assets/artty.icns "$NEW/Contents/Resources/artty.icns"
+for CPU in $LINUX; do
+  mkdir -p "$NEW/Contents/Resources/linux"
+  cp "target/$CPU-unknown-linux-gnu/release/artty" "$NEW/Contents/Resources/linux/artty-$CPU"
+done
 
 cat > "$NEW/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,7 +79,7 @@ PLIST
 codesign --force --sign "$SIGN" "$NEW"
 rm -rf "$APP"
 mv "$NEW" "$APP"
-echo "Built $APP ($BUNDLE_ID $VERSION)"
+echo "Built $APP ($BUNDLE_ID $VERSION${LINUX:+; for Linux on$LINUX})"
 
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 

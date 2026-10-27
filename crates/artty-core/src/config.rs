@@ -94,10 +94,14 @@ impl ServerConfig {
         if !self.command.is_empty() {
             return Some(self.command.clone());
         }
-        let destination = self.ssh.as_ref()?;
         let artty = self.artty.as_deref().unwrap_or("artty");
         // Through a login shell, for the PATH set up in its profile.
-        let remote = format!("exec \"$SHELL\" -lc 'exec {artty} server --stdio'");
+        self.ssh_command(&format!("exec \"$SHELL\" -lc 'exec {artty} server --stdio'"))
+    }
+
+    /// ssh running `remote` there (for one reached by ssh).
+    pub fn ssh_command(&self, remote: &str) -> Option<Vec<String>> {
+        let destination = self.ssh.as_ref()?;
         Some(
             [
                 "ssh",
@@ -114,7 +118,7 @@ impl ServerConfig {
                 "-o",
                 "ServerAliveCountMax=3",
                 destination,
-                &remote,
+                remote,
             ]
             .map(str::to_owned)
             .to_vec(),

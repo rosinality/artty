@@ -1950,9 +1950,8 @@ impl Server {
             let name = Path::new(name).file_name().ok_or("no file name")?;
             let dir = uploads_dir().ok_or("no home directory")?;
             prune_uploads(&dir);
-            let stamp = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
+            let stamp =
+                SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
             let dir = dir.join(format!("{stamp}-{client}-{upload}"));
             std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
             let path = dir.join(name);

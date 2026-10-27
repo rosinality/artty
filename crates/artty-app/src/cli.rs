@@ -106,6 +106,10 @@ artty, your own pane is found automatically:
   artty remote remove NAME               stop showing it (its sessions keep
                                          running there)
   artty remote test NAME                 try connecting to it
+  artty remote install NAME              install this build of artty there (by
+                                         ssh, into ~/.local/bin; Linux with
+                                         glibc 2.28+), moving a running server
+                                         onto it
   artty server --stdio                   carry an app's connection to this
                                          machine's server over stdin and stdout
                                          (what a remote artty app runs over ssh)
@@ -866,7 +870,24 @@ fn remote(args: &[String]) -> Result<i32, String> {
             remote_test(&find(args.get(1))?)?;
             Ok(0)
         },
-        Some(other) => Err(format!("remote: unknown action {other} (list, add, remove, test)")),
+        Some("install") => {
+            let mut server = find(args.get(1))?;
+            eprintln!("Installing this build of artty on {}…", server.name);
+            let installed = artty_core::remote::install(&server, linux_build)
+                .map_err(|err| format!("couldn't install on {}: {err}", server.name))?;
+            if let Some(artty) = installed.artty_setting(server.artty.as_deref()) {
+                server.artty = artty;
+                let mut file = ConfigFile::open().map_err(|err| err.to_string())?;
+                file.add_server(&server);
+                file.save().map_err(|err| err.to_string())?;
+                eprintln!("(the config now runs the installed artty there)");
+            }
+            remote_test(&server)?;
+            Ok(0)
+        },
+        Some(other) => {
+            Err(format!("remote: unknown action {other} (list, add, remove, test, install)"))
+        },
     }
 }
 
@@ -890,11 +911,25 @@ fn remote_test(server: &artty_core::ServerConfig) -> Result<(), String> {
             Ok(())
         },
         ServerMessage::Welcome { server_version, .. } => Err(format!(
-            "{} runs another artty build ({server_version}); install this one there",
-            server.name
+            "{} runs another artty build ({server_version}); install this one there: \
+             artty remote install {}",
+            server.name, server.name
         )),
         _ => Err(format!("{}: unexpected answer", server.name)),
     }
+}
+
+/// This app's build of artty for Linux on `cpu`: in its bundle, or (run
+/// from the source tree) cargo-zigbuild's output beside it.
+pub fn linux_build(cpu: &str) -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let bundled = dir.parent()?.join("Resources/linux").join(format!("artty-{cpu}"));
+    if bundled.is_file() {
+        return Some(bundled);
+    }
+    let built = dir.parent()?.join(format!("{cpu}-unknown-linux-gnu/release/artty"));
+    built.is_file().then_some(built)
 }
 
 fn hooks(args: &[String]) -> Result<i32, String> {

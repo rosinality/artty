@@ -126,6 +126,10 @@ pub enum Status {
     /// Not trying (it runs another build, ended its sessions, or was
     /// removed from the settings).
     Off(String),
+    /// Reached by ssh, but artty there isn't this build (or isn't there):
+    /// this app can install it ([`install_remote`]).
+    NeedsInstall(String),
+    Installing,
 }
 
 impl Connection {
@@ -1270,6 +1274,15 @@ fn remote_opened(
         },
         Ok(opened) => opened,
         Err(_) if !current => return,
+        Err(error)
+            if error.starts_with(artty_core::remote::NOT_INSTALLED) && by_ssh(server, cx) =>
+        {
+            let connection = &mut cx.global_mut::<Shared>().connections[server as usize];
+            connection.close();
+            connection.status = Status::NeedsInstall(artty_core::remote::NOT_INSTALLED.to_owned());
+            cx.refresh_windows();
+            return;
+        },
         Err(error) => return retry_later(server, error, cx),
     };
     let artty_core::remote::Opened { mut child, reader, writer, welcome } = opened;
@@ -1280,9 +1293,11 @@ fn remote_opened(
             let _ = child.kill();
             std::thread::spawn(move || child.wait());
             let connection = &mut cx.global_mut::<Shared>().connections[server as usize];
-            connection.status = Status::Off(format!(
-                "runs another artty build ({server_version}); install this one there"
-            ));
+            let reason = format!("runs another artty build ({server_version})");
+            connection.status = match connection.remote.as_ref().is_some_and(|r| r.ssh.is_some()) {
+                true => Status::NeedsInstall(reason),
+                false => Status::Off(format!("{reason}; install this one there")),
+            };
             cx.refresh_windows();
             return;
         },
@@ -1294,6 +1309,66 @@ fn remote_opened(
     }
     attach_remote(server, cx);
     cx.refresh_windows();
+}
+
+fn by_ssh(server: ServerId, cx: &App) -> bool {
+    cx.global::<Shared>()
+        .connections
+        .get(server as usize)
+        .and_then(|c| c.remote.as_ref())
+        .is_some_and(|r| r.ssh.is_some())
+}
+
+/// Install this build of artty on `server`'s machine, then connect again.
+pub fn install_remote(server: ServerId, cx: &mut App) {
+    let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
+        return;
+    };
+    let Some(config) = connection.remote.clone().filter(|r| r.ssh.is_some()) else { return };
+    if connection.status == Status::Installing {
+        return;
+    }
+    connection.close();
+    connection.status = Status::Installing;
+    cx.refresh_windows();
+    let installing = cx.background_spawn(async move {
+        artty_core::remote::install(&config, crate::cli::linux_build)
+    });
+    cx.spawn(async move |cx| {
+        let installed = installing.await;
+        let _ = cx.update(|cx| {
+            let connection = &mut cx.global_mut::<Shared>().connections[server as usize];
+            match installed {
+                Ok(installed) => {
+                    log::info!("installed artty on {}", connection.name);
+                    connection.failures = 0;
+                    connection.status = Status::Connecting;
+                    // Have the config run what was installed.
+                    let config = connection.remote.clone();
+                    let setting =
+                        config.as_ref().and_then(|c| installed.artty_setting(c.artty.as_deref()));
+                    if let (Some(mut config), Some(artty)) = (config, setting) {
+                        config.artty = artty;
+                        let saved =
+                            artty_core::config_file::ConfigFile::open().and_then(|mut file| {
+                                file.add_server(&config);
+                                file.save()
+                            });
+                        if let Err(err) = saved {
+                            log::error!("couldn't name artty's path in the config: {err}");
+                        }
+                        connection.remote = Some(config);
+                    }
+                    connect_remote(server, cx);
+                },
+                Err(err) => {
+                    connection.status = Status::NeedsInstall(format!("couldn't install: {err}"))
+                },
+            }
+            cx.refresh_windows();
+        });
+    })
+    .detach();
 }
 
 /// Try `server` again after a while, longer after each failure in a row.

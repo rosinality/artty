@@ -221,7 +221,8 @@ impl Settings {
                     Ok(())
                 },
                 ServerMessage::Welcome { server_version, .. } => Err(format!(
-                    "It runs another artty build ({server_version}); install this one there."
+                    "It runs another artty build ({server_version}). Add it anyway, then \
+                     click its header in the sidebar to install this one."
                 )),
                 _ => Err("It answered, but not as an artty server.".to_owned()),
             }
@@ -233,6 +234,14 @@ impl Settings {
                 adding.checking = false;
                 match result {
                     Ok(()) => this.save_server(server, cx),
+                    Err(error) if error.starts_with(artty_core::remote::NOT_INSTALLED) => {
+                        adding.error = Some(
+                            "artty isn't installed there. Add it anyway, then click its header \
+                             in the sidebar to install it."
+                                .to_owned(),
+                        );
+                        cx.notify();
+                    },
                     Err(error) => {
                         adding.error = Some(format!("Couldn't connect: {error}"));
                         cx.notify();

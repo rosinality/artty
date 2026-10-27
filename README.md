@@ -248,21 +248,24 @@ name = "devbox"
 ssh = "me@devbox"
 ```
 
-The connection is ssh running `artty server --stdio` there (artty must be
-installed there; ssh uses your config and keys, without password prompts).
-On Linux, artty is the server and the `artty` command (the app is macOS
-only); `./scripts/remote-install.sh DESTINATION` builds it here for that
-machine (against glibc 2.28, so for any distribution from 2018 on; it needs
-`brew install zig`, `cargo install cargo-zigbuild` and `rustup target add
-x86_64-unknown-linux-gnu`), copies it there into `~/.local/bin`, and hands a
-running server over to the new build. With `--build-there` it builds there
-from this source with that machine's cargo instead.
+The connection is ssh running `artty server --stdio` there (ssh uses your
+config and keys, without password prompts). On Linux, artty is the server
+and the `artty` command (the app is macOS only), and this app installs it:
+when artty isn't there, or runs another build, the server's header says so
+— click it (or run `artty remote install NAME`) and the app copies its build
+for that machine there by ssh (into `~/.local/bin`; Linux on x86_64 or
+aarch64, with glibc 2.28 or later — any distribution from 2018 on), moves a
+running server onto it (programs keep running), and connects. The app
+carries those builds when `scripts/bundle.sh` makes it with `brew install
+zig`, `cargo install cargo-zigbuild` and `rustup target add
+x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu`. From the source,
+`./scripts/remote-install.sh DESTINATION` does the same (with
+`--build-there`, it builds there with that machine's cargo instead).
 Like this Mac's, that server keeps its sessions running on its own, and it
 sends screens rather than a stream of output, so a dropped connection —
 sleep, a new network — loses nothing: artty reconnects with backoff (a
 click on the server's header tries at once) and shows the same tabs again.
-A server running another artty build says so in its header, which also
-shows its round trip. Tabs and panes stay on their server (they can't be
+A server's header also shows its round trip. Tabs and panes stay on their server (they can't be
 dragged to another); Activity and the workspace picker (⌘⇧O) show every
 server's.
 
