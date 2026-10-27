@@ -125,6 +125,8 @@ pub struct Settings {
     ghostty: Option<Vec<artty_core::theme_import::ImportedTheme>>,
     /// The theme last chosen here, by name.
     chosen_theme: Option<String>,
+    /// Ghostty's config (its theme, its key bindings), if it has one.
+    ghostty_config: Option<artty_core::theme_import::GhosttyConfig>,
     /// The key binding being made, and its keys being recorded.
     adding_key: Option<keys::AddKey>,
     recording: Option<gpui::Subscription>,
@@ -189,6 +191,7 @@ impl Settings {
             theme_filter: String::new(),
             ghostty: None,
             chosen_theme: None,
+            ghostty_config: artty_core::theme_import::ghostty_config(),
             adding_key: None,
             recording: None,
             focus: cx.focus_handle(),

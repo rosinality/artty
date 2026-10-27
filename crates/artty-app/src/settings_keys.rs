@@ -152,6 +152,32 @@ impl Settings {
                     .into_any_element(),
             );
         }
+        // Ghostty's bindings, brought over with a click.
+        let ghostty = self.ghostty_config.as_ref().map_or(0, |c| c.keybinds.len());
+        if ghostty > 0 {
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py(px(7.))
+                    .border_b_1()
+                    .border_color(rgba(0xffffff0d))
+                    .child(div().text_color(rgba(0xffffffb0)).child(if ghostty == 1 {
+                        "Ghostty has 1 key binding".to_owned()
+                    } else {
+                        format!("Ghostty has {ghostty} key bindings")
+                    }))
+                    .child(
+                        Self::form_button("ghostty-keys".into(), "Bring Over", false).on_click(
+                            cx.listener(|this, _, _, cx| this.bring_over_ghostty_keys(cx)),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
         rows.push(match &self.adding_key {
             Some(adding) => self.add_key_form(adding, cx),
             None => div()
@@ -392,6 +418,32 @@ impl Settings {
                     ),
             )
             .into_any_element()
+    }
+
+    /// Ghostty's key bindings into `[keys]`: text, and actions artty has.
+    fn bring_over_ghostty_keys(&mut self, cx: &mut Context<Self>) {
+        let Some(config) = self.ghostty_config.as_ref() else { return };
+        let mut brought = Vec::new();
+        let mut skipped = Vec::new();
+        for (keys, action) in &config.keybinds {
+            match artty_core::theme_import::ghostty_action(action) {
+                Some(artty) => brought.push((keys.clone(), KeyAction::Named(artty))),
+                None => skipped.push(format!("{} ({action})", shown_keys(keys))),
+            }
+        }
+        let count = brought.len();
+        self.edit(cx, |file| {
+            for (keys, action) in &brought {
+                file.set_key(keys, action);
+            }
+        });
+        if self.status.is_none() {
+            let mut status = format!("Brought over {count} from Ghostty");
+            if !skipped.is_empty() {
+                status.push_str(&format!("; no such action here for {}", skipped.join(", ")));
+            }
+            self.status = Some(status);
+        }
     }
 
     fn save_key(&mut self, cx: &mut Context<Self>) {

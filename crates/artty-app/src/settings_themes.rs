@@ -26,7 +26,11 @@ impl Settings {
         let name = theme.name.clone();
         self.edit(cx, |file| file.set_colors(theme));
         if self.status.is_none() {
-            self.status = Some(format!("Theme: {name}"));
+            self.status = Some(if theme_import::is_light(theme) {
+                format!("Theme: {name} (a light one: artty's window and sidebar stay dark)")
+            } else {
+                format!("Theme: {name}")
+            });
         }
         self.chosen_theme = Some(name);
     }
@@ -99,6 +103,42 @@ impl Settings {
             )
             .into_any_element();
         let mut rows = vec![import];
+        // Ghostty's own choice, to take with a click.
+        if let Some(name) = self.ghostty_config.as_ref().and_then(|c| c.theme.clone()) {
+            let using = self.chosen_theme.as_deref() == Some(name.as_str());
+            rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .px_3()
+                    .py(px(6.))
+                    .child(
+                        div()
+                            .text_color(rgba(0xffffffee))
+                            .child(format!("Ghostty's theme: {name}")),
+                    )
+                    .child(
+                        Self::form_button(
+                            "ghostty-theme-use".into(),
+                            if using { "In Use" } else { "Use" },
+                            !using,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            match theme_import::ghostty_theme(&name) {
+                                Some(theme) => this.use_theme(&theme, cx),
+                                None => {
+                                    this.status =
+                                        Some(format!("Ghostty's theme {name} wasn't found"));
+                                    cx.notify();
+                                },
+                            }
+                        })),
+                    )
+                    .into_any_element(),
+            );
+        }
         let themes = self.ghostty.as_deref().unwrap_or_default();
         if themes.is_empty() {
             return rows;
@@ -194,6 +234,15 @@ impl Settings {
                             .text_color(rgba(0xffffffd8))
                             .child(theme.name.clone()),
                     )
+                    .when(theme_import::is_light(theme), |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.5))
+                                .text_color(rgba(0xffffff60))
+                                .child("light"),
+                        )
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(theme) = this.ghostty.as_ref().and_then(|t| t.get(i)).cloned() {
                             this.use_theme(&theme, cx);

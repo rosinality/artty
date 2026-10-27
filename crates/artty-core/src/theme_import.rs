@@ -265,6 +265,123 @@ fn lines(text: &str) -> ImportedTheme {
     theme
 }
 
+/// A light theme (its background bright): artty's window is dark, its
+/// sidebar's text light.
+pub fn is_light(theme: &ImportedTheme) -> bool {
+    theme.background.is_some_and(|c| {
+        0.2126 * f32::from(c.r) + 0.7152 * f32::from(c.g) + 0.0722 * f32::from(c.b) > 140.
+    })
+}
+
+/// What's in Ghostty's config to bring over: its theme's name and its key
+/// bindings (keys, Ghostty's action).
+#[derive(Debug, Default, PartialEq)]
+pub struct GhosttyConfig {
+    pub theme: Option<String>,
+    pub keybinds: Vec<(String, String)>,
+}
+
+/// Ghostty's config on this Mac, if there is one.
+pub fn ghostty_config() -> Option<GhosttyConfig> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let files = [
+        "Library/Application Support/com.mitchellh.ghostty/config.ghostty",
+        "Library/Application Support/com.mitchellh.ghostty/config",
+        ".config/ghostty/config.ghostty",
+        ".config/ghostty/config",
+    ];
+    let text: String = files
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(home.join(file)).ok())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then(|| parse_ghostty_config(&text))
+}
+
+fn parse_ghostty_config(text: &str) -> GhosttyConfig {
+    let mut config = GhosttyConfig::default();
+    for line in text.lines().map(str::trim).filter(|l| !l.starts_with('#')) {
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let value = value.trim().trim_matches('"');
+        match key.trim() {
+            "theme" => {
+                // `light:A,dark:B`: the window is dark.
+                let dark = value
+                    .split(',')
+                    .find_map(|part| part.trim().strip_prefix("dark:"))
+                    .unwrap_or(value);
+                config.theme = Some(dark.trim().to_owned());
+            },
+            "keybind" => {
+                // `keys=action` (the keys have no `=`: Ghostty names it
+                // `equal`).
+                if let Some((keys, action)) = value.split_once('=')
+                    && !keys.trim().is_empty()
+                {
+                    config.keybinds.push((keys.trim().to_owned(), action.trim().to_owned()));
+                }
+            },
+            _ => {},
+        }
+    }
+    config
+}
+
+/// A Ghostty theme by name.
+pub fn ghostty_theme(name: &str) -> Option<ImportedTheme> {
+    let (name, path) = ghostty_themes().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name))?;
+    let mut theme = import(&path).ok()?;
+    theme.name = name;
+    Some(theme)
+}
+
+/// A Ghostty action as artty's (a `[keys]` value), if it has one.
+pub fn ghostty_action(action: &str) -> Option<String> {
+    if action.starts_with("text:") {
+        return Some(action.to_owned());
+    }
+    let (name, argument) = action.split_once(':').unwrap_or((action, ""));
+    let artty = match (name, argument) {
+        ("unbind", _) => "none",
+        ("new_window", _) => "new-window",
+        ("new_tab", _) => "new-tab",
+        ("close_surface", _) => "close-pane",
+        ("close_tab", _) => "close-tab",
+        ("next_tab", _) => "next-tab",
+        ("previous_tab", _) => "previous-tab",
+        ("new_split", "right" | "auto") => "split-right",
+        ("new_split", "down") => "split-down",
+        ("goto_split", "left") => "focus-left",
+        ("goto_split", "right") => "focus-right",
+        ("goto_split", "up" | "top") => "focus-up",
+        ("goto_split", "down" | "bottom") => "focus-down",
+        ("goto_split", "next") => "next-pane",
+        ("goto_split", "previous") => "previous-pane",
+        ("toggle_split_zoom", _) => "toggle-zoom",
+        ("equalize_splits", _) => "equalize-panes",
+        ("resize_split", argument) => {
+            let direction = argument.split(',').next()?;
+            if !["left", "right", "up", "down"].contains(&direction) {
+                return None;
+            }
+            return Some(format!("resize-pane-{direction}"));
+        },
+        ("copy_to_clipboard", _) => "copy",
+        ("paste_from_clipboard", _) => "paste",
+        ("increase_font_size", _) => "increase-font-size",
+        ("decrease_font_size", _) => "decrease-font-size",
+        ("reset_font_size", _) => "reset-font-size",
+        ("jump_to_prompt", a) if a.starts_with('-') => "jump-to-previous-prompt",
+        ("jump_to_prompt", _) => "jump-to-next-prompt",
+        ("open_config", _) => "open-settings",
+        ("start_search", _) => "find",
+        ("search", _) => "find",
+        ("quit", _) => "quit",
+        _ => return None,
+    };
+    Some(artty.to_owned())
+}
+
 /// Ghostty's themes on this Mac (its app's, and the user's own), by name.
 pub fn ghostty_themes() -> Vec<(String, PathBuf)> {
     let mut dirs =
@@ -384,5 +501,20 @@ mod tests {
     #[test]
     fn not_a_theme() {
         assert!(parse("x", "just some text\n").is_err());
+    }
+
+    #[test]
+    fn ghostty_config_brought_over() {
+        let config = parse_ghostty_config(
+            "# mine\ntheme = light:Github Light,dark:One Dark Two\n\
+             keybind = cmd+e>1=text:è\nkeybind = super+d=new_split:right\nkeybind = cmd+k=clear_screen\n",
+        );
+        assert_eq!(config.theme.as_deref(), Some("One Dark Two"));
+        assert_eq!(config.keybinds.len(), 3);
+        assert_eq!(config.keybinds[0], ("cmd+e>1".to_owned(), "text:è".to_owned()));
+        assert_eq!(ghostty_action("text:è").as_deref(), Some("text:è"));
+        assert_eq!(ghostty_action("new_split:right").as_deref(), Some("split-right"));
+        assert_eq!(ghostty_action("resize_split:left,10").as_deref(), Some("resize-pane-left"));
+        assert_eq!(ghostty_action("toggle_quick_terminal"), None);
     }
 }
