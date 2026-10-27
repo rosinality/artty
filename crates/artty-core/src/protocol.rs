@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -74,8 +74,13 @@ pub fn protocol_version() -> u32 {
         foreground: Rgb { r: 43, g: 44, b: 45 },
         mode: 46,
     };
-    let tab =
-        TabLayout { title: Some("t".into()), root: Node::Pane(47), focused: 48, zoomed: true };
+    let tab = TabLayout {
+        title: Some("t".into()),
+        root: Node::Pane(47),
+        focused: 48,
+        zoomed: true,
+        broadcast: true,
+    };
     let workspace = WorkspaceLayout {
         id: 49,
         name: Some("n".into()),
@@ -148,6 +153,10 @@ pub fn protocol_version() -> u32 {
                 fullscreen: true,
             }),
         }),
+        postcard::to_stdvec(&ClientMessage::CopyMode {
+            pane: 78,
+            op: CopyModeOp::Move(CopyMotion::PromptDown),
+        }),
     ];
     // FNV-1a: the same in every build.
     let mut hash: u32 = 0x811c_9dc5;
@@ -206,6 +215,57 @@ pub enum SelectionOp {
         right: bool,
     },
     Clear,
+}
+
+/// Copy mode: the keyboard moves a cursor through the screen and history,
+/// and selects from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyModeOp {
+    Enter,
+    Exit,
+    Move(CopyMotion),
+    /// Start a selection at the cursor (or end it, or change its kind):
+    /// 0 characters, 1 lines, 2 a block.
+    Select(u8),
+}
+
+/// Where copy mode's cursor goes, as in vi.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyMotion {
+    Up,
+    Down,
+    Left,
+    Right,
+    /// `0`, `$`, `^`.
+    LineStart,
+    LineEnd,
+    FirstOccupied,
+    /// `H`, `M`, `L`.
+    ScreenTop,
+    ScreenMiddle,
+    ScreenBottom,
+    /// `b`, `w`, `e`: words separated by punctuation too.
+    WordLeft,
+    WordRight,
+    WordEnd,
+    /// `B`, `W`, `E`: words separated by whitespace only.
+    BigWordLeft,
+    BigWordRight,
+    BigWordEnd,
+    /// `%`, `{`, `}`.
+    Bracket,
+    ParagraphUp,
+    ParagraphDown,
+    /// `gg`, `G`: the start of history, the end of the screen.
+    Top,
+    Bottom,
+    HalfPageUp,
+    HalfPageDown,
+    PageUp,
+    PageDown,
+    /// `[[`, `]]`: the previous or next shell prompt.
+    PromptUp,
+    PromptDown,
 }
 
 /// App → server.
@@ -367,6 +427,43 @@ pub enum ClientMessage {
     ClearBuffer {
         pane: PaneId,
     },
+    /// Scroll the previous (`older`) or next shell prompt to the top.
+    JumpToPrompt {
+        pane: PaneId,
+        older: bool,
+    },
+    CopyMode {
+        pane: PaneId,
+        op: CopyModeOp,
+    },
+    /// The active tab's panes, evenly sized.
+    EqualizePanes {
+        window: WindowId,
+    },
+    /// Two panes of a tab trade places.
+    SwapPanes {
+        a: PaneId,
+        b: PaneId,
+    },
+    /// A pane out of its tab, into a tab of its own after it.
+    PaneToNewTab {
+        pane: PaneId,
+    },
+    /// A pane into another tab, beside that tab's focused pane.
+    MovePane {
+        pane: PaneId,
+        workspace: WorkspaceId,
+        tab: usize,
+    },
+    /// Typing into every pane of the active tab at once, on or off.
+    ToggleBroadcast {
+        window: WindowId,
+    },
+    /// Reopen the tab closed last (into the window's active workspace if its
+    /// own is gone).
+    ReopenClosedTab {
+        window: WindowId,
+    },
 
     /// Questions with an answer in [`ServerMessage::Reply`].
     Query {
@@ -397,6 +494,10 @@ pub enum Query {
     Cwd {
         pane: PaneId,
     },
+    /// The command in view, or the last one (see `Session::command_output`).
+    CommandOutput {
+        pane: PaneId,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -407,6 +508,8 @@ pub enum Reply {
     Path(Option<PathBuf>),
     /// Search: matched, or the pattern's error.
     Search(Result<bool, String>),
+    /// A command line (if known) and its output.
+    Output(Option<(Option<String>, String)>),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -423,6 +526,8 @@ pub struct TabLayout {
     pub root: Node,
     pub focused: PaneId,
     pub zoomed: bool,
+    /// Typing goes to every pane.
+    pub broadcast: bool,
 }
 
 /// A named group of tabs: a section of the sidebar.
@@ -728,7 +833,13 @@ mod tests {
             kitty_keyboard: false,
         };
         let state = PaneState { info, icon: String::new(), progress: None, agent: None };
-        let tab = TabLayout { title: None, root: Node::Pane(3), focused: 3, zoomed: false };
+        let tab = TabLayout {
+            title: None,
+            root: Node::Pane(3),
+            focused: 3,
+            zoomed: false,
+            broadcast: false,
+        };
         let workspace = WorkspaceLayout {
             id: 2,
             name: None,

@@ -47,6 +47,12 @@ pub struct Config {
     /// In the sidebar, a tab with split panes lists them, a line each; off,
     /// it's one line, for its focused pane.
     pub list_panes: bool,
+    /// Ask before pasting several lines into a program that would run them
+    /// one by one (one that hasn't turned on bracketed paste).
+    pub confirm_multiline_paste: bool,
+    /// Keep other apps from reading what's typed while artty is in front
+    /// (macOS's secure keyboard entry), as for passwords.
+    pub secure_keyboard_entry: bool,
     /// Reopen the previous tabs on launch.
     pub restore_sessions: bool,
     /// Lines of each tab's output to save and show again; 0 saves none.
@@ -157,6 +163,8 @@ impl Default for Config {
             bell_sound: false,
             copy_on_select: false,
             list_panes: true,
+            confirm_multiline_paste: true,
+            secure_keyboard_entry: false,
             restore_sessions: true,
             restore_scrollback: 1000,
             resume_agents: true,

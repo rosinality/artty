@@ -136,6 +136,60 @@ impl Node {
         }
     }
 
+    /// Panes `a` and `b` trade places.
+    pub fn swap(&mut self, a: PaneId, b: PaneId) {
+        match self {
+            Node::Pane(id) if *id == a => *id = b,
+            Node::Pane(id) if *id == b => *id = a,
+            Node::Pane(_) => {},
+            Node::Split { first, second, .. } => {
+                first.swap(a, b);
+                second.swap(a, b);
+            },
+        }
+    }
+
+    /// Every split's ratio set so panes side by side (or stacked) get equal
+    /// shares: a split of one pane and two more beside it gives a third.
+    pub fn equalize(&mut self) {
+        if let Node::Split { axis, ratio, first, second } = self {
+            let (a, b) = (first.count_along(*axis), second.count_along(*axis));
+            *ratio = a as f32 / (a + b) as f32;
+            first.equalize();
+            second.equalize();
+        }
+    }
+
+    /// Panes in a row along `axis`: splits the same way add up.
+    fn count_along(&self, axis: Axis) -> usize {
+        match self {
+            Node::Split { axis: split, first, second, .. } if *split == axis => {
+                first.count_along(axis) + second.count_along(axis)
+            },
+            _ => 1,
+        }
+    }
+
+    /// The innermost split along `axis` holding `target`: its path and ratio.
+    /// Moving its divider resizes `target` along that axis.
+    pub fn enclosing_split(&self, target: PaneId, axis: Axis) -> Option<(Vec<bool>, f32)> {
+        let mut path = Vec::new();
+        let mut found = None;
+        let mut node = self;
+        while let Node::Split { axis: split, ratio, first, second } = node {
+            if *split == axis {
+                found = Some((path.clone(), *ratio));
+            }
+            let go_second = !first.contains(target);
+            if go_second && !second.contains(target) {
+                return None;
+            }
+            path.push(go_second);
+            node = if go_second { second } else { first };
+        }
+        found
+    }
+
     pub fn set_ratio(&mut self, path: &[bool], value: f32) {
         match (self, path.split_first()) {
             (Node::Split { ratio, .. }, None) => *ratio = value.clamp(MIN_RATIO, 1. - MIN_RATIO),
@@ -264,6 +318,30 @@ mod tests {
         assert!(root.split(1, 2, Axis::Horizontal));
         assert!(root.split(2, 3, Axis::Vertical));
         root
+    }
+
+    #[test]
+    fn swapping_equalizing_and_resizing() {
+        let mut root = three();
+        root.swap(1, 3);
+        assert_eq!(root.panes(), vec![3, 2, 1]);
+
+        // 1 | 2 | 3 side by side: thirds.
+        let mut row = Node::Pane(1);
+        row.split(1, 2, Axis::Horizontal);
+        row.split(2, 3, Axis::Horizontal);
+        row.set_ratio(&[], 0.8);
+        row.equalize();
+        let (panes, _) = row.layout(Rect { x: 0., y: 0., width: 300., height: 10. }, 0.);
+        assert_eq!(panes.iter().map(|(_, r)| r.width).collect::<Vec<_>>(), vec![100., 100., 100.]);
+
+        // In `three`, pane 3 resizes sideways by the root split, and up or
+        // down by the split it shares with 2; pane 1 has nothing above it.
+        let root = three();
+        assert_eq!(root.enclosing_split(3, Axis::Horizontal), Some((vec![], 0.5)));
+        assert_eq!(root.enclosing_split(3, Axis::Vertical), Some((vec![true], 0.5)));
+        assert_eq!(root.enclosing_split(1, Axis::Vertical), None);
+        assert_eq!(root.enclosing_split(9, Axis::Horizontal), None);
     }
 
     #[test]

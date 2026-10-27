@@ -741,6 +741,26 @@ impl Render for Settings {
                     self.toggle("copy", c.copy_on_select, "copy-on-select", cx),
                 ),
                 Self::row(
+                    "Confirm pasting several lines",
+                    Some("Into programs that would run them one by one"),
+                    self.toggle(
+                        "confirm-paste",
+                        c.confirm_multiline_paste,
+                        "confirm-multiline-paste",
+                        cx,
+                    ),
+                ),
+                Self::row(
+                    "Secure keyboard entry",
+                    Some("Other apps can't read what you type here"),
+                    self.toggle(
+                        "secure-input",
+                        c.secure_keyboard_entry,
+                        "secure-keyboard-entry",
+                        cx,
+                    ),
+                ),
+                Self::row(
                     "List a split tab's panes",
                     Some("Off: one line, for the focused pane"),
                     self.toggle("list-panes", c.list_panes, "list-panes", cx),

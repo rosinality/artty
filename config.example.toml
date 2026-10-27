@@ -40,6 +40,15 @@ copy-on-select = false
 # pane.
 list-panes = true
 
+# Ask before pasting several lines into a program that would run them one by
+# one: one that hasn't turned on bracketed paste (shells and editors usually
+# have, so they get the paste whole).
+confirm-multiline-paste = true
+
+# macOS's secure keyboard entry: while an artty window is in front, other
+# apps can't read what you type (passwords, say). Also in the artty menu.
+secure-keyboard-entry = false
+
 # Foreground programs shown as coding agents in the sidebar.
 agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"]
 
@@ -103,6 +112,11 @@ latest = "gemini --resume latest"
 # split-right, split-down, focus-left, focus-right, focus-up, focus-down,
 # next-pane, previous-pane, toggle-zoom, jump-to-attention, copy, paste,
 # find, find-next, find-previous, increase-font-size, decrease-font-size,
-# reset-font-size, open-settings, reopen-closed-windows, restart-to-update,
-# restart-server, quit, quit-and-end-sessions.
+# reset-font-size, jump-to-previous-prompt, jump-to-next-prompt,
+# copy-command-output, copy-mode, resize-pane-left, resize-pane-right,
+# resize-pane-up, resize-pane-down, swap-pane-left, swap-pane-right,
+# swap-pane-up, swap-pane-down, equalize-panes, pane-to-new-tab,
+# toggle-broadcast, reopen-closed-tab, toggle-secure-keyboard-entry,
+# open-settings, reopen-closed-windows, restart-to-update, restart-server,
+# quit, quit-and-end-sessions.
 # (⌘1–⌘9 always select tabs.)

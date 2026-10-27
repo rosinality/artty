@@ -55,7 +55,11 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘W / ⌘⇧W | Close pane (the tab closes with its last pane) / close tab |
 | ⌘⌥←↑→↓, ⌘[ / ⌘] | Move to the pane in that direction / previous, next pane |
 | ⌘⇧↩ | Zoom the pane to fill the tab, and back |
-| Drag a divider | Resize panes |
+| Drag a divider, ⌃⌘←↑→↓ | Resize panes (move the divider that way); ⌃⌘= makes them even |
+| ⌃⌘⇧←↑→↓ | Swap the pane with the one in that direction |
+| Drag a pane's line in the sidebar | Move the pane into another tab ("Move Pane to New Tab" in the Window menu takes it out) |
+| ⌘⌥I | Type into every pane of the tab at once, and back |
+| ⌘⇧T | Reopen the last closed tab (directories, recent output, agents) |
 | ⌘1…⌘9, ⌘⇧[ / ⌘⇧] | Switch tabs (hold ⌘ to see their numbers) |
 | Double-click / drag a tab | Rename it / reorder it (also into another workspace) |
 | ⌘⇧N | New workspace (name it, then Enter) |
@@ -65,11 +69,20 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | Click / double-click / drag a workspace header | Fold it / rename it / reorder workspaces |
 | Right-click (or ⌃-click) | In a pane: copy, paste, links, split, rename, clear, close. On a tab or workspace in the sidebar: rename, move to a new workspace, fold, close |
 | ⌘J | Jump to the next tab that needs attention |
-| ⌘C / ⌘V | Copy selection / paste |
+| ⌘C / ⌘V | Copy selection / paste (several lines into a program that would run them one by one asks first) |
+| ⌘↑ / ⌘↓ | Scroll to the previous / next shell prompt |
+| ⌘⌥C | Copy the output of the command in view (or the last one) |
+| ⌘⇧C | Copy mode: move with vi keys (hjkl, w b e, 0 $, gg G, ⌃U ⌃D, [ ] for prompts), select with v / V / ⌃V, copy with y, leave with esc |
+| Drop files on a pane | Type their paths, quoted |
 | ⌘F, ⌘G / ⌘⇧G | Find (regex, all matches highlighted); next older / newer |
 | ⌘= / ⌘- / ⌘0 | Font size |
 | ⌘-click | Open a link (underlined while ⌘ is held) |
 | Drag, double-, triple-click, ⇧-click | Select, select word, select line, extend |
+
+Prompt jumps and copying a command's output need shell integration (fish has
+it built in; artty sets up zsh and bash). Secure Keyboard Entry, in the artty
+menu or Settings, keeps other apps from reading what you type while artty is
+in front.
 
 Programs that use the mouse (vim, htop, tmux) get mouse events; hold ⇧ to select
 text instead. Programs that ask for the kitty keyboard protocol (Claude Code,

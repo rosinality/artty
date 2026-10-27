@@ -44,6 +44,8 @@ const HISTORY: usize = 60;
 const LONG_COMMAND: Duration = Duration::from_secs(10);
 /// Shown under a restored pane's old output.
 const RESTORED_BANNER: &str = "\r\n\x1b[2m── restored ──\x1b[0m\r\n";
+/// Closed tabs kept for reopening.
+const CLOSED_TABS: usize = 10;
 const DEFAULT_SIZE: TerminalSize =
     TerminalSize { columns: 100, lines: 30, cell_width: 8, cell_height: 18 };
 
@@ -52,11 +54,13 @@ struct Tab {
     root: Node,
     focused: PaneId,
     zoomed: bool,
+    /// Typing goes to every pane.
+    broadcast: bool,
 }
 
 impl Tab {
     fn new(pane: PaneId) -> Self {
-        Self { title: None, root: Node::Pane(pane), focused: pane, zoomed: false }
+        Self { title: None, root: Node::Pane(pane), focused: pane, zoomed: false, broadcast: false }
     }
 
     fn visible(&self) -> Vec<PaneId> {
@@ -120,6 +124,7 @@ impl Workspace {
                     root: tab.root.clone(),
                     focused: tab.focused,
                     zoomed: tab.zoomed,
+                    broadcast: tab.broadcast,
                 })
                 .collect(),
             active: self.active,
@@ -209,6 +214,16 @@ pub(crate) struct Server {
     handover_to: Option<PathBuf>,
     /// Panes a previous build handed over, until their layout places them.
     handed: HashMap<PaneId, (HandedPane, Option<artty_core::vt::term::TermSnapshot>)>,
+    /// Tabs closed lately, newest last, for reopening.
+    closed: Vec<ClosedTab>,
+}
+
+/// A closed tab as saved, and where it was.
+struct ClosedTab {
+    workspace: WorkspaceId,
+    index: usize,
+    tab: SavedTab,
+    defaults: Defaults,
 }
 
 fn config_modified() -> Option<SystemTime> {
@@ -326,6 +341,7 @@ impl Server {
             listener_fd,
             handover_to: None,
             handed: HashMap::new(),
+            closed: Vec::new(),
         }
     }
 
@@ -362,6 +378,7 @@ impl Server {
                 root,
                 focused,
                 zoomed: tab.zoomed && panes.len() > 1,
+                broadcast: false,
             });
         }
         if tabs.is_empty() {
@@ -781,6 +798,111 @@ impl Server {
         if let Some(tab) = self.take_tab(workspace, tab) {
             self.end_panes(tab.root.panes());
         }
+    }
+
+    /// Keep a tab about to close, to reopen: its layout, directories,
+    /// recent output and agents, as a restart would bring them back.
+    fn remember_closed(&mut self, workspace: WorkspaceId, index: usize) {
+        let Some(state) = self.workspaces.get(&workspace) else { return };
+        let Some(tab) = state.tabs.get(index) else { return };
+        let saved = SavedTab {
+            title: tab.title.clone(),
+            layout: self.saved_layout(&tab.root, false),
+            focused: tab.root.panes().iter().position(|&id| id == tab.focused).unwrap_or(0),
+            zoomed: tab.zoomed,
+        };
+        let defaults = state.defaults.clone();
+        if self.closed.len() == CLOSED_TABS {
+            self.closed.remove(0);
+        }
+        self.closed.push(ClosedTab { workspace, index, tab: saved, defaults });
+    }
+
+    /// Bring back the tab closed last, where it was (or in the window's
+    /// active workspace if that one is gone), and show it.
+    fn reopen_closed_tab(&mut self, window: WindowId) {
+        let Some(closed) = self.closed.pop() else { return };
+        let workspace = match self.workspaces.contains_key(&closed.workspace) {
+            true => closed.workspace,
+            false => match self.windows.get(&window).and_then(Window::active_workspace) {
+                Some(workspace) => workspace,
+                None => return,
+            },
+        };
+        let Some(root) = self.restore_layout(closed.tab.layout, &closed.defaults) else { return };
+        let panes = root.panes();
+        let tab = Tab {
+            title: closed.tab.title,
+            focused: panes[closed.tab.focused.min(panes.len() - 1)],
+            zoomed: closed.tab.zoomed && panes.len() > 1,
+            root,
+            broadcast: false,
+        };
+        let state = self.workspaces.get_mut(&workspace).unwrap();
+        let index = closed.index.min(state.tabs.len());
+        state.tabs.insert(index, tab);
+        let before = self.focused_pane();
+        self.select_tab(workspace, index);
+        self.report_focus_change(before);
+    }
+
+    /// Take a pane out of its tab (not the tab's only one). Its tab stays.
+    fn detach_pane(&mut self, pane: PaneId) -> Option<(WorkspaceId, usize)> {
+        let (workspace, index) = self.place_of(pane)?;
+        let tab = &mut self.workspaces.get_mut(&workspace).unwrap().tabs[index];
+        let order = tab.root.panes();
+        let root = tab.root.clone().without(pane)?;
+        let remaining = root.panes();
+        if tab.focused == pane {
+            let position = order.iter().position(|&p| p == pane).unwrap_or(0);
+            tab.focused = remaining[position.min(remaining.len() - 1)];
+        }
+        if remaining.len() == 1 {
+            tab.zoomed = false;
+            tab.broadcast = false;
+        }
+        tab.root = root;
+        Some((workspace, index))
+    }
+
+    /// A pane into a tab of its own, right after the one it leaves.
+    fn pane_to_new_tab(&mut self, pane: PaneId) {
+        let Some((workspace, index)) = self.detach_pane(pane) else { return };
+        let state = self.workspaces.get_mut(&workspace).unwrap();
+        state.tabs.insert(index + 1, Tab::new(pane));
+        let before = self.focused_pane();
+        self.select_tab(workspace, index + 1);
+        self.report_focus_change(before);
+    }
+
+    /// A pane into another tab, to the right of that tab's focused pane.
+    /// Its own tab closes if it was the only pane there.
+    fn move_pane(&mut self, pane: PaneId, workspace: WorkspaceId, tab: usize) {
+        let Some(from) = self.place_of(pane) else { return };
+        if from == (workspace, tab)
+            || self.workspaces.get(&workspace).is_none_or(|w| tab >= w.tabs.len())
+        {
+            return;
+        }
+        let mut target = tab;
+        if self.detach_pane(pane).is_none() {
+            // Its tab's only pane: the tab goes, and later tabs move up.
+            self.take_tab(from.0, from.1);
+            if from.0 == workspace && from.1 < tab {
+                target -= 1;
+            }
+            if !self.workspaces.contains_key(&workspace) {
+                return;
+            }
+        }
+        let state = self.workspaces.get_mut(&workspace).unwrap();
+        let Some(tab_state) = state.tabs.get_mut(target) else { return };
+        tab_state.root.split(tab_state.focused, pane, Axis::Horizontal);
+        tab_state.focused = pane;
+        tab_state.zoomed = false;
+        let before = self.focused_pane();
+        self.select_tab(workspace, target);
+        self.report_focus_change(before);
     }
 
     fn close_workspace(&mut self, workspace: WorkspaceId) {
@@ -1354,8 +1476,19 @@ impl Server {
                     log::error!("{err}");
                 }
             },
-            ClientMessage::ClosePane { pane } => self.close_pane(pane),
-            ClientMessage::CloseTab { workspace, tab } => self.close_tab(workspace, tab),
+            ClientMessage::ClosePane { pane } => {
+                // Closing a tab's last pane closes the tab: keep it to reopen.
+                if let Some((workspace, tab)) = self.place_of(pane)
+                    && self.workspaces[&workspace].tabs[tab].root == Node::Pane(pane)
+                {
+                    self.remember_closed(workspace, tab);
+                }
+                self.close_pane(pane)
+            },
+            ClientMessage::CloseTab { workspace, tab } => {
+                self.remember_closed(workspace, tab);
+                self.close_tab(workspace, tab)
+            },
             ClientMessage::SelectTab { workspace, tab } => {
                 let before = self.focused_pane();
                 self.select_tab(workspace, tab);
@@ -1385,8 +1518,16 @@ impl Server {
                 }
             },
             ClientMessage::Input { pane, bytes } => {
-                if let Some(pane) = self.panes.get(&pane) {
-                    pane.session.write(bytes);
+                // A broadcasting tab gets it in every pane.
+                let targets = self
+                    .place_of(pane)
+                    .map(|(workspace, tab)| &self.workspaces[&workspace].tabs[tab])
+                    .filter(|tab| tab.broadcast)
+                    .map_or_else(|| vec![pane], |tab| tab.root.panes());
+                for target in targets {
+                    if let Some(target) = self.panes.get(&target) {
+                        target.session.write(bytes.clone());
+                    }
                 }
             },
             ClientMessage::Resize { pane, size } => {
@@ -1444,6 +1585,41 @@ impl Server {
                 }
                 self.mark_dirty(pane);
             },
+            ClientMessage::JumpToPrompt { pane, older } => {
+                if let Some(state) = self.panes.get(&pane) {
+                    state.session.jump_to_prompt(older);
+                }
+                self.mark_dirty(pane);
+            },
+            ClientMessage::CopyMode { pane, op } => {
+                if let Some(state) = self.panes.get(&pane) {
+                    state.session.copy_mode(op);
+                }
+                self.mark_dirty(pane);
+            },
+            ClientMessage::EqualizePanes { window } => {
+                if let Some(tab) = self.active_tab_mut(window) {
+                    tab.root.equalize();
+                }
+            },
+            ClientMessage::SwapPanes { a, b } => {
+                if let (Some(place), Some(other)) = (self.place_of(a), self.place_of(b))
+                    && place == other
+                {
+                    let (workspace, tab) = place;
+                    self.workspaces.get_mut(&workspace).unwrap().tabs[tab].root.swap(a, b);
+                }
+            },
+            ClientMessage::PaneToNewTab { pane } => self.pane_to_new_tab(pane),
+            ClientMessage::MovePane { pane, workspace, tab } => {
+                self.move_pane(pane, workspace, tab)
+            },
+            ClientMessage::ToggleBroadcast { window } => {
+                if let Some(tab) = self.active_tab_mut(window) {
+                    tab.broadcast = !tab.broadcast && matches!(tab.root, Node::Split { .. });
+                }
+            },
+            ClientMessage::ReopenClosedTab { window } => self.reopen_closed_tab(window),
             ClientMessage::ClearBuffer { pane } => {
                 if let Some(state) = self.panes.get(&pane) {
                     state.session.clear_buffer();
@@ -1480,6 +1656,9 @@ impl Server {
                     Query::Cwd { pane } => {
                         Reply::Path(self.panes.get(&pane).and_then(|p| p.session.cwd()))
                     },
+                    Query::CommandOutput { pane } => Reply::Output(
+                        self.panes.get(&pane).and_then(|p| p.session.command_output()),
+                    ),
                 };
                 self.send(client, ServerMessage::Reply { id, reply });
             },

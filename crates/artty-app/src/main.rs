@@ -7,6 +7,7 @@ mod keys;
 mod mouse;
 mod notify;
 mod profile;
+mod secure_input;
 mod settings;
 mod terminal;
 mod window_view;
@@ -15,11 +16,13 @@ use artty_core::protocol::PaneSpec;
 use gpui::{App, Application, KeyBinding, Menu, MenuItem, actions};
 
 use window_view::{
-    ClosePane, CloseTab, Copy, DecreaseFontSize, Find, FindNext, FindPrevious, FocusDown,
-    FocusLeft, FocusRight, FocusUp, IncreaseFontSize, JumpToAttention, MoveTabDown, MoveTabUp,
-    NewTab, NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, Paste, PreviousPane,
-    PreviousTab, PreviousWorkspace, RenameTab, ResetFontSize, ShowActivity, SplitDown, SplitRight,
-    ToggleZoom,
+    ClosePane, CloseTab, Copy, CopyCommandOutput, CopyMode, DecreaseFontSize, EqualizePanes, Find,
+    FindNext, FindPrevious, FocusDown, FocusLeft, FocusRight, FocusUp, IncreaseFontSize,
+    JumpToAttention, JumpToNextPrompt, JumpToPreviousPrompt, MoveTabDown, MoveTabUp, NewTab,
+    NewWorkspace, NextPane, NextTab, NextWorkspace, OpenWorkspace, PaneToNewTab, Paste,
+    PreviousPane, PreviousTab, PreviousWorkspace, RenameTab, ReopenClosedTab, ResetFontSize,
+    ResizePaneDown, ResizePaneLeft, ResizePaneRight, ResizePaneUp, ShowActivity, SplitDown,
+    SplitRight, SwapPaneDown, SwapPaneLeft, SwapPaneRight, SwapPaneUp, ToggleBroadcast, ToggleZoom,
 };
 
 actions!(
@@ -31,7 +34,8 @@ actions!(
         ReopenClosedWindows,
         OpenSettings,
         RestartToUpdate,
-        RestartServer
+        RestartServer,
+        ToggleSecureKeyboardEntry
     ]
 );
 
@@ -73,6 +77,8 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Restart to Update", RestartToUpdate),
                 MenuItem::action("Restart Server", RestartServer),
                 MenuItem::separator(),
+                MenuItem::action("Secure Keyboard Entry (On/Off)", ToggleSecureKeyboardEntry),
+                MenuItem::separator(),
                 MenuItem::action("Quit artty (Sessions Keep Running)", Quit),
                 MenuItem::action("Quit and End Sessions", QuitAndEndSessions),
             ],
@@ -83,6 +89,7 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("New Window", NewWindow),
                 MenuItem::action("Reopen Closed Windows", ReopenClosedWindows),
                 MenuItem::action("New Tab", NewTab),
+                MenuItem::action("Reopen Closed Tab", ReopenClosedTab),
                 MenuItem::action("New Workspace", NewWorkspace),
                 MenuItem::action("Open Workspace…", OpenWorkspace),
                 MenuItem::action("Split Right", SplitRight),
@@ -101,6 +108,9 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Find…", Find),
                 MenuItem::action("Find Next", FindNext),
                 MenuItem::action("Find Previous", FindPrevious),
+                MenuItem::separator(),
+                MenuItem::action("Copy Mode", CopyMode),
+                MenuItem::action("Copy Command Output", CopyCommandOutput),
             ],
         },
         Menu {
@@ -109,6 +119,9 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Bigger", IncreaseFontSize),
                 MenuItem::action("Smaller", DecreaseFontSize),
                 MenuItem::action("Default Size", ResetFontSize),
+                MenuItem::separator(),
+                MenuItem::action("Previous Prompt", JumpToPreviousPrompt),
+                MenuItem::action("Next Prompt", JumpToNextPrompt),
             ],
         },
         Menu {
@@ -132,6 +145,19 @@ pub fn menus() -> Vec<Menu> {
                 MenuItem::action("Select Pane Above", FocusUp),
                 MenuItem::action("Select Pane Below", FocusDown),
                 MenuItem::action("Zoom Pane", ToggleZoom),
+                MenuItem::separator(),
+                MenuItem::action("Move Divider Left", ResizePaneLeft),
+                MenuItem::action("Move Divider Right", ResizePaneRight),
+                MenuItem::action("Move Divider Up", ResizePaneUp),
+                MenuItem::action("Move Divider Down", ResizePaneDown),
+                MenuItem::action("Make Panes Even", EqualizePanes),
+                MenuItem::action("Swap with Pane Left", SwapPaneLeft),
+                MenuItem::action("Swap with Pane Right", SwapPaneRight),
+                MenuItem::action("Swap with Pane Above", SwapPaneUp),
+                MenuItem::action("Swap with Pane Below", SwapPaneDown),
+                MenuItem::action("Move Pane to New Tab", PaneToNewTab),
+                MenuItem::separator(),
+                MenuItem::action("Type into All Panes (On/Off)", ToggleBroadcast),
             ],
         },
     ]
@@ -157,6 +183,11 @@ fn main() {
         cx.on_action(|_: &OpenSettings, cx| app_state::open_settings(cx));
         cx.on_action(|_: &RestartToUpdate, cx| app_state::restart(cx));
         cx.on_action(|_: &RestartServer, cx| app_state::restart_server(cx));
+        cx.on_action(|_: &ToggleSecureKeyboardEntry, _| {
+            if let Err(err) = secure_input::toggle_setting() {
+                log::error!("secure keyboard entry: {err}");
+            }
+        });
         keymap::refresh(cx);
         notify::init();
         app_state::init(PaneSpec { command, ..Default::default() }, cx);

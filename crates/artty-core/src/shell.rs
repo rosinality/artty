@@ -10,11 +10,15 @@ use artty_vt::term::Term;
 
 /// Finished commands kept per session.
 const HISTORY: usize = 50;
+/// Prompt positions kept per session, for jumping between them.
+const PROMPTS: usize = 2000;
 /// Output kept per command; longer output keeps its end.
 const MAX_OUTPUT: usize = 256 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct CommandRecord {
+    /// Stable line of the prompt it was typed at.
+    pub prompt: Option<u64>,
     /// The command line as typed, when the shell marks where it starts.
     pub command: Option<String>,
     pub output: String,
@@ -50,6 +54,8 @@ pub(crate) struct ShellTracker {
     output_start: Option<u64>,
     current: Option<CommandRecord>,
     pub history: VecDeque<CommandRecord>,
+    /// Stable lines where prompts start (the `A` mark), oldest first.
+    pub prompts: VecDeque<u64>,
 }
 
 /// Grid point for a stable line, clamped into what the grid still holds.
@@ -83,11 +89,13 @@ fn text_between<T>(term: &Term<T>, start: Point, end: Point) -> String {
 /// What a shell tracker carries across a server hand-over: where the prompt
 /// and the running command's output are. (Finished commands' output isn't
 /// kept; `artty read --last` starts over.)
-#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ShellState {
     phase: ShellPhase,
     input_start: Option<(u64, usize)>,
     output_start: Option<u64>,
+    #[serde(default)]
+    prompts: VecDeque<u64>,
 }
 
 impl ShellTracker {
@@ -96,6 +104,7 @@ impl ShellTracker {
             phase: self.phase,
             input_start: self.input_start,
             output_start: self.output_start,
+            prompts: self.prompts.clone(),
         }
     }
 
@@ -104,6 +113,7 @@ impl ShellTracker {
             phase: state.phase,
             input_start: state.input_start,
             output_start: state.output_start,
+            prompts: state.prompts,
             ..Self::default()
         }
     }
@@ -121,6 +131,15 @@ impl ShellTracker {
                 let finished = self.finish(None, line, 0, term);
                 self.phase = ShellPhase::Prompt;
                 self.input_start = None;
+                // A prompt redrawn in place (or further up, after a clear)
+                // replaces the ones from there down.
+                while self.prompts.back().is_some_and(|&last| last >= line) {
+                    self.prompts.pop_back();
+                }
+                if self.prompts.len() == PROMPTS {
+                    self.prompts.pop_front();
+                }
+                self.prompts.push_back(line);
                 finished
             },
             ShellMark::CommandStart => {
@@ -139,6 +158,7 @@ impl ShellTracker {
                 self.phase = ShellPhase::Running;
                 self.output_start = Some(line);
                 self.current = Some(CommandRecord {
+                    prompt: self.prompts.back().copied(),
                     command: command.clone(),
                     output: String::new(),
                     truncated: false,

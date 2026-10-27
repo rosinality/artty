@@ -30,6 +30,10 @@ use crate::terminal::{self, Metrics, hsla};
 
 #[path = "activity.rs"]
 mod activity;
+#[path = "copy_mode.rs"]
+mod copy_mode;
+#[path = "pane_actions.rs"]
+mod pane_actions;
 
 actions!(
     artty,
@@ -64,7 +68,23 @@ actions!(
         FindPrevious,
         IncreaseFontSize,
         DecreaseFontSize,
-        ResetFontSize
+        ResetFontSize,
+        JumpToPreviousPrompt,
+        JumpToNextPrompt,
+        CopyCommandOutput,
+        CopyMode,
+        ResizePaneLeft,
+        ResizePaneRight,
+        ResizePaneUp,
+        ResizePaneDown,
+        SwapPaneLeft,
+        SwapPaneRight,
+        SwapPaneUp,
+        SwapPaneDown,
+        EqualizePanes,
+        PaneToNewTab,
+        ToggleBroadcast,
+        ReopenClosedTab
     ]
 );
 
@@ -180,6 +200,19 @@ struct DraggedWorkspace {
 }
 
 impl Render for DraggedWorkspace {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        drag_preview(self.title.clone())
+    }
+}
+
+/// A split tab's pane being dragged by its sidebar line, to another tab.
+#[derive(Clone)]
+struct DraggedPane {
+    pane: PaneId,
+    title: SharedString,
+}
+
+impl Render for DraggedPane {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         drag_preview(self.title.clone())
     }
@@ -311,6 +344,10 @@ pub struct WindowView {
     picker: Option<Picker>,
     /// The Activity view, when it's shown instead of the active tab.
     activity: Option<activity::Activity>,
+    /// The pane in copy mode, if any.
+    copy_mode: Option<PaneId>,
+    /// A short message over the terminal, and when it appeared.
+    toast: Option<(SharedString, Instant)>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -354,6 +391,7 @@ impl WindowView {
 
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
+            this.update_secure_input(cx);
             // ⌘-Tab away and back: the key-up went elsewhere.
             this.command_held = false;
             if let Some(id) = this.window {
@@ -416,6 +454,8 @@ impl WindowView {
             closing_workspace: None,
             picker: None,
             activity: None,
+            copy_mode: None,
+            toast: None,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -873,6 +913,14 @@ impl WindowView {
         self.cursor_visible = true;
     }
 
+    /// Secure keyboard entry: on while it's set and an artty window is active.
+    fn update_secure_input(&self, cx: &App) {
+        crate::secure_input::set(
+            self.config.secure_keyboard_entry
+                && (self.window_active || cx.active_window().is_some()),
+        );
+    }
+
     fn focus_direction(&mut self, direction: Direction, cx: &mut Context<Self>) {
         let Some(from) = self.focused_id() else { return };
         if let Some(to) = layout::neighbor(&self.pane_rects, from, direction) {
@@ -1131,6 +1179,11 @@ impl WindowView {
         if self.showing_activity() {
             self.refresh_activity(cx);
         }
+        if self.toast.as_ref().is_some_and(|(_, shown)| shown.elapsed() >= pane_actions::TOAST_TIME)
+        {
+            self.toast = None;
+            cx.notify();
+        }
         let modified = config_modified();
         if modified != self.config_modified {
             self.config_modified = modified;
@@ -1153,6 +1206,10 @@ impl WindowView {
         self.metrics = Metrics::measure(window, &config, self.font_size);
         window.set_background_appearance(background_appearance(&config));
         self.config = Arc::new(config);
+        // The active window follows the setting (inactive ones leave it be).
+        if self.window_active {
+            crate::secure_input::set(self.config.secure_keyboard_entry);
+        }
     }
 
     /// Underline the link under the pointer while ⌘ is held.
@@ -1223,6 +1280,12 @@ impl WindowView {
         if self.showing_activity() {
             // Nothing typed here goes to a terminal.
             if self.activity_key(event, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.in_copy_mode(cx) {
+            if self.copy_mode_key(event, cx) {
                 cx.stop_propagation();
             }
             return;
@@ -1574,21 +1637,17 @@ impl WindowView {
         .detach();
     }
 
-    fn paste(&mut self, _: &Paste, _window: &mut Window, cx: &mut Context<Self>) {
+    fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
         if let Some(search) = self.search.as_mut() {
             search.query.push_str(text.lines().next().unwrap_or_default());
             self.run_search(true, true, cx);
             return;
         }
-        let Some(pane) = self.focused_id() else { return };
-        let bytes = if self.mode(pane, cx).contains(TermMode::BRACKETED_PASTE) {
-            // Strip any embedded end marker so pasted text can't escape the bracket.
-            format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", ""))
-        } else {
-            text.replace("\r\n", "\r").replace('\n', "\r")
-        };
-        self.input(bytes.into_bytes(), cx);
+        if self.in_copy_mode(cx) {
+            return;
+        }
+        self.paste_text(text, window, cx);
     }
 
     fn set_font_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
@@ -1766,6 +1825,11 @@ impl WindowView {
                         // otherwise lines as tall as a tab's.
                         .map(|d| if own_line { d.pl(px(14.)).text_size(px(11.5)) } else { d.h(px(22.)) })
                         .on_click(cx.listener(move |this, _, _, cx| this.focus_pane(id, cx)))
+                        // Dragged onto another tab, it moves there.
+                        .on_drag(
+                            DraggedPane { pane: id, title: title.clone().into() },
+                            |dragged, _, _, cx| cx.new(|_| dragged.clone()),
+                        )
                         .child(self.icon_cell(*state))
                         .child(
                             Self::one_line(title)
@@ -1816,6 +1880,14 @@ impl WindowView {
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                 this.move_tab(dragged.index, index, cx)
             }))
+            .drag_over::<DraggedPane>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
+            .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, cx| {
+                if let Some(&(workspace, tab)) = this.places.get(index) {
+                    this.send(ClientMessage::MovePane { pane: dragged.pane, workspace, tab }, cx);
+                }
+            }))
+            // Typing into every pane: an amber outline.
+            .when(tab.broadcast, |d| d.border_1().border_color(rgba(0xe0af6899)))
             .children(header)
             .children(pane_rows.into_iter().flatten())
     }
@@ -2687,7 +2759,10 @@ impl Render for WindowView {
 
         let tint =
             Hsla { a: self.config.background_opacity.clamp(0., 1.), ..hsla(self.theme.background) };
-        let divider_color: Hsla = rgba(0xffffff1c).into();
+        // A tab typing into every pane: amber dividers, no pane dimmed.
+        let broadcast = self.tabs.get(self.active).is_some_and(|t| t.broadcast);
+        let divider_color: Hsla =
+            if broadcast { rgba(0xe0af68cc).into() } else { rgba(0xffffff1c).into() };
         let metrics = self.metrics.clone();
         let marked_text = self
             .marked_text
@@ -2793,6 +2868,46 @@ impl Render for WindowView {
             }))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::paste))
+            .on_action(
+                cx.listener(|this, _: &JumpToPreviousPrompt, _, cx| this.jump_to_prompt(true, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &JumpToNextPrompt, _, cx| this.jump_to_prompt(false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &CopyCommandOutput, _, cx| this.copy_command_output(cx)),
+            )
+            .on_action(cx.listener(|this, _: &CopyMode, _, cx| this.toggle_copy_mode(cx)))
+            .on_action(
+                cx.listener(|this, _: &ResizePaneLeft, _, cx| {
+                    this.resize_pane(Direction::Left, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ResizePaneRight, _, cx| {
+                this.resize_pane(Direction::Right, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ResizePaneUp, _, cx| this.resize_pane(Direction::Up, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ResizePaneDown, _, cx| {
+                    this.resize_pane(Direction::Down, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &SwapPaneLeft, _, cx| this.swap_pane(Direction::Left, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SwapPaneRight, _, cx| this.swap_pane(Direction::Right, cx)),
+            )
+            .on_action(cx.listener(|this, _: &SwapPaneUp, _, cx| this.swap_pane(Direction::Up, cx)))
+            .on_action(
+                cx.listener(|this, _: &SwapPaneDown, _, cx| this.swap_pane(Direction::Down, cx)),
+            )
+            .on_action(cx.listener(|this, _: &EqualizePanes, _, cx| this.equalize_panes(cx)))
+            .on_action(cx.listener(|this, _: &PaneToNewTab, _, cx| this.pane_to_new_tab(cx)))
+            .on_action(cx.listener(|this, _: &ToggleBroadcast, _, cx| this.toggle_broadcast(cx)))
+            .on_action(cx.listener(|this, _: &ReopenClosedTab, _, cx| this.reopen_closed_tab(cx)))
             .on_action(cx.listener(|this, _: &Find, _, cx| this.open_search(cx)))
             .on_action(cx.listener(|this, _: &FindNext, _, cx| {
                 this.open_search(cx);
@@ -2883,7 +2998,7 @@ impl Render for WindowView {
                                                     marked_text: marked_text
                                                         .as_deref()
                                                         .filter(|_| view.focused),
-                                                    fade: if split && !view.focused {
+                                                    fade: if split && !view.focused && !broadcast {
                                                         UNFOCUSED_FADE
                                                     } else {
                                                         0.
@@ -2914,7 +3029,14 @@ impl Render for WindowView {
                                     .size_full(),
                                 )
                                 .children(self.divider_handles(container, cx))
-                                .children(self.search_bar(container)),
+                                .children(self.search_bar(container))
+                                .children(self.copy_mode_badge())
+                                .children(self.toast_overlay())
+                                .on_drop(cx.listener(
+                                    |this, paths: &gpui::ExternalPaths, window, cx| {
+                                        this.drop_paths(paths, window, cx)
+                                    },
+                                )),
                         )
                     }),
             )
@@ -2988,6 +3110,10 @@ impl EntityInputHandler for WindowView {
             self.run_search(true, true, cx);
             return;
         }
+        if self.in_copy_mode(cx) {
+            self.copy_mode_text(text, cx);
+            return;
+        }
         self.input(text.as_bytes().to_vec(), cx);
         cx.notify();
     }
@@ -3057,5 +3183,20 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-+", IncreaseFontSize, None),
         KeyBinding::new("cmd--", DecreaseFontSize, None),
         KeyBinding::new("cmd-0", ResetFontSize, None),
+        KeyBinding::new("cmd-up", JumpToPreviousPrompt, None),
+        KeyBinding::new("cmd-down", JumpToNextPrompt, None),
+        KeyBinding::new("cmd-alt-c", CopyCommandOutput, None),
+        KeyBinding::new("cmd-shift-c", CopyMode, None),
+        KeyBinding::new("ctrl-cmd-left", ResizePaneLeft, None),
+        KeyBinding::new("ctrl-cmd-right", ResizePaneRight, None),
+        KeyBinding::new("ctrl-cmd-up", ResizePaneUp, None),
+        KeyBinding::new("ctrl-cmd-down", ResizePaneDown, None),
+        KeyBinding::new("ctrl-cmd-shift-left", SwapPaneLeft, None),
+        KeyBinding::new("ctrl-cmd-shift-right", SwapPaneRight, None),
+        KeyBinding::new("ctrl-cmd-shift-up", SwapPaneUp, None),
+        KeyBinding::new("ctrl-cmd-shift-down", SwapPaneDown, None),
+        KeyBinding::new("ctrl-cmd-=", EqualizePanes, None),
+        KeyBinding::new("cmd-alt-i", ToggleBroadcast, None),
+        KeyBinding::new("cmd-shift-t", ReopenClosedTab, None),
     ]);
 }

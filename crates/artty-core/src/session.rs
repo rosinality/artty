@@ -20,6 +20,7 @@ use log::warn;
 
 use crate::frame::Frame;
 use crate::process::{ProcessInfo, ProcessProbe, path_from_file_url};
+use crate::protocol::{CopyModeOp, CopyMotion};
 use crate::shell::{CommandRecord, ShellEvent, ShellPhase, ShellTracker};
 use crate::theme::Theme;
 
@@ -166,8 +167,7 @@ impl Session {
     ) -> io::Result<Self> {
         let proxy = EventProxy { id, pty: Arc::new(OnceLock::new()), sink };
 
-        // Programs can opt into the kitty keyboard protocol (Shift+Enter etc.).
-        let mut config = Config { kitty_keyboard: true, ..Config::default() };
+        let mut config = term_config();
         if let Some(scrollback) = options.scrollback {
             config.scrolling_history = scrollback;
         }
@@ -264,7 +264,7 @@ impl Session {
         let SessionHandover { id, fd, pid, size, shell, reported_cwd, prompt_line } = handover;
         let redraw = snapshot.is_none();
         let proxy = EventProxy { id, pty: Arc::new(OnceLock::new()), sink };
-        let mut config = Config { kitty_keyboard: true, ..Config::default() };
+        let mut config = term_config();
         if let Some(scrollback) = options.scrollback {
             config.scrolling_history = scrollback;
         }
@@ -380,6 +380,141 @@ impl Session {
 
     pub fn clear_selection(&self) {
         self.term.lock().selection = None;
+    }
+
+    /// The shell prompt before (`older`) or after the stable line `from`.
+    fn prompt_near(&self, from: i64, older: bool) -> Option<u64> {
+        let prompts = &self.shell.prompts;
+        if older {
+            prompts.iter().rev().copied().find(|&p| (p as i64) < from)
+        } else {
+            prompts.iter().copied().find(|&p| (p as i64) > from)
+        }
+    }
+
+    /// Scroll the previous (`older`) or next shell prompt to the top of the
+    /// view; past the newest, back to the bottom. Returns whether it moved.
+    pub fn jump_to_prompt(&self, older: bool) -> bool {
+        let mut term = self.term.lock();
+        let scrolled = term.grid().lines_scrolled() as i64;
+        let offset = term.grid().display_offset() as i64;
+        let history = term.history_size() as i64;
+        let wanted = match self.prompt_near(scrolled - offset, older) {
+            // The display offset that puts that line at the top.
+            Some(prompt) => (scrolled - prompt as i64).clamp(0, history),
+            None if older => return false,
+            None => 0,
+        };
+        if wanted == offset {
+            return false;
+        }
+        term.scroll_display(Scroll::Delta((wanted - offset) as i32));
+        true
+    }
+
+    /// The command in view (the last one started at or above the top of a
+    /// view scrolled back), or else the last one: its command line and output.
+    pub fn command_output(&self) -> Option<(Option<String>, String)> {
+        let term = self.term.lock();
+        let offset = term.grid().display_offset() as i64;
+        let history = &self.shell.history;
+        let record = if offset == 0 {
+            history.back()
+        } else {
+            let top = term.grid().lines_scrolled() as i64 - offset;
+            history
+                .iter()
+                .rev()
+                .find(|r| r.prompt.is_some_and(|p| p as i64 <= top))
+                .or(history.front())
+        }?;
+        Some((record.command.clone(), record.output.clone()))
+    }
+
+    /// Copy mode: a keyboard cursor through the screen and history (the
+    /// terminal's vi mode), selecting from it.
+    pub fn copy_mode(&self, op: CopyModeOp) {
+        let mut term = self.term.lock();
+        let active = term.mode().contains(artty_vt::term::TermMode::VI);
+        match op {
+            CopyModeOp::Enter if !active => term.toggle_vi_mode(),
+            CopyModeOp::Exit if active => {
+                term.toggle_vi_mode();
+                term.selection = None;
+                term.scroll_display(Scroll::Bottom);
+            },
+            CopyModeOp::Select(kind) if active => {
+                let ty = match kind {
+                    1 => SelectionType::Lines,
+                    2 => SelectionType::Block,
+                    _ => SelectionType::Simple,
+                };
+                let point = term.vi_mode_cursor.point;
+                // As in vi: the same kind again ends it, another changes it.
+                match term.selection.as_mut().filter(|s| !s.is_empty()) {
+                    Some(selection) if selection.ty == ty => term.selection = None,
+                    Some(selection) => selection.ty = ty,
+                    None => term.selection = Some(Selection::new(ty, point, Side::Left)),
+                }
+                if let Some(selection) = term.selection.as_mut() {
+                    selection.include_all();
+                }
+            },
+            CopyModeOp::Move(motion) if active => self.copy_motion(&mut term, motion),
+            _ => {},
+        }
+    }
+
+    fn copy_motion(&self, term: &mut Term<EventProxy>, motion: CopyMotion) {
+        use artty_vt::vi_mode::ViMotion;
+        let vi = |term: &mut Term<EventProxy>, motion| term.vi_motion(motion);
+        let page = |term: &mut Term<EventProxy>, pages: f32| {
+            let lines = (term.screen_lines() as f32 * pages) as i32;
+            term.scroll_display(Scroll::Delta(lines));
+            term.vi_mode_cursor = term.vi_mode_cursor.scroll(term, lines);
+        };
+        match motion {
+            CopyMotion::Up => vi(term, ViMotion::Up),
+            CopyMotion::Down => vi(term, ViMotion::Down),
+            CopyMotion::Left => vi(term, ViMotion::Left),
+            CopyMotion::Right => vi(term, ViMotion::Right),
+            CopyMotion::LineStart => vi(term, ViMotion::First),
+            CopyMotion::LineEnd => vi(term, ViMotion::Last),
+            CopyMotion::FirstOccupied => vi(term, ViMotion::FirstOccupied),
+            CopyMotion::ScreenTop => vi(term, ViMotion::High),
+            CopyMotion::ScreenMiddle => vi(term, ViMotion::Middle),
+            CopyMotion::ScreenBottom => vi(term, ViMotion::Low),
+            CopyMotion::WordLeft => vi(term, ViMotion::SemanticLeft),
+            CopyMotion::WordRight => vi(term, ViMotion::SemanticRight),
+            CopyMotion::WordEnd => vi(term, ViMotion::SemanticRightEnd),
+            CopyMotion::BigWordLeft => vi(term, ViMotion::WordLeft),
+            CopyMotion::BigWordRight => vi(term, ViMotion::WordRight),
+            CopyMotion::BigWordEnd => vi(term, ViMotion::WordRightEnd),
+            CopyMotion::Bracket => vi(term, ViMotion::Bracket),
+            CopyMotion::ParagraphUp => vi(term, ViMotion::ParagraphUp),
+            CopyMotion::ParagraphDown => vi(term, ViMotion::ParagraphDown),
+            CopyMotion::Top => {
+                let top = term.topmost_line();
+                term.vi_goto_point(Point::new(top, Column(0)));
+            },
+            CopyMotion::Bottom => {
+                let bottom = term.bottommost_line();
+                term.vi_goto_point(Point::new(bottom, Column(0)));
+            },
+            CopyMotion::HalfPageUp => page(term, 0.5),
+            CopyMotion::HalfPageDown => page(term, -0.5),
+            CopyMotion::PageUp => page(term, 1.),
+            CopyMotion::PageDown => page(term, -1.),
+            CopyMotion::PromptUp | CopyMotion::PromptDown => {
+                let scrolled = term.grid().lines_scrolled() as i64;
+                let from = scrolled + i64::from(term.vi_mode_cursor.point.line.0);
+                let older = motion == CopyMotion::PromptUp;
+                if let Some(prompt) = self.prompt_near(from, older) {
+                    let line = (prompt as i64 - scrolled).max(i64::from(term.topmost_line().0));
+                    term.vi_goto_point(Point::new(Line(line as i32), Column(0)));
+                }
+            },
+        }
     }
 
     /// The selected text, or `None` if nothing is selected.
@@ -595,6 +730,19 @@ impl Session {
     }
 }
 
+/// Terminal options for every session: programs can opt into the kitty
+/// keyboard protocol (Shift+Enter etc.), and copy mode's cursor is a steady block.
+fn term_config() -> Config {
+    Config {
+        kitty_keyboard: true,
+        vi_mode_cursor_style: Some(artty_vt::ansi::CursorStyle {
+            shape: artty_vt::ansi::CursorShape::Block,
+            blinking: false,
+        }),
+        ..Config::default()
+    }
+}
+
 fn viewport_point<T>(term: &Term<T>, line: usize, column: usize) -> Point {
     let offset = term.grid().display_offset() as i32;
     let line = (line as i32).min(term.screen_lines() as i32 - 1) - offset;
@@ -681,6 +829,79 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         session
+    }
+
+    /// The text of a frame line, runs joined.
+    fn line_text(frame: &Frame, line: usize) -> String {
+        frame.lines[line].runs.iter().map(|run| run.text.as_str()).collect::<Vec<_>>().join(" ")
+    }
+
+    #[test]
+    fn prompts_command_output_and_copy_mode() {
+        // Three commands of three lines of output each, then a prompt:
+        // thirteen lines on a six-line screen.
+        let mut script = String::new();
+        for i in 1..=3 {
+            script.push_str(&format!(
+                "\\033]133;A\\007$ \\033]133;B\\007cmd{i}\\r\\n\\033]133;C\\007\
+                 out{i}a\\r\\nout{i}b\\r\\nout{i}c\\r\\n\\033]133;D;0\\007"
+            ));
+        }
+        script.push_str("\\033]133;A\\007$ ");
+        let size = TerminalSize { columns: 40, lines: 6, cell_width: 8, cell_height: 16 };
+        let options = SessionOptions {
+            command: Some(("/usr/bin/printf".into(), vec![script])),
+            ..Default::default()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let sink: Arc<dyn Fn(SessionId, Event) + Send + Sync> =
+            Arc::new(move |_, event| drop(tx.lock().unwrap().send(event)));
+        let mut session =
+            Session::spawn(1, options, size, Arc::new(Theme::default()), sink).unwrap();
+        // The marks come as events, handled as the server would.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while session.shell.prompts.len() < 4 && std::time::Instant::now() < deadline {
+            if let Ok(event) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                session.handle(event);
+            }
+        }
+        assert_eq!(session.shell.prompts.len(), 4);
+        // At the bottom: the last command.
+        assert_eq!(
+            session.command_output(),
+            Some((Some("cmd3".into()), "out3a\nout3b\nout3c".into()))
+        );
+
+        // cmd3's prompt is on screen already, so back goes to cmd2's, then cmd1's.
+        assert!(session.jump_to_prompt(true));
+        assert!(line_text(&session.frame(), 0).contains("cmd2"));
+        assert_eq!(
+            session.command_output(),
+            Some((Some("cmd2".into()), "out2a\nout2b\nout2c".into()))
+        );
+        assert!(session.jump_to_prompt(true));
+        assert!(line_text(&session.frame(), 0).contains("cmd1"));
+        assert!(!session.jump_to_prompt(true));
+        // Forward: cmd2's, then the bottom (cmd3's can't reach the top).
+        assert!(session.jump_to_prompt(false));
+        assert!(line_text(&session.frame(), 0).contains("cmd2"));
+        assert!(session.jump_to_prompt(false));
+        assert!(!session.jump_to_prompt(false));
+
+        // Copy mode: up to cmd2's prompt, select its line, copy it.
+        session.copy_mode(CopyModeOp::Enter);
+        assert!(session.mode().contains(artty_vt::term::TermMode::VI));
+        session.copy_mode(CopyModeOp::Move(CopyMotion::PromptUp));
+        session.copy_mode(CopyModeOp::Move(CopyMotion::PromptUp));
+        session.copy_mode(CopyModeOp::Select(1));
+        assert_eq!(session.selection_text().as_deref(), Some("$ cmd2\n"));
+        session.copy_mode(CopyModeOp::Move(CopyMotion::Down));
+        session.copy_mode(CopyModeOp::Select(0));
+        assert_eq!(session.selection_text().as_deref(), Some("$ cmd2\no"));
+        session.copy_mode(CopyModeOp::Exit);
+        assert!(!session.mode().contains(artty_vt::term::TermMode::VI));
+        assert_eq!(session.selection_text(), None);
     }
 
     #[test]
