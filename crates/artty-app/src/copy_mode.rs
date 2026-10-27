@@ -169,15 +169,15 @@ impl WindowView {
                 .px_3()
                 .py(px(4.))
                 .rounded(px(8.))
-                .bg(rgba(0x1e2430f2))
+                .bg(ui(0x1e2430f2))
                 .border_1()
-                .border_color(rgba(0x8fb4ff66))
+                .border_color(ui(0x8fb4ff66))
                 .shadow_md()
                 .text_size(px(11.5))
-                .child(div().text_color(rgba(0x8fb4ffff)).child("Copy mode"))
+                .child(div().text_color(ui(0x8fb4ffff)).child("Copy mode"))
                 .child(
                     div()
-                        .text_color(rgba(0xffffff80))
+                        .text_color(ui(0xffffff80))
                         .child("hjkl move · v select · y copy · [ ] prompts · / find · esc"),
                 ),
         )

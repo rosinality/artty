@@ -174,7 +174,8 @@ pub struct ThemePreset {
     pub palette: [&'static str; 16],
 }
 
-/// Dark themes (the window chrome is dark). "artty" is the built-in default.
+/// Themes to choose from (dark, then light: the app's own colors follow).
+/// "artty" is the built-in default.
 pub const THEMES: &[ThemePreset] = &[
     ThemePreset {
         name: "Tokyo Night",
@@ -218,6 +219,28 @@ pub const THEMES: &[ThemePreset] = &[
         palette: [
             "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
             "#586e75", "#cb4b16", "#93a1a1", "#839496", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+        ],
+    },
+    ThemePreset {
+        name: "Solarized Light",
+        foreground: "#657b83",
+        background: "#fdf6e3",
+        cursor: "#586e75",
+        selection: "#eee8d5",
+        palette: [
+            "#073642", "#dc322f", "#859900", "#b58900", "#268bd2", "#d33682", "#2aa198", "#eee8d5",
+            "#002b36", "#cb4b16", "#586e75", "#657b83", "#839496", "#6c71c4", "#93a1a1", "#fdf6e3",
+        ],
+    },
+    ThemePreset {
+        name: "GitHub Light",
+        foreground: "#24292f",
+        background: "#ffffff",
+        cursor: "#0969da",
+        selection: "#ddf4ff",
+        palette: [
+            "#24292f", "#cf222e", "#116329", "#4d2d00", "#0969da", "#8250df", "#1b7c83", "#6e7781",
+            "#57606a", "#a40e26", "#1a7f37", "#633c01", "#218bff", "#a475f9", "#3192aa", "#8c959f",
         ],
     },
 ];

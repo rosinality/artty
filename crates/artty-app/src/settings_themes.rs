@@ -26,11 +26,7 @@ impl Settings {
         let name = theme.name.clone();
         self.edit(cx, |file| file.set_colors(theme));
         if self.status.is_none() {
-            self.status = Some(if theme_import::is_light(theme) {
-                format!("Theme: {name} (a light one: artty's window and sidebar stay dark)")
-            } else {
-                format!("Theme: {name}")
-            });
+            self.status = Some(format!("Theme: {name}"));
         }
         self.chosen_theme = Some(name);
     }
@@ -91,8 +87,8 @@ impl Settings {
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().text_color(rgba(0xffffffee)).child("From another terminal"))
-                    .child(div().text_size(px(11.)).text_color(rgba(0xffffff70)).child(
+                    .child(div().text_color(ui(0xffffffee)).child("From another terminal"))
+                    .child(div().text_size(px(11.)).text_color(ui(0xffffff70)).child(
                         "iTerm2, Ghostty, kitty, Alacritty, WezTerm or Windows Terminal: \
                          choose a theme file, or drop it here",
                     )),
@@ -115,9 +111,7 @@ impl Settings {
                     .px_3()
                     .py(px(6.))
                     .child(
-                        div()
-                            .text_color(rgba(0xffffffee))
-                            .child(format!("Ghostty's theme: {name}")),
+                        div().text_color(ui(0xffffffee)).child(format!("Ghostty's theme: {name}")),
                     )
                     .child(
                         Self::form_button(
@@ -152,7 +146,7 @@ impl Settings {
                 .gap_2()
                 .px_3()
                 .pt(px(6.))
-                .child(div().flex_none().text_color(rgba(0xffffffee)).child("Ghostty's themes"))
+                .child(div().flex_none().text_color(ui(0xffffffee)).child("Ghostty's themes"))
                 .child(
                     div()
                         .id("theme-filter")
@@ -160,13 +154,13 @@ impl Settings {
                         .px_2()
                         .py(px(3.))
                         .rounded(px(5.))
-                        .bg(rgba(0x0000004d))
+                        .bg(ui(0x0000004d))
                         .border_1()
-                        .border_color(if focused { rgba(0x8fb4ff99) } else { rgba(0xffffff1a) })
+                        .border_color(if focused { ui(0x8fb4ff99) } else { ui(0xffffff1a) })
                         .text_color(if self.theme_filter.is_empty() {
-                            rgba(0xffffff40)
+                            ui(0xffffff40)
                         } else {
-                            rgba(0xffffffee)
+                            ui(0xffffffee)
                         })
                         .child(match (self.theme_filter.is_empty(), focused) {
                             (true, _) => format!("Filter {} themes", themes.len()),
@@ -200,8 +194,8 @@ impl Settings {
                     .px_2()
                     .py(px(3.))
                     .rounded(px(5.))
-                    .when(chosen, |d| d.bg(rgba(0x3478f6ff)))
-                    .when(!chosen, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
+                    .when(chosen, |d| d.bg(ui(0x3478f6ff)))
+                    .when(!chosen, |d| d.hover(|d| d.bg(ui(0xffffff10))))
                     .child(
                         div()
                             .flex_none()
@@ -231,7 +225,7 @@ impl Settings {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_color(rgba(0xffffffd8))
+                            .text_color(ui(0xffffffd8))
                             .child(theme.name.clone()),
                     )
                     .when(theme_import::is_light(theme), |d| {
@@ -239,7 +233,7 @@ impl Settings {
                             div()
                                 .flex_none()
                                 .text_size(px(10.5))
-                                .text_color(rgba(0xffffff60))
+                                .text_color(ui(0xffffff60))
                                 .child("light"),
                         )
                     })

@@ -61,12 +61,12 @@ impl WindowView {
                     .px_3()
                     .py(px(5.))
                     .rounded(px(8.))
-                    .bg(rgba(0x1e2430f2))
+                    .bg(ui(0x1e2430f2))
                     .border_1()
-                    .border_color(rgba(0xffffff24))
+                    .border_color(ui(0xffffff24))
                     .shadow_md()
                     .text_size(px(12.))
-                    .text_color(rgba(0xffffffd0))
+                    .text_color(ui(0xffffffd0))
                     .child(message.clone()),
             ),
         )

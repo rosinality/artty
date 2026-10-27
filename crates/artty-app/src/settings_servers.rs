@@ -29,8 +29,8 @@ impl Settings {
                 .id("add-server")
                 .px_3()
                 .py(px(8.))
-                .text_color(rgba(0x8fb4ffff))
-                .hover(|d| d.bg(rgba(0xffffff08)))
+                .text_color(ui(0x8fb4ffff))
+                .hover(|d| d.bg(ui(0xffffff08)))
                 .child("Add a server…")
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.commit_editing(cx);
@@ -59,17 +59,17 @@ impl Settings {
             .px_3()
             .py(px(8.))
             .border_b_1()
-            .border_color(rgba(0xffffff0d))
+            .border_color(ui(0xffffff0d))
             .child(
                 div()
                     .flex()
                     .flex_col()
                     .min_w_0()
-                    .child(div().text_color(rgba(0xffffffee)).child(server.name.clone()))
+                    .child(div().text_color(ui(0xffffffee)).child(server.name.clone()))
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(rgba(0xffffff70))
+                            .text_color(ui(0xffffff70))
                             .overflow_hidden()
                             .text_ellipsis()
                             .child(how),
@@ -106,21 +106,17 @@ impl Settings {
                 .flex()
                 .items_center()
                 .gap_3()
-                .child(div().w(px(90.)).flex_none().text_color(rgba(0xffffffb0)).child(label))
+                .child(div().w(px(90.)).flex_none().text_color(ui(0xffffffb0)).child(label))
                 .child(
                     div()
                         .flex_1()
                         .px_2()
                         .py(px(3.))
                         .rounded(px(5.))
-                        .bg(rgba(0x0000004d))
+                        .bg(ui(0x0000004d))
                         .border_1()
-                        .border_color(if focused { rgba(0x8fb4ff99) } else { rgba(0xffffff1a) })
-                        .text_color(if text.is_empty() {
-                            rgba(0xffffff40)
-                        } else {
-                            rgba(0xffffffee)
-                        })
+                        .border_color(if focused { ui(0x8fb4ff99) } else { ui(0xffffff1a) })
+                        .text_color(if text.is_empty() { ui(0xffffff40) } else { ui(0xffffffee) })
                         .child(match (text.is_empty(), focused) {
                             (true, _) => hint.to_owned(),
                             (false, true) => format!("{text}▏"),
@@ -144,12 +140,12 @@ impl Settings {
             .child(field(0, "Name", &adding.name, "devbox"))
             .child(field(1, "SSH", &adding.ssh, "user@host, or a Host from ~/.ssh/config"))
             .child(
-                div().text_size(px(11.)).text_color(rgba(0xffffff70)).child(
+                div().text_size(px(11.)).text_color(ui(0xffffff70)).child(
                     "artty must be installed there; ssh uses your keys (no password prompts).",
                 ),
             )
             .when_some(adding.error.clone(), |d, error| {
-                d.child(div().text_size(px(12.)).text_color(rgba(0xf7768eff)).child(error))
+                d.child(div().text_size(px(12.)).text_color(ui(0xf7768eff)).child(error))
             })
             .child(
                 div()
@@ -192,9 +188,9 @@ impl Settings {
             .px(px(10.))
             .py(px(3.))
             .rounded(px(6.))
-            .bg(if primary { rgba(0x3478f6ff) } else { rgba(0xffffff14) })
-            .hover(|d| d.bg(if primary { rgba(0x4a88ffff) } else { rgba(0xffffff26) }))
-            .text_color(rgba(0xffffffe0))
+            .bg(if primary { ui(0x3478f6ff) } else { ui(0xffffff14) })
+            .hover(|d| d.bg(if primary { ui(0x4a88ffff) } else { ui(0xffffff26) }))
+            .text_color(ui(0xffffffe0))
             .child(label)
     }
 

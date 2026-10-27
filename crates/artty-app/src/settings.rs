@@ -6,9 +6,10 @@ use artty_core::{Config, CursorStyle};
 use gpui::{
     AnyElement, App, AppContext, Bounds, Context, ElementId, FocusHandle, FontWeight, Hsla,
     SharedString, TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions, div, point,
-    prelude::*, px, rgba, size,
+    prelude::*, px, size,
 };
 
+use crate::chrome::ui;
 use crate::hooks::{self, Status};
 
 #[path = "settings_keys.rs"]
@@ -235,10 +236,10 @@ impl Settings {
             .flex_none()
             .rounded_full()
             .p(px(2.))
-            .bg(if on { rgba(0x3478f6ff) } else { rgba(0xffffff26) })
+            .bg(if on { ui(0x3478f6ff) } else { ui(0xffffff26) })
             .flex()
             .when(on, |d| d.justify_end())
-            .child(div().size(px(18.)).rounded_full().bg(rgba(0xffffffff)).shadow_sm())
+            .child(div().size(px(18.)).rounded_full().bg(ui(0xffffffff)).shadow_sm())
             .on_click(
                 cx.listener(move |this, _, _, cx| this.edit(cx, |file| file.set_bool(key, !on))),
             )
@@ -348,15 +349,15 @@ impl Settings {
             .items_center()
             .justify_center()
             .rounded(px(5.))
-            .text_color(rgba(0xffffffee))
+            .text_color(ui(0xffffffee))
             .map(|d| match editing {
                 Some(editing) => {
-                    d.bg(rgba(0x0000004d)).border_1().border_color(rgba(0x8fb4ffcc)).child(
+                    d.bg(ui(0x0000004d)).border_1().border_color(ui(0x8fb4ffcc)).child(
                         if editing.fresh {
                             div()
                                 .px(px(1.))
                                 .rounded(px(2.))
-                                .bg(rgba(0x3478f6ff))
+                                .bg(ui(0x3478f6ff))
                                 .child(editing.text.clone())
                         } else {
                             div().child(format!("{}▏", editing.text))
@@ -364,7 +365,7 @@ impl Settings {
                     )
                 },
                 None => {
-                    d.cursor_text().hover(|d| d.bg(rgba(0xffffff12))).child(format(value)).on_click(
+                    d.cursor_text().hover(|d| d.bg(ui(0xffffff12))).child(format(value)).on_click(
                         cx.listener(move |this, _, window, cx| {
                             this.start_editing(&number, window, cx)
                         }),
@@ -382,9 +383,9 @@ impl Settings {
                 .items_center()
                 .justify_center()
                 .rounded(px(6.))
-                .text_color(if enabled { rgba(0xffffffdd) } else { rgba(0xffffff40) })
+                .text_color(if enabled { ui(0xffffffdd) } else { ui(0xffffff40) })
                 .when(enabled, |d| {
-                    d.hover(|d| d.bg(rgba(0xffffff1a))).on_click(cx.listener(
+                    d.hover(|d| d.bg(ui(0xffffff1a))).on_click(cx.listener(
                         move |this, _, _, cx| {
                             this.editing = None;
                             this.edit(cx, |file| {
@@ -405,7 +406,7 @@ impl Settings {
             .gap_1()
             .px_1()
             .rounded(px(8.))
-            .bg(rgba(0xffffff12))
+            .bg(ui(0xffffff12))
             .child(button("−", value - step, cx))
             .child(field)
             .child(button("+", value + step, cx))
@@ -424,9 +425,9 @@ impl Settings {
             .px_3()
             .py(px(4.))
             .rounded(px(7.))
-            .bg(rgba(0xffffff1a))
-            .hover(|d| d.bg(rgba(0xffffff2a)))
-            .text_color(rgba(0xffffffee))
+            .bg(ui(0xffffff1a))
+            .hover(|d| d.bg(ui(0xffffff2a)))
+            .text_color(ui(0xffffffee))
             .child(label)
             .on_click(cx.listener(move |this, _, _, cx| action(this, cx)))
             .into_any_element()
@@ -447,9 +448,9 @@ impl Settings {
                 .px_2()
                 .py(px(4.))
                 .rounded(px(6.))
-                .when(selected, |d| d.bg(rgba(0x3478f6ff)))
-                .when(!selected, |d| d.hover(|d| d.bg(rgba(0xffffff1a))))
-                .text_color(rgba(0xffffffee))
+                .when(selected, |d| d.bg(ui(0x3478f6ff)))
+                .when(!selected, |d| d.hover(|d| d.bg(ui(0xffffff1a))))
+                .text_color(ui(0xffffffee))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.edit(cx, |file| file.set_string("sidebar-style", style.name()))
@@ -460,7 +461,7 @@ impl Settings {
             .gap(px(2.))
             .p(px(2.))
             .rounded(px(8.))
-            .bg(rgba(0xffffff12))
+            .bg(ui(0xffffff12))
             .children(options)
             .into_any_element()
     }
@@ -471,12 +472,12 @@ impl Settings {
         let options = CursorStyle::ALL.map(|style| {
             let selected = style == current;
             let glyph = div().w(px(9.)).h(px(15.)).map(|d| match style {
-                CursorStyle::Block => d.bg(rgba(0xffffffdd)),
-                CursorStyle::Bar => d.child(div().w(px(2.)).h_full().bg(rgba(0xffffffdd))),
+                CursorStyle::Block => d.bg(ui(0xffffffdd)),
+                CursorStyle::Bar => d.child(div().w(px(2.)).h_full().bg(ui(0xffffffdd))),
                 CursorStyle::Underline => {
-                    d.flex().items_end().child(div().w_full().h(px(2.)).bg(rgba(0xffffffdd)))
+                    d.flex().items_end().child(div().w_full().h(px(2.)).bg(ui(0xffffffdd)))
                 },
-                CursorStyle::Hollow => d.border_1().border_color(rgba(0xffffffdd)),
+                CursorStyle::Hollow => d.border_1().border_color(ui(0xffffffdd)),
             });
             let label = match style {
                 CursorStyle::Block => "Block",
@@ -492,9 +493,9 @@ impl Settings {
                 .px_2()
                 .py(px(4.))
                 .rounded(px(6.))
-                .when(selected, |d| d.bg(rgba(0x3478f6ff)))
-                .when(!selected, |d| d.hover(|d| d.bg(rgba(0xffffff1a))))
-                .text_color(rgba(0xffffffee))
+                .when(selected, |d| d.bg(ui(0x3478f6ff)))
+                .when(!selected, |d| d.hover(|d| d.bg(ui(0xffffff1a))))
+                .text_color(ui(0xffffffee))
                 .child(glyph)
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -506,7 +507,7 @@ impl Settings {
             .gap(px(2.))
             .p(px(2.))
             .rounded(px(8.))
-            .bg(rgba(0xffffff12))
+            .bg(ui(0xffffff12))
             .children(options)
             .into_any_element()
     }
@@ -519,11 +520,11 @@ impl Settings {
             .map(|agent| {
                 let status = agent.status();
                 let (label, color) = match &status {
-                    Status::Installed => ("Installed", rgba(0x9ece6aff)),
-                    Status::Outdated => ("Outdated", rgba(0xe0af68ff)),
-                    Status::NotInstalled => ("Not installed", rgba(0xffffff80)),
-                    Status::AgentNotFound => ("Agent not found", rgba(0xffffff50)),
-                    Status::Error(_) => ("Can't read settings", rgba(0xf7768eff)),
+                    Status::Installed => ("Installed", ui(0x9ece6aff)),
+                    Status::Outdated => ("Outdated", ui(0xe0af68ff)),
+                    Status::NotInstalled => ("Not installed", ui(0xffffff80)),
+                    Status::AgentNotFound => ("Agent not found", ui(0xffffff50)),
+                    Status::Error(_) => ("Can't read settings", ui(0xf7768eff)),
                 };
                 let id = agent.id;
                 let install = |label: &'static str, cx: &mut Context<Self>| {
@@ -590,9 +591,9 @@ impl Settings {
                 .overflow_y_scroll()
                 .p(px(4.))
                 .rounded(px(8.))
-                .bg(rgba(0x262a33fa))
+                .bg(ui(0x262a33fa))
                 .border_1()
-                .border_color(rgba(0xffffff26))
+                .border_color(ui(0xffffff26))
                 .shadow_lg()
                 .occlude()
                 .children(self.fonts.iter().enumerate().map(|(i, font)| {
@@ -604,8 +605,8 @@ impl Settings {
                         .py(px(3.))
                         .rounded(px(5.))
                         .font_family(SharedString::from(font.clone()))
-                        .text_color(if selected { rgba(0x8fb4ffff) } else { rgba(0xffffffdd) })
-                        .hover(|d| d.bg(rgba(0x3478f6ff)).text_color(rgba(0xffffffff)))
+                        .text_color(if selected { ui(0x8fb4ffff) } else { ui(0xffffffdd) })
+                        .hover(|d| d.bg(ui(0x3478f6ff)).text_color(ui(0xffffffff)))
                         .child(font.clone())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.font_menu = false;
@@ -628,11 +629,11 @@ impl Settings {
                     .px_3()
                     .py(px(4.))
                     .rounded(px(7.))
-                    .bg(rgba(0xffffff1a))
-                    .hover(|d| d.bg(rgba(0xffffff2a)))
-                    .text_color(rgba(0xffffffee))
+                    .bg(ui(0xffffff1a))
+                    .hover(|d| d.bg(ui(0xffffff2a)))
+                    .text_color(ui(0xffffffee))
                     .child(current)
-                    .child(div().text_color(rgba(0xffffff80)).child("▾"))
+                    .child(div().text_color(ui(0xffffff80)).child("▾"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.font_menu = !this.font_menu;
                         cx.notify();
@@ -667,8 +668,8 @@ impl Settings {
                 .p(px(6.))
                 .rounded(px(8.))
                 .border_2()
-                .border_color(if selected { rgba(0x3478f6ff) } else { rgba(0x00000000) })
-                .hover(|d| d.bg(rgba(0xffffff10)))
+                .border_color(if selected { ui(0x3478f6ff) } else { ui(0x00000000) })
+                .hover(|d| d.bg(ui(0xffffff10)))
                 .child(
                     div()
                         .w(px(84.))
@@ -684,7 +685,7 @@ impl Settings {
                                 .map(|i| div().size(px(8.)).rounded_full().bg(color(&palette[i]))),
                         ),
                 )
-                .child(div().text_size(px(11.5)).text_color(rgba(0xffffffcc)).child(name))
+                .child(div().text_size(px(11.5)).text_color(ui(0xffffffcc)).child(name))
                 .on_click(
                     cx.listener(move |this, _, _, cx| this.edit(cx, |file| file.set_theme(preset))),
                 )
@@ -725,7 +726,7 @@ impl Settings {
                     .px_1()
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgba(0xffffff70))
+                    .text_color(ui(0xffffff70))
                     .child(title.to_uppercase()),
             )
             .child(
@@ -733,9 +734,9 @@ impl Settings {
                     .flex()
                     .flex_col()
                     .rounded(px(10.))
-                    .bg(rgba(0xffffff0d))
+                    .bg(ui(0xffffff0d))
                     .border_1()
-                    .border_color(rgba(0xffffff12))
+                    .border_color(ui(0xffffff12))
                     .children(rows),
             )
             .into_any_element()
@@ -750,14 +751,14 @@ impl Settings {
             .px_3()
             .py(px(8.))
             .border_b_1()
-            .border_color(rgba(0xffffff0d))
+            .border_color(ui(0xffffff0d))
             .child(
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().text_color(rgba(0xffffffee)).child(label))
+                    .child(div().text_color(ui(0xffffffee)).child(label))
                     .when_some(hint, |d, hint| {
-                        d.child(div().text_size(px(11.)).text_color(rgba(0xffffff70)).child(hint))
+                        d.child(div().text_size(px(11.)).text_color(ui(0xffffff70)).child(hint))
                     }),
             )
             .child(control)
@@ -768,6 +769,7 @@ impl Settings {
 impl Render for Settings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = self.config.clone();
+        crate::chrome::follow(c.theme().background);
         let tint = Hsla { a: 0.88, ..hsla(c.theme().background) };
         let page = self.page;
         let imports =
@@ -955,7 +957,7 @@ impl Render for Settings {
                 .pt_2()
                 .pb_1()
                 .text_size(px(11.5))
-                .text_color(rgba(0xffffff80))
+                .text_color(ui(0xffffff80))
                 .child("Status hooks let agents tell artty when they're working, need you, or are done, and which conversation to resume.")
                 .into_any_element(),
         ];
@@ -980,10 +982,8 @@ impl Render for Settings {
                 .px(px(10.))
                 .py(px(4.))
                 .rounded(px(6.))
-                .when(p == page, |d| d.bg(rgba(0xffffff26)).text_color(rgba(0xffffffee)))
-                .when(p != page, |d| {
-                    d.text_color(rgba(0xffffffa0)).hover(|d| d.bg(rgba(0xffffff12)))
-                })
+                .when(p == page, |d| d.bg(ui(0xffffff26)).text_color(ui(0xffffffee)))
+                .when(p != page, |d| d.text_color(ui(0xffffffa0)).hover(|d| d.bg(ui(0xffffff12))))
                 .child(p.name())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.commit_editing(cx);
@@ -999,7 +999,7 @@ impl Render for Settings {
                 keys,
                 div()
                     .text_size(px(11.5))
-                    .text_color(rgba(0xffffff70))
+                    .text_color(ui(0xffffff70))
                     .child(
                         "Several keys pressed in turn make a sequence (⌘E then 1). They're \
                          saved in [keys] of the config file, which also takes Ghostty's way \
@@ -1031,7 +1031,7 @@ impl Render for Settings {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(rgba(0xffffffb8))
+                    .text_color(ui(0xffffffb8))
                     .child("Settings"),
             )
             .child(div().flex_none().flex().justify_center().gap_1().pb_3().children(tabs))
@@ -1046,10 +1046,10 @@ impl Render for Settings {
                     .flex_col()
                     .gap_4()
                     .when_some(self.error.clone(), |d, error| {
-                        d.child(div().text_size(px(12.)).text_color(rgba(0xf7768eff)).child(format!("Config error: {error}")))
+                        d.child(div().text_size(px(12.)).text_color(ui(0xf7768eff)).child(format!("Config error: {error}")))
                     })
                     .when_some(self.status.clone(), |d, status| {
-                        d.child(div().text_size(px(12.)).text_color(rgba(0xffffffb0)).child(status))
+                        d.child(div().text_size(px(12.)).text_color(ui(0xffffffb0)).child(status))
                     })
                     .children(content),
             )

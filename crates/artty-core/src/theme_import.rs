@@ -265,8 +265,7 @@ fn lines(text: &str) -> ImportedTheme {
     theme
 }
 
-/// A light theme (its background bright): artty's window is dark, its
-/// sidebar's text light.
+/// A light theme (its background bright).
 pub fn is_light(theme: &ImportedTheme) -> bool {
     theme.background.is_some_and(|c| {
         0.2126 * f32::from(c.r) + 0.7152 * f32::from(c.g) + 0.0722 * f32::from(c.b) > 140.

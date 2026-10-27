@@ -24,6 +24,7 @@ use gpui::{
 };
 
 use crate::app_state::{self, Shared};
+use crate::chrome::ui;
 use crate::ids::{self, LOCAL, ServerId};
 use crate::keys;
 use crate::mouse::{self, Action, Button};
@@ -256,11 +257,11 @@ fn drag_preview(title: SharedString) -> gpui::Div {
         .px_3()
         .py_1()
         .rounded(px(7.))
-        .bg(rgba(0x2a3140f0))
+        .bg(ui(0x2a3140f0))
         .border_1()
-        .border_color(rgba(0xffffff30))
+        .border_color(ui(0xffffff30))
         .text_size(px(12.5))
-        .text_color(rgba(0xffffffee))
+        .text_color(ui(0xffffffee))
         .font_family(".SystemUIFont")
         .child(title)
 }
@@ -1019,20 +1020,20 @@ impl WindowView {
                     .h(px(30.))
                     .px(px(10.))
                     .rounded(px(6.))
-                    .when(i == picker.selected, |d| d.bg(rgba(0x3478f6ff)))
-                    .when(i != picker.selected, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
+                    .when(i == picker.selected, |d| d.bg(ui(0x3478f6ff)))
+                    .when(i != picker.selected, |d| d.hover(|d| d.bg(ui(0xffffff10))))
                     .child(self.icon(icon))
                     .child(
                         Self::one_line(workspace.title.clone())
                             .flex_1()
                             .min_w_0()
-                            .text_color(rgba(0xffffffee)),
+                            .text_color(ui(0xffffffee)),
                     )
                     .child(
                         div()
                             .flex_none()
                             .text_size(px(11.5))
-                            .text_color(rgba(0xffffff80))
+                            .text_color(ui(0xffffff80))
                             .child(format!("{tabs} · {place}")),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1057,9 +1058,9 @@ impl WindowView {
             .gap(px(2.))
             .p(px(6.))
             .rounded(px(10.))
-            .bg(rgba(0x262a33f8))
+            .bg(ui(0x262a33f8))
             .border_1()
-            .border_color(rgba(0xffffff26))
+            .border_color(ui(0xffffff26))
             .shadow_lg()
             .text_size(px(13.))
             .child(
@@ -1068,11 +1069,11 @@ impl WindowView {
                     .py(px(7.))
                     .mb(px(4.))
                     .rounded(px(6.))
-                    .bg(rgba(0x0000004d))
+                    .bg(ui(0x0000004d))
                     .text_color(if picker.query.is_empty() && marked.is_empty() {
-                        rgba(0xffffff60)
+                        ui(0xffffff60)
                     } else {
-                        rgba(0xffffffee)
+                        ui(0xffffffee)
                     })
                     .child(if picker.query.is_empty() && marked.is_empty() {
                         "Open workspace…".to_owned()
@@ -1086,7 +1087,7 @@ impl WindowView {
                     div()
                         .px(px(10.))
                         .py(px(6.))
-                        .text_color(rgba(0xffffff70))
+                        .text_color(ui(0xffffff70))
                         .child("No other workspaces"),
                 )
             });
@@ -1951,7 +1952,7 @@ impl WindowView {
 
     /// A status icon: `busy`, `waiting`, `attention`, `done`, `failed`.
     fn icon(&self, icon: &str) -> gpui::Div {
-        let color = |hex: u32| -> Hsla { rgba(hex).into() };
+        let color = |hex: u32| -> Hsla { ui(hex).into() };
         // Braille spinner frames are tiny at text size.
         let icon: Option<(SharedString, Hsla, f32)> = match icon {
             "busy" => Some((SPINNER[self.spinner_frame].into(), color(0x8fb4ffff), 16.)),
@@ -2039,7 +2040,7 @@ impl WindowView {
         let attention = states.iter().flatten().any(|s| s.info.needs_attention);
         let label: SharedString =
             if index < 9 { format!("⌘{}", index + 1).into() } else { "".into() };
-        let text_color = if selected { rgba(0xffffffee) } else { rgba(0xffffffb0) };
+        let text_color = if selected { ui(0xffffffee) } else { ui(0xffffffb0) };
         let group: SharedString = format!("tab-row-{index}").into();
         let renaming = self.renaming.as_ref().filter(|r| r.target == RenameTarget::Tab(index));
         // A split tab lists its panes, a line each, so every agent's state is
@@ -2071,10 +2072,10 @@ impl WindowView {
                             .min_w_0()
                             .px_1()
                             .rounded(px(4.))
-                            .bg(rgba(0x0000004d))
+                            .bg(ui(0x0000004d))
                             .border_1()
-                            .border_color(rgba(0x8fb4ff99))
-                            .text_color(rgba(0xffffffee))
+                            .border_color(ui(0x8fb4ff99))
+                            .text_color(ui(0xffffffee))
                             .child(format!("{}{marked}▏", renaming.text))
                     },
                     None => Self::one_line(self.tab_title(tab, cx))
@@ -2111,7 +2112,7 @@ impl WindowView {
                         .items_center()
                         .gap(px(6.))
                         .rounded(px(5.))
-                        .hover(|d| d.bg(rgba(0xffffff0c)))
+                        .hover(|d| d.bg(ui(0xffffff0c)))
                         // Under the tab's own line, indented and smaller;
                         // otherwise lines as tall as a tab's.
                         .map(|d| if own_line { d.pl(px(14.)).text_size(px(11.5)) } else { d.h(px(22.)) })
@@ -2126,7 +2127,7 @@ impl WindowView {
                             Self::one_line(title)
                                 .flex_1()
                                 .min_w_0()
-                                .text_color(if is_focused { text_color } else { rgba(0xffffff80) })
+                                .text_color(if is_focused { text_color } else { ui(0xffffff80) })
                                 .when(pane_attention, |d| d.font_weight(FontWeight::SEMIBOLD)),
                         )
                         .child(self.tab_end(index, &group, controls, detail, cx))
@@ -2146,10 +2147,10 @@ impl WindowView {
             .when(selected, |d| match self.tab_color(index) {
                 // A colored workspace tints its selected tab.
                 Some(color) => d.bg(rgba(color << 8 | 0x33)),
-                None => d.bg(rgba(0xffffff1c)),
+                None => d.bg(ui(0xffffff1c)),
             })
-            .when(attention && !selected, |d| d.bg(rgba(0xe0af6814)))
-            .hover(|d| d.bg(rgba(0xffffff10)))
+            .when(attention && !selected, |d| d.bg(ui(0xe0af6814)))
+            .hover(|d| d.bg(ui(0xffffff10)))
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                 if event.click_count() >= 2 {
                     this.start_rename(index, cx);
@@ -2167,11 +2168,11 @@ impl WindowView {
             .on_drag(DraggedTab { index, title: self.tab_title(tab, cx) }, |dragged, _, _, cx| {
                 cx.new(|_| dragged.clone())
             })
-            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
+            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(ui(0x8fb4ff26)))
             .on_drop(cx.listener(move |this, dragged: &DraggedTab, _, cx| {
                 this.move_tab(dragged.index, index, cx)
             }))
-            .drag_over::<DraggedPane>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
+            .drag_over::<DraggedPane>(|style, _, _, _| style.bg(ui(0x8fb4ff26)))
             .on_drop(cx.listener(move |this, dragged: &DraggedPane, _, cx| {
                 if let Some(&(workspace, tab)) = this.places.get(index)
                     && ids::server_of(workspace) == ids::server_of(dragged.pane)
@@ -2180,7 +2181,7 @@ impl WindowView {
                 }
             }))
             // Typing into every pane: an amber outline.
-            .when(tab.broadcast, |d| d.border_1().border_color(rgba(0xe0af6899)))
+            .when(tab.broadcast, |d| d.border_1().border_color(ui(0xe0af6899)))
             .children(header)
             .children(pane_rows.into_iter().flatten())
             .children(self.ports_row(ids::server_of(tab.focused), ports, cx))
@@ -2221,9 +2222,9 @@ impl WindowView {
             _ => format!(":{port}"),
         };
         let color = match (failed, remote && local.is_some()) {
-            (true, _) => rgba(0xf7768ecc),
-            (false, true) => rgba(0x9ece6aee),
-            (false, false) => rgba(0xffffff90),
+            (true, _) => ui(0xf7768ecc),
+            (false, true) => ui(0x9ece6aee),
+            (false, false) => ui(0xffffff90),
         };
         let id = format!("port-{server}-{port}");
         div()
@@ -2234,16 +2235,16 @@ impl WindowView {
             .px(px(5.))
             .rounded(px(4.))
             .text_size(px(10.5))
-            .bg(rgba(0xffffff0d))
-            .hover(|d| d.bg(rgba(0xffffff1f)))
+            .bg(ui(0xffffff0d))
+            .hover(|d| d.bg(ui(0xffffff1f)))
             .text_color(color)
             .child(label)
             .when(remote && local.is_some(), |d| {
                 d.child(
                     div()
                         .id(SharedString::from(format!("{id}-stop")))
-                        .text_color(rgba(0xffffff70))
-                        .hover(|d| d.text_color(rgba(0xffffffee)))
+                        .text_color(ui(0xffffff70))
+                        .hover(|d| d.text_color(ui(0xffffffee)))
                         .child("×")
                         .on_click(cx.listener(move |_, _, _, cx| {
                             crate::forward::stop(server, port, cx);
@@ -2288,7 +2289,7 @@ impl WindowView {
             .items_center()
             .justify_end()
             .text_size(px(11.))
-            .text_color(rgba(0xffffff70))
+            .text_color(ui(0xffffff70))
             .when_some(detail, |d, detail| {
                 d.child(Self::one_line(detail).min_w_0().when(controls, |d| {
                     d.opacity(if self.command_held { 0. } else { 1. })
@@ -2305,7 +2306,7 @@ impl WindowView {
                         .flex()
                         .items_center()
                         .text_xs()
-                        .text_color(rgba(0xffffff80))
+                        .text_color(ui(0xffffff80))
                         .opacity(if self.command_held { 1. } else { 0. })
                         .group_hover(group.clone(), |s| s.opacity(0.))
                         .child(label),
@@ -2324,8 +2325,8 @@ impl WindowView {
                             .rounded(px(4.))
                             .text_size(px(13.))
                             .line_height(px(18.))
-                            .text_color(rgba(0xffffffa0))
-                            .hover(|d| d.bg(rgba(0xffffff1f)).text_color(rgba(0xffffffee)))
+                            .text_color(ui(0xffffffa0))
+                            .hover(|d| d.bg(ui(0xffffff1f)).text_color(ui(0xffffffee)))
                             .child("×")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(&(workspace, tab)) = this.places.get(index) {
@@ -2386,8 +2387,8 @@ impl WindowView {
                     .gap(px(6.))
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgba(0xffffff70))
-                    .child(div().flex_none().size(px(6.)).rounded_full().bg(rgba(dot)))
+                    .text_color(ui(0xffffff70))
+                    .child(div().flex_none().size(px(6.)).rounded_full().bg(ui(dot)))
                     .child(Self::one_line(name.to_uppercase()).flex_1().min_w_0())
                     // Another machine's round trip, as of its last ping.
                     .when_some(
@@ -2397,7 +2398,7 @@ impl WindowView {
                                 div()
                                     .flex_none()
                                     .font_weight(FontWeight::NORMAL)
-                                    .text_color(rgba(0xffffff50))
+                                    .text_color(ui(0xffffff50))
                                     .child(format!("{} ms", latency.as_millis())),
                             )
                         },
@@ -2410,7 +2411,7 @@ impl WindowView {
                                 .group_hover(group.clone(), |s| s.opacity(1.))
                                 .px_1()
                                 .rounded(px(4.))
-                                .hover(|d| d.bg(rgba(0xffffff14)))
+                                .hover(|d| d.bg(ui(0xffffff14)))
                                 .text_size(px(14.))
                                 .child("+")
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2425,7 +2426,7 @@ impl WindowView {
                     Self::one_line(note)
                         .pl(px(12.))
                         .text_size(px(10.5))
-                        .text_color(rgba(0xffffff50)),
+                        .text_color(ui(0xffffff50)),
                 )
             })
             // A fresh ssh connection (the shared one closed first): the
@@ -2511,17 +2512,17 @@ impl WindowView {
                     .flex_1()
                     .px_1()
                     .rounded(px(4.))
-                    .bg(rgba(0x0000004d))
+                    .bg(ui(0x0000004d))
                     .border_1()
-                    .border_color(rgba(0x8fb4ff99))
-                    .text_color(rgba(0xffffffee))
+                    .border_color(ui(0x8fb4ff99))
+                    .text_color(ui(0xffffffee))
                     .child(format!("{}{marked}▏", renaming.text))
             },
             None => Self::one_line(title.clone())
                 .flex_1()
                 .min_w_0()
-                .text_color(if active { rgba(0xffffffd8) } else { rgba(0xffffff90) })
-                .when(attention, |d| d.text_color(rgba(0xe0af68ff))),
+                .text_color(if active { ui(0xffffffd8) } else { ui(0xffffff90) })
+                .when(attention, |d| d.text_color(ui(0xe0af68ff))),
         };
         let tabs = workspace.tabs.len();
         let color = workspace.color.as_deref().and_then(workspace_color);
@@ -2551,24 +2552,24 @@ impl WindowView {
             .rounded(px(6.))
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
-            .hover(|d| d.bg(rgba(0xffffff0a)))
+            .hover(|d| d.bg(ui(0xffffff0a)))
             .child(
                 div()
                     .w(px(12.))
                     .flex_none()
                     .text_size(px(9.))
-                    .text_color(rgba(0xffffff70))
+                    .text_color(ui(0xffffff70))
                     .child(if folded { "▶" } else { "▼" }),
             )
             .when_some(color, |d, color| d.child(div().flex_none().size(px(7.)).rounded_full().bg(rgba(color << 8 | 0xff))))
             .child(name)
             // Folded, it says how many tabs it holds.
             .when(folded && renaming.is_none(), |d| {
-                d.child(div().flex_none().text_size(px(11.)).text_color(rgba(0xffffff60)).child(tabs.to_string()))
+                d.child(div().flex_none().text_size(px(11.)).text_color(ui(0xffffff60)).child(tabs.to_string()))
             })
             .when_some(top, |d, top| {
                 d.child(self.icon_cell(Some(top))).when(count > 1, |d| {
-                    d.child(div().flex_none().text_size(px(10.5)).text_color(rgba(0xffffff90)).child(count.to_string()))
+                    d.child(div().flex_none().text_size(px(10.5)).text_color(ui(0xffffff90)).child(count.to_string()))
                 })
             })
             // Closing a whole workspace takes a second click.
@@ -2586,13 +2587,13 @@ impl WindowView {
                     .rounded(px(4.))
                     .map(|d| {
                         if closing {
-                            d.bg(rgba(0xf7768eff)).text_size(px(11.)).text_color(rgba(0xffffffff)).child("Close?")
+                            d.bg(ui(0xf7768eff)).text_size(px(11.)).text_color(gpui::white()).child("Close?")
                         } else {
                             d.opacity(0.)
                                 .group_hover(group.clone(), |s| s.opacity(1.))
                                 .text_size(px(13.))
-                                .text_color(rgba(0xffffff70))
-                                .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffd0)))
+                                .text_color(ui(0xffffff70))
+                                .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffd0)))
                                 .child("×")
                         }
                     })
@@ -2617,8 +2618,8 @@ impl WindowView {
                     .px_1()
                     .rounded(px(4.))
                     .text_size(px(14.))
-                    .text_color(rgba(0xffffff70))
-                    .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffd0)))
+                    .text_color(ui(0xffffff70))
+                    .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffd0)))
                     .child("+")
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_tab_in(Some(id), cx);
@@ -2652,8 +2653,8 @@ impl WindowView {
             )
             .tooltip(move |_, cx| cx.new(|_| Tooltip(usage.clone().into())).into())
             .on_drag(DraggedWorkspace { workspace: id, title }, |dragged, _, _, cx| cx.new(|_| dragged.clone()))
-            .drag_over::<DraggedWorkspace>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
-            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(rgba(0x8fb4ff26)))
+            .drag_over::<DraggedWorkspace>(|style, _, _, _| style.bg(ui(0x8fb4ff26)))
+            .drag_over::<DraggedTab>(|style, _, _, _| style.bg(ui(0x8fb4ff26)))
             .on_drop(cx.listener(move |this, dragged: &DraggedWorkspace, _, cx| {
                 // Within one server's sections, at its own position there.
                 let server = ids::server_of(id);
@@ -2691,9 +2692,9 @@ impl WindowView {
             .mx_1()
             .p_2()
             .rounded(px(8.))
-            .bg(rgba(0x3478f626))
+            .bg(ui(0x3478f626))
             .border_1()
-            .border_color(rgba(0x3478f666))
+            .border_color(ui(0x3478f666))
             .flex()
             .items_center()
             .justify_between()
@@ -2702,8 +2703,8 @@ impl WindowView {
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().text_color(rgba(0xffffffee)).child(title))
-                    .child(div().text_size(px(11.)).text_color(rgba(0xffffff80)).child(hint)),
+                    .child(div().text_color(ui(0xffffffee)).child(title))
+                    .child(div().text_size(px(11.)).text_color(ui(0xffffff80)).child(hint)),
             )
             .child(
                 div()
@@ -2712,9 +2713,9 @@ impl WindowView {
                     .px_2()
                     .py(px(3.))
                     .rounded(px(6.))
-                    .bg(rgba(0x3478f6ff))
-                    .hover(|d| d.bg(rgba(0x4a88ffff)))
-                    .text_color(rgba(0xffffffff))
+                    .bg(ui(0x3478f6ff))
+                    .hover(|d| d.bg(ui(0x4a88ffff)))
+                    .text_color(ui(0xffffffff))
                     .child(button)
                     .on_click(move |_, _, cx| action(cx)),
             )
@@ -2738,8 +2739,8 @@ impl WindowView {
                     .id("show-sidebar")
                     .px(px(5.))
                     .rounded(px(4.))
-                    .text_color(rgba(0xffffff90))
-                    .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffee)))
+                    .text_color(ui(0xffffff90))
+                    .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffee)))
                     .child("⇥")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
@@ -2749,14 +2750,14 @@ impl WindowView {
                         .id("need-you")
                         .px(px(6.))
                         .rounded(px(4.))
-                        .text_color(rgba(0xe0af68ff))
-                        .hover(|d| d.bg(rgba(0xe0af6826)))
+                        .text_color(ui(0xe0af68ff))
+                        .hover(|d| d.bg(ui(0xe0af6826)))
                         .child(format!("● {need} need you"))
                         .on_click(cx.listener(|this, _, _, cx| this.jump_to_attention(cx))),
                 )
             })
             .when(working > 0, |d| {
-                d.child(div().text_color(rgba(0xffffff60)).child(format!("{working} working")))
+                d.child(div().text_color(ui(0xffffff60)).child(format!("{working} working")))
             })
     }
 
@@ -2786,26 +2787,26 @@ impl WindowView {
             .mb(px(4.))
             .px_2()
             .rounded(px(7.))
-            .bg(if self.switcher_open { rgba(0xffffff1c) } else { rgba(0xffffff0a) })
-            .hover(|d| d.bg(rgba(0xffffff14)))
+            .bg(if self.switcher_open { ui(0xffffff1c) } else { ui(0xffffff0a) })
+            .hover(|d| d.bg(ui(0xffffff14)))
             .text_size(px(12.))
             .font_weight(FontWeight::SEMIBOLD)
             .when_some(color, |d, color| {
                 d.child(div().flex_none().size(px(7.)).rounded_full().bg(rgba(color << 8 | 0xff)))
             })
-            .child(Self::one_line(title).flex_1().min_w_0().text_color(rgba(0xffffffd8)))
+            .child(Self::one_line(title).flex_1().min_w_0().text_color(ui(0xffffffd8)))
             .when_some(others, |d, (top, count)| {
                 d.child(self.icon_cell(Some(top))).when(count > 1, |d| {
                     d.child(
                         div()
                             .flex_none()
                             .text_size(px(10.5))
-                            .text_color(rgba(0xffffff90))
+                            .text_color(ui(0xffffff90))
                             .child(count.to_string()),
                     )
                 })
             })
-            .child(div().flex_none().text_size(px(9.)).text_color(rgba(0xffffff70)).child("▼"))
+            .child(div().flex_none().text_size(px(9.)).text_color(ui(0xffffff70)).child("▼"))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.switcher_open = !this.switcher_open;
                 cx.notify();
@@ -2838,8 +2839,8 @@ impl WindowView {
                         .pb(px(2.))
                         .text_size(px(10.5))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgba(0xffffff70))
-                        .child(div().flex_none().size(px(6.)).rounded_full().bg(rgba(dot)))
+                        .text_color(ui(0xffffff70))
+                        .child(div().flex_none().size(px(6.)).rounded_full().bg(ui(dot)))
                         .child(name.to_uppercase())
                         .into_any_element(),
                 );
@@ -2858,8 +2859,8 @@ impl WindowView {
                         .h(px(26.))
                         .px(px(8.))
                         .rounded(px(6.))
-                        .when(current, |d| d.bg(rgba(0x3478f6ff)))
-                        .when(!current, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
+                        .when(current, |d| d.bg(ui(0x3478f6ff)))
+                        .when(!current, |d| d.hover(|d| d.bg(ui(0xffffff10))))
                         .child(div().flex_none().size(px(7.)).rounded_full().map(|d| match color {
                             Some(color) => d.bg(rgba(color << 8 | 0xff)),
                             None => d,
@@ -2868,7 +2869,7 @@ impl WindowView {
                             Self::one_line(self.workspace_title(position))
                                 .flex_1()
                                 .min_w_0()
-                                .text_color(rgba(0xffffffee)),
+                                .text_color(ui(0xffffffee)),
                         )
                         .when_some(rollup, |d, (top, count)| {
                             d.child(self.icon_cell(Some(top))).when(count > 1, |d| {
@@ -2881,7 +2882,7 @@ impl WindowView {
                             div()
                                 .flex_none()
                                 .text_size(px(11.))
-                                .text_color(rgba(0xffffff60))
+                                .text_color(ui(0xffffff60))
                                 .child(workspace.tabs.len().to_string()),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
@@ -2901,8 +2902,8 @@ impl WindowView {
                 .flex()
                 .items_center()
                 .rounded(px(6.))
-                .text_color(rgba(0xffffffb0))
-                .hover(|d| d.bg(rgba(0xffffff10)).text_color(rgba(0xffffffee)))
+                .text_color(ui(0xffffffb0))
+                .hover(|d| d.bg(ui(0xffffff10)).text_color(ui(0xffffffee)))
                 .child(label)
         };
         let hidden = self.layout.hidden;
@@ -2919,9 +2920,9 @@ impl WindowView {
             .gap(px(1.))
             .p(px(6.))
             .rounded(px(10.))
-            .bg(rgba(0x262a33f8))
+            .bg(ui(0x262a33f8))
             .border_1()
-            .border_color(rgba(0xffffff26))
+            .border_color(ui(0xffffff26))
             .shadow_lg()
             .text_size(px(12.5))
             .child(
@@ -2933,7 +2934,7 @@ impl WindowView {
                     .overflow_y_scroll()
                     .children(rows),
             )
-            .child(div().my(px(4.)).h(px(1.)).bg(rgba(0xffffff14)))
+            .child(div().my(px(4.)).h(px(1.)).bg(ui(0xffffff14)))
             .child(action("switcher-new", "New Workspace   ⌘⇧N".to_owned()).on_click(cx.listener(
                 |this, _, _, cx| {
                     this.switcher_open = false;
@@ -3019,8 +3020,8 @@ impl WindowView {
                     .py(px(4.))
                     .rounded(px(6.))
                     .text_size(px(11.5))
-                    .text_color(rgba(0xffffff70))
-                    .hover(|d| d.bg(rgba(0xffffff0a)).text_color(rgba(0xffffffc0)))
+                    .text_color(ui(0xffffff70))
+                    .hover(|d| d.bg(ui(0xffffff0a)).text_color(ui(0xffffffc0)))
                     .child(if hidden == 1 {
                         "1 more workspace…".to_owned()
                     } else {
@@ -3038,9 +3039,9 @@ impl WindowView {
             .h_full()
             .flex_none()
             .relative()
-            .bg(rgba(0xffffff0a))
+            .bg(ui(0xffffff0a))
             .border_r_1()
-            .border_color(rgba(0xffffff12))
+            .border_color(ui(0xffffff12))
             .pt(px(44.))
             // The titlebar goes on above the sidebar, behind the window buttons.
             .child(Self::titlebar("sidebar-titlebar").absolute().top_0().left_0().right_0().h(px(TITLEBAR_HEIGHT)))
@@ -3053,8 +3054,8 @@ impl WindowView {
                     .px(px(5.))
                     .rounded(px(4.))
                     .text_size(px(11.5))
-                    .text_color(rgba(0xffffff70))
-                    .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffee)))
+                    .text_color(ui(0xffffff70))
+                    .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffee)))
                     .child("⇤")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
@@ -3071,12 +3072,12 @@ impl WindowView {
                     .mb(px(10.))
                     .px_2()
                     .rounded(px(7.))
-                    .text_color(if self.showing_activity() { rgba(0xffffffee) } else { rgba(0xffffffb0) })
-                    .when(self.showing_activity(), |d| d.bg(rgba(0xffffff1c)))
-                    .hover(|d| d.bg(rgba(0xffffff10)))
-                    .child(div().w(px(12.)).flex_none().flex().justify_center().text_color(rgba(0x8fb4ffff)).child("◔"))
+                    .text_color(if self.showing_activity() { ui(0xffffffee) } else { ui(0xffffffb0) })
+                    .when(self.showing_activity(), |d| d.bg(ui(0xffffff1c)))
+                    .hover(|d| d.bg(ui(0xffffff10)))
+                    .child(div().w(px(12.)).flex_none().flex().justify_center().text_color(ui(0x8fb4ffff)).child("◔"))
                     .child(div().flex_1().child("Activity"))
-                    .child(div().text_xs().text_color(rgba(0xffffff66)).child("⇧⌘A"))
+                    .child(div().text_xs().text_color(ui(0xffffff66)).child("⇧⌘A"))
                     .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
             )
             .when(!app_state::several_servers(cx), |d| d.child(
@@ -3090,7 +3091,7 @@ impl WindowView {
                     .pb_2()
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgba(0xffffff70))
+                    .text_color(ui(0xffffff70))
                     .child("WORKSPACES")
                     .child(
                         div()
@@ -3100,7 +3101,7 @@ impl WindowView {
                             .group_hover("sidebar-heading", |s| s.opacity(1.))
                             .px_1()
                             .rounded(px(4.))
-                            .hover(|d| d.bg(rgba(0xffffff14)))
+                            .hover(|d| d.bg(ui(0xffffff14)))
                             .text_size(px(14.))
                             .child("+")
                             .on_click(cx.listener(|this, _, _, cx| this.new_workspace(cx))),
@@ -3112,7 +3113,7 @@ impl WindowView {
                     div()
                         .px_2()
                         .text_xs()
-                        .text_color(rgba(0xf7768eff))
+                        .text_color(ui(0xf7768eff))
                         .child(format!("Config error — using previous settings. {error}")),
                 )
             })
@@ -3254,11 +3255,11 @@ impl WindowView {
                         .items_center()
                         .justify_center()
                         .border_2()
-                        .border_color(if chosen { rgba(0xffffffee) } else { rgba(0x00000000) })
-                        .hover(|d| d.border_color(rgba(0xffffff90)))
+                        .border_color(if chosen { ui(0xffffffee) } else { ui(0x00000000) })
+                        .hover(|d| d.border_color(ui(0xffffff90)))
                         .map(|d| match fill {
                             Some(color) => d.bg(rgba(color << 8 | 0xff)),
-                            None => d.text_size(px(11.)).text_color(rgba(0xffffff90)).child("⊘"),
+                            None => d.text_size(px(11.)).text_color(ui(0xffffff90)).child("⊘"),
                         })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             let color = (i > 0).then(|| i - 1);
@@ -3292,7 +3293,7 @@ impl WindowView {
         }
 
         let rows = items.into_iter().enumerate().map(|(i, item)| match item {
-            None => div().h(px(1.)).mx(px(9.)).my(px(4.)).bg(rgba(0xffffff1a)).into_any_element(),
+            None => div().h(px(1.)).mx(px(9.)).my(px(4.)).bg(ui(0xffffff1a)).into_any_element(),
             Some((label, keys, enabled, command)) => div()
                 .id(("menu-item", i))
                 .flex()
@@ -3301,14 +3302,14 @@ impl WindowView {
                 .h(px(ITEM))
                 .px(px(9.))
                 .rounded(px(5.))
-                .text_color(if enabled { rgba(0xffffffee) } else { rgba(0xffffff4d) })
+                .text_color(if enabled { ui(0xffffffee) } else { ui(0xffffff4d) })
                 .when(enabled, |d| {
-                    d.hover(|d| d.bg(rgba(0x3478f6ff))).on_click(cx.listener(
+                    d.hover(|d| d.bg(ui(0x3478f6ff))).on_click(cx.listener(
                         move |this, _, window, cx| this.run_menu_command(command, window, cx),
                     ))
                 })
                 .child(label)
-                .child(div().text_color(rgba(0xffffff66)).child(keys))
+                .child(div().text_color(ui(0xffffff66)).child(keys))
                 .into_any_element(),
         });
 
@@ -3334,14 +3335,14 @@ impl WindowView {
             .flex_col()
             .p(px(5.))
             .rounded(px(8.))
-            .bg(rgba(0x262a33f5))
+            .bg(ui(0x262a33f5))
             .border_1()
-            .border_color(rgba(0xffffff26))
+            .border_color(ui(0xffffff26))
             .shadow_lg()
             .text_size(px(13.))
             .children(rows)
             .when_some(color_row, |d, row| {
-                d.child(div().h(px(1.)).mx(px(9.)).my(px(4.)).bg(rgba(0xffffff1a))).child(row)
+                d.child(div().h(px(1.)).mx(px(9.)).my(px(4.)).bg(ui(0xffffff1a))).child(row)
             });
         Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
     }
@@ -3367,9 +3368,9 @@ impl WindowView {
             format!("{} of {}{more}", c.index, c.total)
         });
         let (status, status_color) = match (&search.error, search.found) {
-            (Some(_), _) => ("invalid pattern".to_owned(), rgba(0xf7768eff)),
-            (None, Some(false)) => ("no match".to_owned(), rgba(0xf7768eff)),
-            _ => ("⏎ older · ⇧⏎ newer · esc".to_owned(), rgba(0xffffff60)),
+            (Some(_), _) => ("invalid pattern".to_owned(), ui(0xf7768eff)),
+            (None, Some(false)) => ("no match".to_owned(), ui(0xf7768eff)),
+            _ => ("⏎ older · ⇧⏎ newer · esc".to_owned(), ui(0xffffff60)),
         };
         // A full-screen agent keeps its history itself, out of the
         // terminal's reach: its conversations can be searched instead.
@@ -3388,21 +3389,21 @@ impl WindowView {
                 .px_3()
                 .py(px(5.))
                 .rounded(px(8.))
-                .bg(rgba(0x1e2430f2))
+                .bg(ui(0x1e2430f2))
                 .border_1()
-                .border_color(rgba(0xffffff24))
+                .border_color(ui(0xffffff24))
                 .shadow_md()
                 .text_size(px(12.))
-                .child(div().text_color(rgba(0xffffff70)).child("Find"))
+                .child(div().text_color(ui(0xffffff70)).child("Find"))
                 .child(
                     div()
                         .min_w(px(160.))
                         .font_family(self.metrics.font.family.clone())
-                        .text_color(rgba(0xffffffee))
+                        .text_color(ui(0xffffffee))
                         .child(format!("{query}▏")),
                 )
                 .when_some(position, |d, position| {
-                    d.child(div().flex_none().text_color(rgba(0xffffffd0)).child(position))
+                    d.child(div().flex_none().text_color(ui(0xffffffd0)).child(position))
                 })
                 .child(div().text_color(status_color).child(status))
                 .when_some(elsewhere, |d, agent| {
@@ -3414,8 +3415,8 @@ impl WindowView {
                             .gap(px(4.))
                             .px(px(6.))
                             .rounded(px(4.))
-                            .text_color(rgba(0xffffffb0))
-                            .hover(|d| d.bg(rgba(0xffffff14)).text_color(rgba(0xffffffee)))
+                            .text_color(ui(0xffffffb0))
+                            .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffee)))
                             .child(div().text_color(rgba(color << 8 | 0xff)).child(mark))
                             .child("No history here: search its conversations ⌘⇧F")
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3543,6 +3544,8 @@ struct PaneView {
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         flush_detached(cx);
+        // A light theme: the app's own colors too.
+        crate::chrome::follow(self.theme.background);
         if self.reload_config {
             self.apply_config(window);
         }
@@ -3623,7 +3626,7 @@ impl Render for WindowView {
         // A tab typing into every pane: amber dividers, no pane dimmed.
         let broadcast = self.tabs.get(self.active).is_some_and(|t| t.broadcast);
         let divider_color: Hsla =
-            if broadcast { rgba(0xe0af68cc).into() } else { rgba(0xffffff1c).into() };
+            if broadcast { ui(0xe0af68cc).into() } else { ui(0xffffff1c).into() };
         let metrics = self.metrics.clone();
         let marked_text = self
             .marked_text
@@ -3831,7 +3834,7 @@ impl Render for WindowView {
                             .items_center()
                             .justify_center()
                             .text_size(px(13.))
-                            .text_color(rgba(0xffffffb8))
+                            .text_color(ui(0xffffffb8))
                             // Folded away: the window's buttons are here, then
                             // the sidebar's way back and what it would show.
                             .when(self.sidebar_hidden, |d| d.pl(px(170.)).pr(px(170.)))
@@ -3916,11 +3919,11 @@ impl Render for WindowView {
                                         .px_3()
                                         .py(px(4.))
                                         .rounded(px(8.))
-                                        .bg(rgba(0x1e2430f2))
+                                        .bg(ui(0x1e2430f2))
                                         .border_1()
-                                        .border_color(rgba(0x8fb4ff66))
+                                        .border_color(ui(0x8fb4ff66))
                                         .text_size(px(12.))
-                                        .text_color(rgba(0xffffffd0))
+                                        .text_color(ui(0xffffffd0))
                                         .child(format!("{keys} …"))
                                 }))
                                 .on_drop(cx.listener(

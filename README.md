@@ -102,7 +102,7 @@ type), Sessions, Machines and Agents. A theme can come from another
 terminal: Import… (or drop the file on Settings) reads iTerm2's
 `.itermcolors`, Ghostty's, kitty's, Alacritty's, WezTerm's and Windows
 Terminal's; with Ghostty installed, its few hundred themes are listed, to
-try with a click (light ones marked: artty's window stays dark), and its
+try with a click (light ones marked), and its
 config's theme and key bindings come over with a click each (Ghostty's
 actions as artty's, where it has them). Everything lives in
 `~/.config/artty/config.toml`, which Settings edits in place and every window

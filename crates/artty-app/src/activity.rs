@@ -121,7 +121,7 @@ fn sparkline(values: &[f32], floor: f32, width: f32, height: f32, color: u32) ->
     div().flex_none().w(px(width)).h(px(height)).flex().items_end().justify_end().children(
         values.iter().map(|&v| {
             let h = (v / max).clamp(0., 1.) * height;
-            div().flex_none().w(px(bar)).h(px(if v > 0. { h.max(1.) } else { 0. })).bg(rgba(color))
+            div().flex_none().w(px(bar)).h(px(if v > 0. { h.max(1.) } else { 0. })).bg(ui(color))
         }),
     )
 }
@@ -359,8 +359,8 @@ impl WindowView {
                 .flex()
                 .flex_col()
                 .gap(px(4.))
-                .child(div().text_color(rgba(0xffffffd0)).child(label))
-                .child(div().p(px(4.)).rounded(px(5.)).bg(rgba(0x0000002e)).child(graph))
+                .child(div().text_color(ui(0xffffffd0)).child(label))
+                .child(div().p(px(4.)).rounded(px(5.)).bg(ui(0x0000002e)).child(graph))
         };
         let summary =
             div()
@@ -376,9 +376,10 @@ impl WindowView {
                     sparkline(&memory_history, peak_memory, 180., 30., 0xbb9af7cc),
                 ))
                 .child(
-                    div().flex().flex_col().gap(px(2.)).text_color(rgba(0xffffff90)).child(
-                        format!("{process_count} processes in {} panes", activity.panes.len()),
-                    ),
+                    div().flex().flex_col().gap(px(2.)).text_color(ui(0xffffff90)).child(format!(
+                        "{process_count} processes in {} panes",
+                        activity.panes.len()
+                    )),
                 );
 
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
@@ -431,7 +432,7 @@ impl WindowView {
                 .id(label)
                 .when_some(width, |d, w| d.w(px(w)).flex_none().flex().justify_end())
                 .when(width.is_none(), |d| d.flex_1().min_w_0())
-                .text_color(if active { rgba(0xffffffd0) } else { rgba(0xffffff70) })
+                .text_color(if active { ui(0xffffffd0) } else { ui(0xffffff70) })
                 .when_some(sort, |d, sort| {
                     d.cursor_pointer()
                         .on_click(cx.listener(move |this, _, _, cx| this.set_sort(sort, cx)))
@@ -457,7 +458,7 @@ impl WindowView {
                     .child(if activity.loaded {
                         summary
                     } else {
-                        div().text_color(rgba(0xffffffb0)).child("Loading…")
+                        div().text_color(ui(0xffffffb0)).child("Loading…")
                     })
                     .child(
                         div()
@@ -466,11 +467,11 @@ impl WindowView {
                             .px(px(8.))
                             .py(px(3.))
                             .rounded(px(6.))
-                            .bg(rgba(0x0000004d))
+                            .bg(ui(0x0000004d))
                             .text_color(if activity.filter.is_empty() {
-                                rgba(0xffffff50)
+                                ui(0xffffff50)
                             } else {
-                                rgba(0xffffffee)
+                                ui(0xffffffee)
                             })
                             .child(if activity.filter.is_empty() {
                                 "Type to filter".to_owned()
@@ -483,7 +484,7 @@ impl WindowView {
                 d.children(activity.servers.iter().map(|server| self.server_strip(server, cx)))
             })
             .when_some(activity.error.clone(), |d, error| {
-                d.child(div().pb(px(8.)).text_color(rgba(0xf7768eff)).child(error))
+                d.child(div().pb(px(8.)).text_color(ui(0xf7768eff)).child(error))
             })
             .child(
                 div()
@@ -493,7 +494,7 @@ impl WindowView {
                     .px(px(8.))
                     .pb(px(6.))
                     .border_b_1()
-                    .border_color(rgba(0xffffff14))
+                    .border_color(ui(0xffffff14))
                     .text_size(px(11.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(heading("NAME", None, Some(Sort::Name)))
@@ -515,9 +516,7 @@ impl WindowView {
                     .overflow_y_scroll()
                     .children(rows)
                     .when(empty && activity.loaded, |d| {
-                        d.child(
-                            div().p(px(8.)).text_color(rgba(0xffffff60)).child("Nothing matches"),
-                        )
+                        d.child(div().p(px(8.)).text_color(ui(0xffffff60)).child("Nothing matches"))
                     }),
             )
     }
@@ -568,8 +567,8 @@ impl WindowView {
             .flex()
             .items_center()
             .gap(px(10.))
-            .child(div().flex_none().size(px(8.)).rounded_full().bg(rgba(dot)))
-            .child(div().flex_none().text_color(rgba(0xffffffd0)).child(status))
+            .child(div().flex_none().size(px(8.)).rounded_full().bg(ui(dot)))
+            .child(div().flex_none().text_color(ui(0xffffffd0)).child(status))
             .child(
                 div()
                     .flex_1()
@@ -577,7 +576,7 @@ impl WindowView {
                     .overflow_hidden()
                     .line_clamp(1)
                     .text_ellipsis()
-                    .text_color(rgba(0xffffff80))
+                    .text_color(ui(0xffffff80))
                     .child(facts.join(" · ")),
             )
             // This Mac's server moves to this build; another machine's runs
@@ -590,11 +589,11 @@ impl WindowView {
                         .px(px(8.))
                         .py(px(2.))
                         .rounded(px(5.))
-                        .bg(if different { rgba(0x3478f6ff) } else { rgba(0xffffff14) })
+                        .bg(if different { ui(0x3478f6ff) } else { ui(0xffffff14) })
                         .hover(|d| {
-                            d.bg(if different { rgba(0x4a88ffff) } else { rgba(0xffffff26) })
+                            d.bg(if different { ui(0x4a88ffff) } else { ui(0xffffff26) })
                         })
-                        .text_color(rgba(0xffffffe0))
+                        .text_color(ui(0xffffffe0))
                         .child(if different { "Update Server" } else { "Restart Server" })
                         .on_click(cx.listener(|_, _, _, cx| app_state::restart_server(cx))),
                 )
@@ -608,7 +607,7 @@ impl WindowView {
             .px(px(10.))
             .py(px(6.))
             .rounded(px(7.))
-            .bg(rgba(0x0000002e))
+            .bg(ui(0x0000002e))
             .child(row)
             .when_some(network, |d, network| d.child(Self::network_row(&network, server, cx)))
     }
@@ -651,14 +650,14 @@ impl WindowView {
         if let Some(how) = app_state::transport(server, cx) {
             facts.push(how);
         }
-        let label = |text: &'static str| div().flex_none().text_color(rgba(0xffffff60)).child(text);
+        let label = |text: &'static str| div().flex_none().text_color(ui(0xffffff60)).child(text);
         div()
             .flex()
             .items_center()
             .gap(px(10.))
             .pl(px(18.))
             .text_size(px(11.5))
-            .text_color(rgba(0xffffff90))
+            .text_color(ui(0xffffff90))
             .child(label("Round trip"))
             .child(sparkline(&trips, 50., 80., 14., 0x8fb4ffcc))
             .child(div().flex_none().child(trip))
@@ -672,7 +671,7 @@ impl WindowView {
                     .overflow_hidden()
                     .line_clamp(1)
                     .text_ellipsis()
-                    .text_color(rgba(0xffffff60))
+                    .text_color(ui(0xffffff60))
                     .child(facts.join(" · ")),
             )
     }
@@ -694,8 +693,8 @@ impl WindowView {
                 .when_some(cpu, |d, cpu| {
                     let fill = (cpu.min(100.) / 100. * 40.).max(if cpu > 0.05 { 1. } else { 0. });
                     d.child(
-                        div().w(px(40.)).h(px(4.)).rounded(px(2.)).bg(rgba(0xffffff14)).child(
-                            div().w(px(fill)).h_full().rounded(px(2.)).bg(rgba(cpu_color(cpu))),
+                        div().w(px(40.)).h(px(4.)).rounded(px(2.)).bg(ui(0xffffff14)).child(
+                            div().w(px(fill)).h_full().rounded(px(2.)).bg(ui(cpu_color(cpu))),
                         ),
                     )
                     .child(div().w(px(48.)).flex().justify_end().child(format!("{cpu:.1}%")))
@@ -716,12 +715,11 @@ impl WindowView {
     }
 
     fn arrow(folded: bool) -> gpui::Div {
-        div()
-            .w(px(12.))
-            .flex_none()
-            .text_size(px(9.))
-            .text_color(rgba(0xffffff70))
-            .child(if folded { "▶" } else { "▼" })
+        div().w(px(12.)).flex_none().text_size(px(9.)).text_color(ui(0xffffff70)).child(if folded {
+            "▶"
+        } else {
+            "▼"
+        })
     }
 
     fn workspace_activity_row(
@@ -749,9 +747,9 @@ impl WindowView {
             .mt(px(6.))
             .px(px(8.))
             .rounded(px(6.))
-            .bg(rgba(0xffffff0a))
-            .hover(|d| d.bg(rgba(0xffffff12)))
-            .text_color(rgba(0xffffffe0))
+            .bg(ui(0xffffff0a))
+            .hover(|d| d.bg(ui(0xffffff12)))
+            .text_color(ui(0xffffffe0))
             .font_weight(FontWeight::SEMIBOLD)
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(group, cx)))
             .child(
@@ -774,13 +772,13 @@ impl WindowView {
                     .child(
                         Self::one_line(workspace.title.clone())
                             .min_w_0()
-                            .text_color(rgba(0xffffffe0)),
+                            .text_color(ui(0xffffffe0)),
                     )
                     .child(
                         div()
                             .flex_none()
                             .font_weight(FontWeight::NORMAL)
-                            .text_color(rgba(0xffffff80))
+                            .text_color(ui(0xffffff80))
                             .child(format!(
                                 "{} pane{}{place}",
                                 panes.len(),
@@ -818,8 +816,8 @@ impl WindowView {
             .h(px(26.))
             .px(px(8.))
             .rounded(px(6.))
-            .text_color(rgba(0xffffffc0))
-            .hover(|d| d.bg(rgba(0xffffff0a)))
+            .text_color(ui(0xffffffc0))
+            .hover(|d| d.bg(ui(0xffffff0a)))
             .child(
                 div()
                     .flex_1()
@@ -850,11 +848,11 @@ impl WindowView {
                             .flex()
                             .gap(px(6.))
                             .cursor_pointer()
-                            .hover(|d| d.text_color(rgba(0x8fb4ffff)))
-                            .text_color(rgba(0xffffffd0))
+                            .hover(|d| d.text_color(ui(0x8fb4ffff)))
+                            .text_color(ui(0xffffffd0))
                             .on_click(cx.listener(move |this, _, _, cx| this.jump_to(workspace, id, cx)))
                             .child(Self::one_line(pane.title.clone()).min_w_0())
-                            .child(div().flex_none().text_color(rgba(0xffffff80)).child(format!("tab {} · pane {}", pane.tab, pane.id))),
+                            .child(div().flex_none().text_color(ui(0xffffff80)).child(format!("tab {} · pane {}", pane.tab, pane.id))),
                     ),
             )
             .child(Self::cpu_graph(&pane.history))
@@ -888,7 +886,7 @@ impl WindowView {
             .px(px(8.))
             .rounded(px(5.))
             .text_size(px(12.))
-            .hover(|d| d.bg(rgba(0xffffff08)))
+            .hover(|d| d.bg(ui(0xffffff08)))
             .child(
                 div()
                     .flex_1()
@@ -898,20 +896,20 @@ impl WindowView {
                     .flex()
                     .items_center()
                     .gap(px(4.))
-                    .when(process.depth > 0, |d| d.child(div().flex_none().text_color(rgba(0xffffff60)).child("└")))
+                    .when(process.depth > 0, |d| d.child(div().flex_none().text_color(ui(0xffffff60)).child("└")))
                     .child(
                         Self::one_line(row.name.clone())
                             .min_w_0()
-                            .text_color(if row.foreground { rgba(0xffffffd8) } else { rgba(0xffffff90) })
+                            .text_color(if row.foreground { ui(0xffffffd8) } else { ui(0xffffff90) })
                             .when(row.foreground, |d| d.font_weight(FontWeight::MEDIUM)),
                     )
                     .children(row.ports.iter().map(|&port| self.port_chip(server, port, cx).flex_none())),
             )
             .child(div().w(px(GRAPH_WIDTH)).flex_none())
-            .child(div().w(px(PID_WIDTH)).flex_none().flex().justify_end().text_color(rgba(0xffffff90)).child(pid.to_string()))
+            .child(div().w(px(PID_WIDTH)).flex_none().flex().justify_end().text_color(ui(0xffffff90)).child(pid.to_string()))
             .children(
                 Self::figures(Some(row.cpu_percent), Some(row.memory_bytes), Some(row.elapsed_secs))
-                    .map(|cell| cell.text_color(rgba(0xffffffa0))),
+                    .map(|cell| cell.text_color(ui(0xffffffa0))),
             )
             .child(
                 div().w(px(ACTION_WIDTH)).flex_none().flex().justify_end().child(
@@ -922,12 +920,12 @@ impl WindowView {
                         .text_size(px(11.))
                         .map(|d| {
                             if is_armed {
-                                d.bg(rgba(0xf7768eff)).text_color(rgba(0xffffffff)).child("Stop?")
+                                d.bg(ui(0xf7768eff)).text_color(gpui::white()).child("Stop?")
                             } else {
-                                d.text_color(rgba(0xffffff90))
+                                d.text_color(ui(0xffffff90))
                                     .border_1()
-                                    .border_color(rgba(0xffffff26))
-                                    .hover(|d| d.bg(rgba(0xf7768e60)).text_color(rgba(0xffffffee)))
+                                    .border_color(ui(0xffffff26))
+                                    .hover(|d| d.bg(ui(0xf7768e60)).text_color(ui(0xffffffee)))
                                     .child("Stop")
                             }
                         })

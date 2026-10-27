@@ -9,6 +9,8 @@ mod app_state;
 mod askpass;
 #[cfg(target_os = "macos")]
 mod boxdraw;
+#[cfg(target_os = "macos")]
+mod chrome;
 mod cli;
 #[cfg(target_os = "macos")]
 mod echo;

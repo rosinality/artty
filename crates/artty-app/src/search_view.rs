@@ -78,8 +78,8 @@ fn occurrences(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
 /// `text` on one line, `marked` ranges standing out.
 fn marked_line(text: String, marked: Vec<std::ops::Range<usize>>) -> gpui::Div {
     let style = gpui::HighlightStyle {
-        color: Some(rgba(0xffffffff).into()),
-        background_color: Some(rgba(0xe0af6866).into()),
+        color: Some(ui(0xffffffff).into()),
+        background_color: Some(ui(0xe0af6866).into()),
         font_weight: Some(FontWeight::BOLD),
         ..Default::default()
     };
@@ -264,7 +264,7 @@ impl WindowView {
                 .pb(px(2.))
                 .text_size(px(10.5))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgba(0xffffff60))
+                .text_color(ui(0xffffff60))
                 .child(label)
         };
         // A result: its mark (what it's from), then its lines.
@@ -277,8 +277,8 @@ impl WindowView {
                 .px(px(10.))
                 .py(px(4.))
                 .rounded(px(6.))
-                .when(i == search.selected, |d| d.bg(rgba(0x3478f6ff)))
-                .when(i != search.selected, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
+                .when(i == search.selected, |d| d.bg(ui(0x3478f6ff)))
+                .when(i != search.selected, |d| d.hover(|d| d.bg(ui(0xffffff10))))
                 .child(
                     div()
                         .flex_none()
@@ -329,8 +329,8 @@ impl WindowView {
             let lines = vec![
                 marked_line(shown.to_owned(), marked)
                     .font_family(self.config.font_family.first().cloned().unwrap_or_default())
-                    .text_color(rgba(0xffffffe0)),
-                Self::one_line(place.join(" · ")).text_size(px(11.)).text_color(rgba(0xffffff70)),
+                    .text_color(ui(0xffffffe0)),
+                Self::one_line(place.join(" · ")).text_size(px(11.)).text_color(ui(0xffffff70)),
             ];
             items.push(row(i, mark, lines).into_any_element());
         }
@@ -352,11 +352,11 @@ impl WindowView {
                 if hit.title.is_empty() { "(untitled)".to_owned() } else { hit.title.clone() };
             let lines = vec![
                 marked_line(title.clone(), occurrences(&title, &search.query))
-                    .text_color(rgba(0xffffffee)),
+                    .text_color(ui(0xffffffee)),
                 marked_line(hit.snippet.clone(), occurrences(&hit.snippet, &search.query))
                     .text_size(px(11.5))
-                    .text_color(rgba(0xffffffb0)),
-                Self::one_line(place.join(" · ")).text_size(px(11.)).text_color(rgba(0xffffff70)),
+                    .text_color(ui(0xffffffb0)),
+                Self::one_line(place.join(" · ")).text_size(px(11.)).text_color(ui(0xffffff70)),
             ];
             items.push(row(i, agent_mark(&hit.agent), lines).into_any_element());
         }
@@ -381,9 +381,9 @@ impl WindowView {
             .gap(px(2.))
             .p(px(6.))
             .rounded(px(10.))
-            .bg(rgba(0x262a33f8))
+            .bg(ui(0x262a33f8))
             .border_1()
-            .border_color(rgba(0xffffff26))
+            .border_color(ui(0xffffff26))
             .shadow_lg()
             .text_size(px(13.))
             .child(
@@ -392,11 +392,11 @@ impl WindowView {
                     .py(px(7.))
                     .mb(px(2.))
                     .rounded(px(6.))
-                    .bg(rgba(0x0000004d))
+                    .bg(ui(0x0000004d))
                     .text_color(if search.query.is_empty() && marked.is_empty() {
-                        rgba(0xffffff60)
+                        ui(0xffffff60)
                     } else {
-                        rgba(0xffffffee)
+                        ui(0xffffffee)
                     })
                     .child(if search.query.is_empty() && marked.is_empty() {
                         "Search all terminals and agent sessions…".to_owned()
@@ -410,7 +410,7 @@ impl WindowView {
                         .px(px(10.))
                         .py(px(4.))
                         .text_size(px(12.))
-                        .text_color(rgba(0xffffff70))
+                        .text_color(ui(0xffffff70))
                         .child(status),
                 )
             })

@@ -96,9 +96,9 @@ impl WindowView {
                 .px(px(12.))
                 .py(px(4.))
                 .rounded(px(6.))
-                .bg(if primary { rgba(0x3478f6ff) } else { rgba(0xffffff14) })
-                .hover(|d| d.bg(if primary { rgba(0x4a88ffff) } else { rgba(0xffffff26) }))
-                .text_color(rgba(0xffffffe0))
+                .bg(if primary { ui(0x3478f6ff) } else { ui(0xffffff14) })
+                .hover(|d| d.bg(if primary { ui(0x4a88ffff) } else { ui(0xffffff26) }))
+                .text_color(ui(0xffffffe0))
                 .child(label)
         };
         let buttons = match question.kind {
@@ -126,10 +126,10 @@ impl WindowView {
                 .px_2()
                 .py(px(4.))
                 .rounded(px(5.))
-                .bg(rgba(0x0000004d))
+                .bg(ui(0x0000004d))
                 .border_1()
-                .border_color(rgba(0x8fb4ff99))
-                .text_color(rgba(0xffffffee))
+                .border_color(ui(0x8fb4ff99))
+                .text_color(ui(0xffffffee))
                 .child(format!("{dots}▏"))
         });
         let remember = question.rememberable.then(|| {
@@ -140,7 +140,7 @@ impl WindowView {
                 .gap(px(6.))
                 .cursor_pointer()
                 .text_size(px(12.))
-                .text_color(rgba(0xffffffb0))
+                .text_color(ui(0xffffffb0))
                 .child(div().child(if sheet.remember { "☑" } else { "☐" }))
                 .child("Remember in Keychain")
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -157,18 +157,18 @@ impl WindowView {
             .gap(px(10.))
             .p(px(16.))
             .rounded(px(10.))
-            .bg(rgba(0x1e2430f8))
+            .bg(ui(0x1e2430f8))
             .border_1()
-            .border_color(rgba(0xffffff24))
+            .border_color(ui(0xffffff24))
             .shadow_lg()
             .text_size(px(13.))
             .child(
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(rgba(0xffffffee))
+                    .text_color(ui(0xffffffee))
                     .child(format!("{} asks", question.name)),
             )
-            .child(div().text_color(rgba(0xffffffc0)).child(question.prompt.clone()))
+            .child(div().text_color(ui(0xffffffc0)).child(question.prompt.clone()))
             .children(field)
             .child(
                 div()
@@ -189,7 +189,7 @@ impl WindowView {
                 // (Not stretched to the window's height.)
                 .items_start()
                 .pt(px(80.))
-                .bg(rgba(0x00000066))
+                .bg(ui(0x00000066))
                 .child(card),
         )
     }

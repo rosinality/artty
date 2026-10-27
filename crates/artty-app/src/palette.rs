@@ -248,14 +248,14 @@ impl WindowView {
                     .h(px(30.))
                     .px(px(10.))
                     .rounded(px(6.))
-                    .when(i == palette.selected, |d| d.bg(rgba(0x3478f6ff)))
-                    .when(i != palette.selected, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
+                    .when(i == palette.selected, |d| d.bg(ui(0x3478f6ff)))
+                    .when(i != palette.selected, |d| d.hover(|d| d.bg(ui(0xffffff10))))
                     .when(matches!(row, Row::Place(_)), |d| d.child(self.icon(icon)))
                     .child(
                         Self::one_line(title).flex_shrink_0().max_w(px(260.)).text_color(if here {
-                            rgba(0xffffffee)
+                            ui(0xffffffee)
                         } else {
-                            rgba(0xffffffb0)
+                            ui(0xffffffb0)
                         }),
                     )
                     .child(
@@ -263,7 +263,7 @@ impl WindowView {
                             .flex_1()
                             .min_w_0()
                             .text_size(px(11.5))
-                            .text_color(rgba(0xffffff80))
+                            .text_color(ui(0xffffff80))
                             .when(matches!(row, Row::Command(_)), |d| d.flex().justify_end()),
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -296,9 +296,9 @@ impl WindowView {
             .gap(px(2.))
             .p(px(6.))
             .rounded(px(10.))
-            .bg(rgba(0x262a33f8))
+            .bg(ui(0x262a33f8))
             .border_1()
-            .border_color(rgba(0xffffff26))
+            .border_color(ui(0xffffff26))
             .shadow_lg()
             .text_size(px(13.))
             .child(
@@ -307,11 +307,11 @@ impl WindowView {
                     .py(px(7.))
                     .mb(px(4.))
                     .rounded(px(6.))
-                    .bg(rgba(0x0000004d))
+                    .bg(ui(0x0000004d))
                     .text_color(if palette.query.is_empty() && marked.is_empty() {
-                        rgba(0xffffff60)
+                        ui(0xffffff60)
                     } else {
-                        rgba(0xffffffee)
+                        ui(0xffffffee)
                     })
                     .child(if palette.query.is_empty() && marked.is_empty() {
                         hint.to_owned()
@@ -333,7 +333,7 @@ impl WindowView {
                     div()
                         .px(px(10.))
                         .py(px(6.))
-                        .text_color(rgba(0xffffff70))
+                        .text_color(ui(0xffffff70))
                         .child("Nothing matches"),
                 )
             });

@@ -107,7 +107,7 @@ impl Settings {
                     .px_3()
                     .py(px(7.))
                     .border_b_1()
-                    .border_color(rgba(0xffffff0d))
+                    .border_color(ui(0xffffff0d))
                     .child(
                         div()
                             .flex_none()
@@ -115,8 +115,8 @@ impl Settings {
                             .px_2()
                             .py(px(2.))
                             .rounded(px(5.))
-                            .bg(rgba(0xffffff14))
-                            .text_color(rgba(0xffffffee))
+                            .bg(ui(0xffffff14))
+                            .text_color(ui(0xffffffee))
                             .child(shown_keys(keys)),
                     )
                     .child(
@@ -125,7 +125,7 @@ impl Settings {
                             .min_w_0()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_color(rgba(0xffffffb0))
+                            .text_color(ui(0xffffffb0))
                             .child(shown_action(action)),
                     )
                     .child(
@@ -147,7 +147,7 @@ impl Settings {
                 div()
                     .px_3()
                     .py(px(8.))
-                    .text_color(rgba(0xffffff70))
+                    .text_color(ui(0xffffff70))
                     .child("None yet: the defaults are as in the menus.")
                     .into_any_element(),
             );
@@ -164,8 +164,8 @@ impl Settings {
                     .px_3()
                     .py(px(7.))
                     .border_b_1()
-                    .border_color(rgba(0xffffff0d))
-                    .child(div().text_color(rgba(0xffffffb0)).child(if ghostty == 1 {
+                    .border_color(ui(0xffffff0d))
+                    .child(div().text_color(ui(0xffffffb0)).child(if ghostty == 1 {
                         "Ghostty has 1 key binding".to_owned()
                     } else {
                         format!("Ghostty has {ghostty} key bindings")
@@ -184,8 +184,8 @@ impl Settings {
                 .id("add-key")
                 .px_3()
                 .py(px(8.))
-                .text_color(rgba(0x8fb4ffff))
-                .hover(|d| d.bg(rgba(0xffffff08)))
+                .text_color(ui(0x8fb4ffff))
+                .hover(|d| d.bg(ui(0xffffff08)))
                 .child("Add a key binding…")
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.adding_key = Some(AddKey::default());
@@ -236,20 +236,20 @@ impl Settings {
             .flex()
             .items_center()
             .gap_2()
-            .child(div().w(px(70.)).flex_none().text_color(rgba(0xffffffb0)).child("Keys"))
+            .child(div().w(px(70.)).flex_none().text_color(ui(0xffffffb0)).child("Keys"))
             .child(
                 div()
                     .flex_1()
                     .px_2()
                     .py(px(3.))
                     .rounded(px(5.))
-                    .bg(rgba(0x0000004d))
+                    .bg(ui(0x0000004d))
                     .border_1()
-                    .border_color(if recording { rgba(0xf7768ecc) } else { rgba(0xffffff1a) })
+                    .border_color(if recording { ui(0xf7768ecc) } else { ui(0xffffff1a) })
                     .text_color(if adding.keys.is_empty() {
-                        rgba(0xffffff50)
+                        ui(0xffffff50)
                     } else {
-                        rgba(0xffffffee)
+                        ui(0xffffffee)
                     })
                     .child(keys),
             )
@@ -272,8 +272,8 @@ impl Settings {
                 .px_2()
                 .py(px(3.))
                 .rounded(px(6.))
-                .when(on, |d| d.bg(rgba(0x3478f6ff)))
-                .when(!on, |d| d.hover(|d| d.bg(rgba(0xffffff1a))))
+                .when(on, |d| d.bg(ui(0x3478f6ff)))
+                .when(!on, |d| d.hover(|d| d.bg(ui(0xffffff1a))))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(adding) = this.adding_key.as_mut() {
@@ -287,14 +287,14 @@ impl Settings {
             .flex()
             .items_center()
             .gap_2()
-            .child(div().w(px(70.)).flex_none().text_color(rgba(0xffffffb0)).child("Does"))
+            .child(div().w(px(70.)).flex_none().text_color(ui(0xffffffb0)).child("Does"))
             .child(
                 div()
                     .flex()
                     .gap(px(2.))
                     .p(px(2.))
                     .rounded(px(8.))
-                    .bg(rgba(0xffffff12))
+                    .bg(ui(0xffffff12))
                     .child(mode("key-mode-action", "An action", !adding.text_mode, false))
                     .child(mode("key-mode-text", "Types text", adding.text_mode, true)),
             );
@@ -309,10 +309,10 @@ impl Settings {
                 .px_2()
                 .py(px(3.))
                 .rounded(px(5.))
-                .bg(rgba(0x0000004d))
+                .bg(ui(0x0000004d))
                 .border_1()
-                .border_color(if focused { rgba(0x8fb4ff99) } else { rgba(0xffffff1a) })
-                .text_color(if text.is_empty() { rgba(0xffffff40) } else { rgba(0xffffffee) })
+                .border_color(if focused { ui(0x8fb4ff99) } else { ui(0xffffff1a) })
+                .text_color(if text.is_empty() { ui(0xffffff40) } else { ui(0xffffffee) })
                 .child(match (text.is_empty(), focused) {
                     (true, _) => hint.to_owned(),
                     (false, true) => format!("{text}▏"),
@@ -354,9 +354,9 @@ impl Settings {
                     .px_2()
                     .py(px(2.))
                     .rounded(px(4.))
-                    .when(chosen, |d| d.bg(rgba(0x3478f6ff)))
-                    .when(!chosen, |d| d.hover(|d| d.bg(rgba(0xffffff10))))
-                    .text_color(rgba(0xffffffd8))
+                    .when(chosen, |d| d.bg(ui(0x3478f6ff)))
+                    .when(!chosen, |d| d.hover(|d| d.bg(ui(0xffffff10))))
+                    .text_color(ui(0xffffffd8))
                     .child(label)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(adding) = this.adding_key.as_mut() {

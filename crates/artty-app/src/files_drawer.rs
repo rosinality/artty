@@ -282,9 +282,9 @@ impl WindowView {
                 .py(px(1.))
                 .rounded(px(4.))
                 .text_size(px(11.))
-                .text_color(if on { rgba(0xffffffee) } else { rgba(0xffffff90) })
-                .bg(if on { rgba(0xffffff1f) } else { rgba(0x00000000) })
-                .hover(|d| d.bg(rgba(0xffffff26)))
+                .text_color(if on { ui(0xffffffee) } else { ui(0xffffff90) })
+                .bg(if on { ui(0xffffff1f) } else { ui(0x00000000) })
+                .hover(|d| d.bg(ui(0xffffff26)))
                 .child(label)
         };
         let header = div()
@@ -294,7 +294,7 @@ impl WindowView {
             .px(px(10.))
             .py(px(8.))
             .border_b_1()
-            .border_color(rgba(0xffffff14))
+            .border_color(ui(0xffffff14))
             .child(
                 div()
                     .flex()
@@ -309,7 +309,7 @@ impl WindowView {
                         .min_w_0()
                         .text_size(px(10.5))
                         .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(rgba(0xffffff70)),
+                        .text_color(ui(0xffffff70)),
                     )
                     .child(small_button("files-up".into(), "↑", false).on_click(cx.listener(
                         |this, _, _, cx| {
@@ -346,7 +346,7 @@ impl WindowView {
             .child(
                 Self::one_line(path.as_ref().map_or_else(|| "…".to_owned(), shown))
                     .text_size(px(11.5))
-                    .text_color(rgba(0xffffffb0)),
+                    .text_color(ui(0xffffffb0)),
             );
 
         let rows: Vec<gpui::AnyElement> = files
@@ -370,7 +370,7 @@ impl WindowView {
                     .gap(px(6.))
                     .h(px(22.))
                     .px(px(10.))
-                    .hover(|d| d.bg(rgba(0xffffff0c)))
+                    .hover(|d| d.bg(ui(0xffffff0c)))
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                         if dir {
                             this.open_folder(open.clone(), cx);
@@ -382,7 +382,7 @@ impl WindowView {
                         div()
                             .flex_none()
                             .w(px(12.))
-                            .text_color(if dir { rgba(0x7aa2f7ff) } else { rgba(0xffffff50) })
+                            .text_color(if dir { ui(0x7aa2f7ff) } else { ui(0xffffff50) })
                             .child(if dir { "▸" } else { "·" }),
                     )
                     .child(
@@ -394,16 +394,16 @@ impl WindowView {
                         .flex_1()
                         .min_w_0()
                         .text_color(if entry.name.starts_with('.') {
-                            rgba(0xffffff70)
+                            ui(0xffffff70)
                         } else {
-                            rgba(0xffffffd8)
+                            ui(0xffffffd8)
                         }),
                     )
                     .child(
                         div()
                             .flex_none()
                             .text_size(px(11.))
-                            .text_color(rgba(0xffffff50))
+                            .text_color(ui(0xffffff50))
                             .group_hover(group.clone(), |s| s.opacity(0.))
                             .when(!dir, |d| d.child(crate::cli::bytes(entry.size))),
                     )
@@ -423,7 +423,7 @@ impl WindowView {
                                         if server == LOCAL { "Reveal" } else { "Download" },
                                         false,
                                     )
-                                    .bg(rgba(0x1e2430ff))
+                                    .bg(ui(0x1e2430ff))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.download_file(download.clone(), cx);
                                         cx.stop_propagation();
@@ -432,7 +432,7 @@ impl WindowView {
                             })
                             .child(
                                 small_button(format!("files-copy-{i}").into(), "Copy Path", false)
-                                    .bg(rgba(0x1e2430ff))
+                                    .bg(ui(0x1e2430ff))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                             copy.display().to_string(),
@@ -457,15 +457,15 @@ impl WindowView {
                 .w(px(WIDTH))
                 .flex()
                 .flex_col()
-                .bg(rgba(0x161a22f4))
+                .bg(ui(0x161a22f4))
                 .border_l_1()
-                .border_color(rgba(0xffffff1f))
+                .border_color(ui(0xffffff1f))
                 .shadow_lg()
                 .text_size(px(12.5))
                 // Clicks and scrolls here aren't the terminal's.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.bg(rgba(0x22304af4)))
+                .drag_over::<gpui::ExternalPaths>(|style, _, _, _| style.bg(ui(0x22304af4)))
                 .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
                     this.drop_into_folder(paths, window, cx);
                     cx.stop_propagation();
@@ -473,7 +473,7 @@ impl WindowView {
                 .child(header)
                 .when_some(files.error.clone(), |d, error| {
                     d.child(
-                        div().px(px(10.)).py(px(6.)).text_size(px(11.5)).text_color(rgba(0xf7768eff)).child(error),
+                        div().px(px(10.)).py(px(6.)).text_size(px(11.5)).text_color(ui(0xf7768eff)).child(error),
                     )
                 })
                 .child(
@@ -485,7 +485,7 @@ impl WindowView {
                         .py(px(4.))
                         .children(rows)
                         .when(empty && files.path.is_some(), |d| {
-                            d.child(div().px(px(10.)).text_color(rgba(0xffffff50)).child("Nothing here"))
+                            d.child(div().px(px(10.)).text_color(ui(0xffffff50)).child("Nothing here"))
                         }),
                 ),
         )
