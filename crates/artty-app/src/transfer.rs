@@ -17,20 +17,27 @@ const CHUNK: usize = 128 * 1024;
 /// The largest file fetched to open.
 const MAX_FETCH: u64 = 256 << 20;
 
-/// Send `paths` to the pane's machine; their paths there.
+/// Send `paths` to the pane's machine (into `dir`, else a folder of their
+/// own in its cache); their paths there.
 pub async fn send(
     pane: PaneId,
     paths: &[PathBuf],
+    dir: Option<PathBuf>,
     cx: &mut AsyncApp,
 ) -> Result<Vec<PathBuf>, String> {
     let mut sent = Vec::new();
     for path in paths {
-        sent.push(send_file(pane, path, cx).await?);
+        sent.push(send_file(pane, path, dir.clone(), cx).await?);
     }
     Ok(sent)
 }
 
-async fn send_file(pane: PaneId, path: &Path, cx: &mut AsyncApp) -> Result<PathBuf, String> {
+async fn send_file(
+    pane: PaneId,
+    path: &Path,
+    dir: Option<PathBuf>,
+    cx: &mut AsyncApp,
+) -> Result<PathBuf, String> {
     let shown = path.display();
     let name = path.file_name().ok_or("no file name")?.to_string_lossy().into_owned();
     let mut file = std::fs::File::open(path).map_err(|err| format!("{shown}: {err}"))?;
@@ -43,7 +50,8 @@ async fn send_file(pane: PaneId, path: &Path, cx: &mut AsyncApp) -> Result<PathB
         let read = read_full(&mut file, &mut data).map_err(|err| format!("{shown}: {err}"))?;
         data.truncate(read);
         let last = read < CHUNK;
-        let query = Query::Upload { pane, upload, name: name.clone(), data, last };
+        let query =
+            Query::Upload { pane, upload, name: name.clone(), data, last, dir: dir.clone() };
         let answer =
             cx.update(|cx| app_state::query(query, cx)).map_err(|_| "the app is closing")?;
         match answer.await {
@@ -82,7 +90,34 @@ pub async fn fetch(
         .collect();
     let dir = std::env::temp_dir().join("artty-remote-files").join(server);
     std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-    let here = dir.join(name);
+    fetch_to(pane, path, &dir.join(name), cx).await
+}
+
+/// Fetch the file at `path` on the pane's machine into ~/Downloads (as
+/// `name (1)`... beside a file of its name); where it is.
+pub async fn download(pane: PaneId, path: &Path, cx: &mut AsyncApp) -> Result<PathBuf, String> {
+    let name = path.file_name().ok_or("not a file")?;
+    let home = std::env::var_os("HOME").ok_or("no home")?;
+    let downloads = PathBuf::from(home).join("Downloads");
+    let mut here = downloads.join(name);
+    let stem = Path::new(name).file_stem().unwrap_or(name).to_string_lossy().into_owned();
+    let extension = Path::new(name).extension().map(|e| format!(".{}", e.to_string_lossy()));
+    let mut n = 1;
+    while here.exists() {
+        here = downloads.join(format!("{stem} ({n}){}", extension.as_deref().unwrap_or("")));
+        n += 1;
+    }
+    fetch_to(pane, path, &here, cx).await
+}
+
+/// Fetch the file at `path` on the pane's machine to `here`.
+async fn fetch_to(
+    pane: PaneId,
+    path: &Path,
+    here: &Path,
+    cx: &mut AsyncApp,
+) -> Result<PathBuf, String> {
+    let here = here.to_owned();
     let mut file = std::fs::File::create(&here).map_err(|err| err.to_string())?;
     let mut offset = 0;
     let result = loop {

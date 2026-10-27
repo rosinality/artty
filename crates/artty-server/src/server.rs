@@ -14,8 +14,8 @@ use artty_core::control::{
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
-    AppCommand, ClientMessage, PaneSpec, PaneState, Query, Reply, SelectionOp, ServerMessage,
-    TabLayout, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId,
+    AppCommand, ClientMessage, DirEntry, PaneSpec, PaneState, Query, Reply, SelectionOp,
+    ServerMessage, TabLayout, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId,
     WorkspaceLayout,
 };
 use artty_core::vt::ansi::Progress;
@@ -239,8 +239,8 @@ pub(crate) struct Server {
     history: HashMap<PaneId, VecDeque<(f32, u64)>>,
     /// The TCP ports each pane's programs listen on, as of the last sample.
     ports: HashMap<PaneId, Vec<u16>>,
-    /// Files being sent by apps, by app and upload: where, and open.
-    uploads: HashMap<(ClientId, u64), (PathBuf, std::fs::File)>,
+    /// Files being sent by apps, by app and upload.
+    uploads: HashMap<(ClientId, u64), Upload>,
     server_usage: Option<ServerUsage>,
     /// The listening socket's descriptor, kept open across a hand-over.
     listener_fd: i32,
@@ -338,6 +338,33 @@ fn osascript_notify(title: &str, body: &str) {
         .stderr(std::process::Stdio::null())
         .spawn();
 }
+
+/// A file an app is sending: arriving at `part`, for `dir` as `name`.
+struct Upload {
+    part: PathBuf,
+    dir: PathBuf,
+    name: std::ffi::OsString,
+    file: std::fs::File,
+}
+
+/// `name` in `dir`, or, if that's taken, `name (1)`, `name (2)`... (before
+/// its extension).
+fn free_name(dir: &Path, name: &std::ffi::OsStr) -> PathBuf {
+    let path = dir.join(name);
+    if !path.exists() {
+        return path;
+    }
+    let name = Path::new(name);
+    let stem = name.file_stem().unwrap_or(name.as_os_str()).to_string_lossy();
+    let extension = name.extension().map(|e| format!(".{}", e.to_string_lossy()));
+    (1..)
+        .map(|n| dir.join(format!("{stem} ({n}){}", extension.as_deref().unwrap_or(""))))
+        .find(|path| !path.exists())
+        .expect("some number is free")
+}
+
+/// The most entries a folder's listing has.
+const MAX_LISTED: usize = 5000;
 
 /// The largest part of a file read at once ([`Query::ReadFile`]).
 const FILE_CHUNK: usize = 256 * 1024;
@@ -1389,8 +1416,8 @@ impl Server {
             Input::Disconnected(id) => {
                 self.clients.remove(&id);
                 // What it was sending is cut short: no half files.
-                for ((_, _), (path, _)) in self.uploads.extract_if(|(client, _), _| *client == id) {
-                    let _ = std::fs::remove_file(path);
+                for (_, receiving) in self.uploads.extract_if(|(client, _), _| *client == id) {
+                    let _ = std::fs::remove_file(receiving.part);
                 }
                 // Its windows keep running, detached.
                 for window in self.windows.values_mut().filter(|w| w.client == Some(id)) {
@@ -1835,9 +1862,10 @@ impl Server {
                     Query::CommandOutput { pane } => Reply::Output(
                         self.panes.get(&pane).and_then(|p| p.session.command_output()),
                     ),
-                    Query::Upload { pane: _, upload, name, data, last } => {
-                        Reply::Upload(self.upload(client, upload, &name, &data, last))
+                    Query::Upload { pane: _, upload, name, data, last, dir } => {
+                        Reply::Upload(self.upload(client, upload, &name, &data, last, dir))
                     },
+                    Query::ListDir { pane, path } => Reply::Dir(self.list_dir(pane, path)),
                     Query::ReadFile { pane: _, path, offset } => {
                         Reply::File(read_file(&path, offset))
                     },
@@ -1951,6 +1979,10 @@ impl Server {
     }
 
     /// Part of a file an app sends: on the end of the file it started.
+    /// Part of a file an app sends: on the end of the file it started. It
+    /// arrives as a hidden `.part` file, named as asked (or, beside a file
+    /// of that name, `name (1)`...) once whole.
+    #[allow(clippy::too_many_arguments)]
     fn upload(
         &mut self,
         client: ClientId,
@@ -1958,33 +1990,91 @@ impl Server {
         name: &str,
         data: &[u8],
         last: bool,
+        dir: Option<PathBuf>,
     ) -> Result<Option<PathBuf>, String> {
         use std::io::Write;
         let key = (client, upload);
         if let std::collections::hash_map::Entry::Vacant(entry) = self.uploads.entry(key) {
-            let name = Path::new(name).file_name().ok_or("no file name")?;
-            let dir = uploads_dir().ok_or("no home directory")?;
-            prune_uploads(&dir);
-            let stamp =
-                SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-            let dir = dir.join(format!("{stamp}-{client}-{upload}"));
-            std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-            let path = dir.join(name);
-            let file = std::fs::File::create(&path).map_err(|err| err.to_string())?;
-            entry.insert((path, file));
+            let name = Path::new(name).file_name().ok_or("no file name")?.to_owned();
+            let dir = match dir {
+                Some(dir) if dir.is_dir() => dir,
+                Some(dir) => return Err(format!("{} isn't a folder", dir.display())),
+                None => {
+                    let cache = uploads_dir().ok_or("no home directory")?;
+                    prune_uploads(&cache);
+                    let stamp = SystemTime::now()
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs());
+                    let dir = cache.join(format!("{stamp}-{client}-{upload}"));
+                    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+                    dir
+                },
+            };
+            let part = dir.join(format!(".{}.{client}-{upload}.part", name.to_string_lossy()));
+            let file = std::fs::File::create(&part).map_err(|err| err.to_string())?;
+            entry.insert(Upload { part, dir, name, file });
         }
-        let (path, file) = self.uploads.get_mut(&key).expect("just made");
-        if let Err(err) = file.write_all(data) {
-            let (path, _) = self.uploads.remove(&key).expect("there");
-            let _ = std::fs::remove_file(path);
+        let receiving = self.uploads.get_mut(&key).expect("just made");
+        if let Err(err) = receiving.file.write_all(data) {
+            let receiving = self.uploads.remove(&key).expect("there");
+            let _ = std::fs::remove_file(receiving.part);
             return Err(err.to_string());
         }
         if !last {
             return Ok(None);
         }
-        let path = path.clone();
-        self.uploads.remove(&key);
+        let receiving = self.uploads.remove(&key).expect("there");
+        let path = free_name(&receiving.dir, &receiving.name);
+        std::fs::rename(&receiving.part, &path).map_err(|err| {
+            let _ = std::fs::remove_file(&receiving.part);
+            err.to_string()
+        })?;
         Ok(Some(path))
+    }
+
+    /// What's in `path` (else the pane's current directory): folders
+    /// first, then by name.
+    fn list_dir(
+        &self,
+        pane: PaneId,
+        path: Option<PathBuf>,
+    ) -> Result<(PathBuf, Vec<DirEntry>), String> {
+        let path = match path {
+            Some(path) => path,
+            None => self
+                .panes
+                .get(&pane)
+                .and_then(|p| p.session.cwd())
+                .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+                .ok_or("no directory")?,
+        };
+        let path = path.canonicalize().map_err(|err| format!("{}: {err}", path.display()))?;
+        let mut entries: Vec<DirEntry> = std::fs::read_dir(&path)
+            .map_err(|err| format!("{}: {err}", path.display()))?
+            .flatten()
+            .take(MAX_LISTED)
+            .filter_map(|entry| {
+                let link = entry.file_type().ok()?.is_symlink();
+                // A link: what it leads to (a folder to go into, say).
+                let metadata =
+                    std::fs::metadata(entry.path()).or_else(|_| entry.metadata()).ok()?;
+                Some(DirEntry {
+                    name: entry.file_name().to_string_lossy().into_owned(),
+                    dir: metadata.is_dir(),
+                    link,
+                    size: metadata.len(),
+                    modified: metadata
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs()),
+                })
+            })
+            .collect();
+        entries.sort_by(|a, b| {
+            b.dir.cmp(&a.dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        Ok((path, entries))
     }
 
     fn respond(&mut self, request: Request) -> Result<Response, String> {

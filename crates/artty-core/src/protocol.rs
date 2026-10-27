@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 13;
+pub const PROTOCOL_VERSION: u32 = 14;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -528,6 +528,15 @@ pub enum Query {
         name: String,
         data: Vec<u8>,
         last: bool,
+        /// Into this folder (not replacing a file there: another name is
+        /// found), else a folder of its own in the cache.
+        dir: Option<PathBuf>,
+    },
+    /// What's in a folder on the pane's machine: `path`, else the pane's
+    /// current directory. Answered with [`Reply::Dir`].
+    ListDir {
+        pane: PaneId,
+        path: Option<PathBuf>,
     },
     /// Part of a file on the pane's machine, from `offset`: answered with
     /// [`Reply::File`].
@@ -553,6 +562,20 @@ pub enum Reply {
     /// The bytes from the offset asked for, and the file's length; or why
     /// not.
     File(Result<(Vec<u8>, u64), String>),
+    /// The folder listed (resolved), and what's in it; or why not.
+    Dir(Result<(PathBuf, Vec<DirEntry>), String>),
+}
+
+/// A folder's entry ([`Query::ListDir`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    /// A folder (or a link to one).
+    pub dir: bool,
+    pub link: bool,
+    pub size: u64,
+    /// Seconds since the Unix epoch.
+    pub modified: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

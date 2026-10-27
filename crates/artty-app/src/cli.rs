@@ -928,6 +928,7 @@ fn remote_test(server: &artty_core::ServerConfig) -> Result<(), String> {
     }
 }
 
+#[cfg(target_os = "macos")]
 /// Run as ssh's askpass helper: ask the app (which shows the question in a
 /// window) and print the answer for ssh. Fails (status 1) when cancelled.
 pub fn askpass(socket: &std::path::Path, request: &artty_core::remote::AskpassRequest) -> i32 {

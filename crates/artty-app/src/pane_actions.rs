@@ -156,7 +156,7 @@ impl WindowView {
             if paths.len() == 1 { "1 file".to_owned() } else { format!("{} files", paths.len()) };
         self.show_toast(format!("Sending {files} to {name}…"), cx);
         cx.spawn(async move |this, cx| {
-            let sent = crate::transfer::send(pane, &paths, cx).await;
+            let sent = crate::transfer::send(pane, &paths, None, cx).await;
             let _ = this.update(cx, |this, cx| match sent {
                 Ok(there) => {
                     this.toast = None;

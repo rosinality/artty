@@ -35,6 +35,8 @@ mod activity;
 mod ask_sheet;
 #[path = "copy_mode.rs"]
 mod copy_mode;
+#[path = "files_drawer.rs"]
+mod files_drawer;
 #[path = "pane_actions.rs"]
 mod pane_actions;
 
@@ -87,7 +89,8 @@ actions!(
         EqualizePanes,
         PaneToNewTab,
         ToggleBroadcast,
-        ReopenClosedTab
+        ReopenClosedTab,
+        ToggleFiles
     ]
 );
 
@@ -365,6 +368,8 @@ pub struct WindowView {
     toast: Option<(SharedString, Instant)>,
     /// Questions ssh asks while logging in, the first shown.
     asks: Vec<ask_sheet::AskSheet>,
+    /// The files drawer (⌘⇧E), when open.
+    files: Option<files_drawer::Files>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -476,6 +481,7 @@ impl WindowView {
             copy_mode: None,
             toast: None,
             asks: Vec::new(),
+            files: None,
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation],
         }
@@ -1320,6 +1326,7 @@ impl WindowView {
         if app_state::expire_echoes(cx) {
             cx.notify();
         }
+        self.files_tick(cx);
         if self.blink_hold {
             self.blink_hold = false;
         } else if self.blink_enabled {
@@ -3229,6 +3236,7 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
             .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
+            .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_files(cx)))
             .on_action(cx.listener(|this, action: &SendText, _, cx| {
                 if !this.showing_activity() {
                     this.input(action.text.clone().into_bytes(), cx);
@@ -3462,6 +3470,7 @@ impl Render for WindowView {
                                 .children(self.divider_handles(container, cx))
                                 .children(self.search_bar(container))
                                 .children(self.copy_mode_badge())
+                                .children(self.files_drawer(cx))
                                 .children(self.toast_overlay())
                                 .on_drop(cx.listener(
                                     |this, paths: &gpui::ExternalPaths, window, cx| {
@@ -3594,6 +3603,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-n", NewWorkspace, None),
         KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
         KeyBinding::new("cmd-shift-a", ShowActivity, None),
+        KeyBinding::new("cmd-shift-e", ToggleFiles, None),
         KeyBinding::new("ctrl-cmd-]", NextWorkspace, None),
         KeyBinding::new("ctrl-cmd-[", PreviousWorkspace, None),
         KeyBinding::new("cmd-w", ClosePane, None),

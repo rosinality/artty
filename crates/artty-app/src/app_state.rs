@@ -1863,6 +1863,7 @@ mod tests {
             name: "../notes.txt".into(),
             data: data.to_vec(),
             last,
+            dir: None,
         };
         assert!(matches!(ask(upload(b"hello ", false)), Reply::Upload(Ok(None))));
         let Reply::Upload(Ok(Some(there))) = ask(upload(b"there", true)) else { panic!() };
@@ -1873,6 +1874,41 @@ mod tests {
         assert!(matches!(read, Reply::File(Ok((data, 11))) if data == b"there"));
         let folder = ask(Query::ReadFile { pane, path: dir.clone(), offset: 0 });
         assert!(matches!(folder, Reply::File(Err(_))), "a folder isn't a file");
+
+        // Into a folder: named as sent, then beside it as "name (1)".
+        let into = dir.join("into");
+        std::fs::create_dir_all(&into).unwrap();
+        let mut send_into = |upload, data: &[u8]| {
+            let query = Query::Upload {
+                pane,
+                upload,
+                name: "a.txt".into(),
+                data: data.to_vec(),
+                last: true,
+                dir: Some(into.clone()),
+            };
+            match ask(query) {
+                Reply::Upload(Ok(Some(path))) => path,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(send_into(2, b"one"), into.join("a.txt"));
+        assert_eq!(send_into(3, b"two"), into.join("a (1).txt"));
+        // Listed: folders first; hidden part files gone once whole.
+        std::fs::create_dir_all(into.join("sub")).unwrap();
+        let Reply::Dir(Ok((listed, entries))) =
+            ask(Query::ListDir { pane, path: Some(into.clone()) })
+        else {
+            panic!()
+        };
+        assert_eq!(listed, into.canonicalize().unwrap());
+        let names: Vec<(&str, bool, u64)> = entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.dir, if e.dir { 0 } else { e.size }))
+            .collect();
+        assert_eq!(names, [("sub", true, 0), ("a (1).txt", false, 3), ("a.txt", false, 3)]);
+        // Without a path: the pane's directory.
+        assert!(matches!(ask(Query::ListDir { pane, path: None }), Reply::Dir(Ok(_))));
 
         // A program copies; another asks for a page to open.
         let copy = "printf '\\033]52;c;%s\\a' $(printf copied | base64)\r";

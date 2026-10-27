@@ -289,6 +289,15 @@ this Mac's browser (web pages only). There, artty keeps its socket and
 scripts in `/tmp/artty-UID`, made private (other users can't take its
 place, as anyone can make files in `/tmp`).
 
+Files (⌘⇧E): a drawer over the terminal's right edge lists the focused
+pane's current directory — on whichever machine the pane is — and follows
+it as the shell moves (open a folder in it to stay there; **Pane** goes back).
+Double-click a file to open it here (another machine's is fetched first);
+**Download** puts one in ~/Downloads (**Reveal**, for this Mac's), **Copy
+Path** copies where it is; drop files on the drawer to put them in the folder
+it shows (never replacing a file: `name (1)` beside it). It lies over the
+terminal instead of narrowing it, so nothing running there resizes.
+
 Ports: when a program in a pane listens on a TCP port (a dev server, say),
 the tab shows it (`:3000`; on Linux, where the server finds them). Click it
 to open it in the browser — another machine's is forwarded here first, by

@@ -93,7 +93,8 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
             | Reply::Search(_)
             | Reply::Output(_)
             | Reply::Upload(_)
-            | Reply::File(_) => {},
+            | Reply::File(_)
+            | Reply::Dir(_) => {},
         },
         ServerMessage::Image(image) => tag(&mut image.id),
         ServerMessage::Welcome { .. }
@@ -184,7 +185,8 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
             | Query::Cwd { pane }
             | Query::CommandOutput { pane }
             | Query::Upload { pane, .. }
-            | Query::ReadFile { pane, .. } => untag(pane),
+            | Query::ReadFile { pane, .. }
+            | Query::ListDir { pane, .. } => untag(pane),
             Query::DetachedWindows => {},
         },
         ClientMessage::Control { .. }
