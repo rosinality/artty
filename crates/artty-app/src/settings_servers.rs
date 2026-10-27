@@ -181,7 +181,11 @@ impl Settings {
             .into_any_element()
     }
 
-    fn form_button(id: ElementId, label: &'static str, primary: bool) -> gpui::Stateful<gpui::Div> {
+    pub(super) fn form_button(
+        id: ElementId,
+        label: &'static str,
+        primary: bool,
+    ) -> gpui::Stateful<gpui::Div> {
         div()
             .id(id)
             .flex_none()

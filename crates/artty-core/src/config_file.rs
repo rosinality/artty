@@ -68,6 +68,52 @@ impl ConfigFile {
         self.doc["colors"] = Item::Table(colors);
     }
 
+    /// Use colors read from another terminal's theme.
+    pub fn set_colors(&mut self, theme: &crate::theme_import::ImportedTheme) {
+        let hex = |rgb: crate::vt::ansi::Rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b);
+        let mut colors = Table::new();
+        for (key, color) in [
+            ("foreground", theme.foreground),
+            ("background", theme.background),
+            ("cursor", theme.cursor),
+            ("selection", theme.selection),
+        ] {
+            if let Some(color) = color {
+                colors[key] = value(hex(color));
+            }
+        }
+        if !theme.palette.is_empty() {
+            colors["palette"] = value(theme.palette.iter().map(|&c| hex(c)).collect::<Array>());
+        }
+        self.doc["colors"] = Item::Table(colors);
+    }
+
+    /// The `[keys]` table, made if missing.
+    fn keys(&mut self) -> &mut Table {
+        if !self.doc.get("keys").is_some_and(Item::is_table) {
+            self.doc["keys"] = Item::Table(Table::new());
+        }
+        self.doc["keys"].as_table_mut().expect("just made")
+    }
+
+    /// Bind `keystrokes` to `action` (in `[keys]`), replacing what they did.
+    pub fn set_key(&mut self, keystrokes: &str, action: &crate::KeyAction) {
+        let item = match action {
+            crate::KeyAction::Named(name) => value(name.as_str()),
+            crate::KeyAction::Send { send } => {
+                let mut table = toml_edit::InlineTable::new();
+                table.insert("send", send.as_str().into());
+                value(table)
+            },
+        };
+        self.keys()[keystrokes] = item;
+    }
+
+    /// Take a binding of `keystrokes` out of `[keys]`.
+    pub fn remove_key(&mut self, keystrokes: &str) {
+        self.keys().remove(keystrokes);
+    }
+
     /// Add another machine's server, or replace the one of the same name.
     pub fn add_server(&mut self, server: &ServerConfig) {
         let mut table = Table::new();
@@ -239,5 +285,28 @@ mod tests {
         }
         file.set_theme(None);
         assert!(Config::parse(&file.doc.to_string()).unwrap().colors.foreground.is_none());
+    }
+
+    #[test]
+    fn keys_and_imported_colors_round_trip() {
+        use crate::KeyAction;
+        let mut file = ConfigFile::parse(PathBuf::from("/x"), "font-size = 14\n").unwrap();
+        file.set_key("cmd+e>1", &KeyAction::Named("text:è".into()));
+        file.set_key("cmd-e 2", &KeyAction::Send { send: "é".into() });
+        file.set_key("cmd-shift-t", &KeyAction::Named("new-tab".into()));
+        file.remove_key("cmd-shift-t");
+        let theme = crate::theme_import::parse(
+            "t",
+            "background = #101010\nforeground = #eeeeee\npalette = 0=#000000\npalette = 1=#ff0000\n",
+        )
+        .unwrap();
+        file.set_colors(&theme);
+        let config = Config::parse(&file.doc.to_string()).unwrap();
+        assert_eq!(config.keys.len(), 2);
+        assert_eq!(config.keys["cmd+e>1"], KeyAction::Named("text:è".into()));
+        assert_eq!(config.keys["cmd-e 2"], KeyAction::Send { send: "é".into() });
+        assert_eq!(config.colors.background, crate::theme_import::parse_hex("#101010"));
+        assert_eq!(config.colors.palette.len(), 2);
+        assert_eq!(config.font_size, 14.);
     }
 }

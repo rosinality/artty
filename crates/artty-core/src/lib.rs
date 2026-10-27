@@ -19,6 +19,7 @@ mod session;
 mod shell;
 mod state;
 mod theme;
+pub mod theme_import;
 
 pub use artty_vt as vt;
 pub use config::{

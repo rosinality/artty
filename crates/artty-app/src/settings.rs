@@ -11,9 +11,54 @@ use gpui::{
 
 use crate::hooks::{self, Status};
 
+#[path = "settings_keys.rs"]
+mod keys;
 #[path = "settings_servers.rs"]
 mod servers;
+#[path = "settings_themes.rs"]
+mod themes;
 use crate::terminal::hsla;
+
+/// The page shown.
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Appearance,
+    Behavior,
+    Keys,
+    Sessions,
+    Machines,
+    Agents,
+}
+
+impl Page {
+    const ALL: [Page; 6] = [
+        Page::Appearance,
+        Page::Behavior,
+        Page::Keys,
+        Page::Sessions,
+        Page::Machines,
+        Page::Agents,
+    ];
+
+    fn name(self) -> &'static str {
+        match self {
+            Page::Appearance => "Appearance",
+            Page::Behavior => "Behavior",
+            Page::Keys => "Keys",
+            Page::Sessions => "Sessions",
+            Page::Machines => "Machines",
+            Page::Agents => "Agents",
+        }
+    }
+}
+
+/// A text field being typed into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Typing {
+    ThemeFilter,
+    ActionFilter,
+    KeyText,
+}
 
 /// A number setting edited with `−` and `+`, or typed in.
 #[derive(Clone, Copy)]
@@ -73,6 +118,16 @@ pub struct Settings {
     adding: Option<servers::AddServer>,
     /// A server whose Remove was clicked once; a second click removes it.
     removing: Option<String>,
+    page: Page,
+    typing: Option<Typing>,
+    theme_filter: String,
+    /// Ghostty's themes, once read (empty while reading, or without it).
+    ghostty: Option<Vec<artty_core::theme_import::ImportedTheme>>,
+    /// The theme last chosen here, by name.
+    chosen_theme: Option<String>,
+    /// The key binding being made, and its keys being recorded.
+    adding_key: Option<keys::AddKey>,
+    recording: Option<gpui::Subscription>,
     focus: FocusHandle,
 }
 
@@ -129,6 +184,13 @@ impl Settings {
             editing: None,
             adding: None,
             removing: None,
+            page: Page::Appearance,
+            typing: None,
+            theme_filter: String::new(),
+            ghostty: None,
+            chosen_theme: None,
+            adding_key: None,
+            recording: None,
             focus: cx.focus_handle(),
         }
     }
@@ -223,7 +285,10 @@ impl Settings {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.server_form_key(event, cx) {
+        if self.server_form_key(event, cx)
+            || self.theme_filter_key(event, cx)
+            || self.key_form_key(event, cx)
+        {
             return cx.stop_propagation();
         }
         let Some(editing) = self.editing.as_mut() else { return };
@@ -701,12 +766,19 @@ impl Render for Settings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let c = self.config.clone();
         let tint = Hsla { a: 0.88, ..hsla(c.theme().background) };
+        let page = self.page;
+        let imports =
+            if page == Page::Appearance { self.theme_import_rows(cx) } else { Vec::new() };
+        let mut theme_rows = vec![
+            Self::row("Theme", None, div().into_any_element()),
+            div().px_3().pb_2().child(self.theme_chips(cx)).into_any_element(),
+        ];
+        theme_rows.extend(imports);
+        let themes = Self::section("Theme", theme_rows);
 
         let appearance = Self::section(
-            "Appearance",
+            "Text and window",
             vec![
-                Self::row("Theme", None, div().into_any_element()),
-                div().px_3().pb_2().child(self.theme_chips(cx)).into_any_element(),
                 Self::row("Font", None, self.font_picker(cx)),
                 Self::row(
                     "Font size",
@@ -898,6 +970,44 @@ impl Render for Settings {
             }),
         ));
         let agents = Self::section("Agents", agent_rows);
+        let keys = Self::section("Your key bindings", self.keys_page(cx));
+        let tabs = Page::ALL.map(|p| {
+            div()
+                .id(p.name())
+                .px(px(10.))
+                .py(px(4.))
+                .rounded(px(6.))
+                .when(p == page, |d| d.bg(rgba(0xffffff26)).text_color(rgba(0xffffffee)))
+                .when(p != page, |d| {
+                    d.text_color(rgba(0xffffffa0)).hover(|d| d.bg(rgba(0xffffff12)))
+                })
+                .child(p.name())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.commit_editing(cx);
+                    this.page = p;
+                    this.typing = None;
+                    cx.notify();
+                }))
+        });
+        let content: Vec<AnyElement> = match page {
+            Page::Appearance => vec![themes, appearance],
+            Page::Behavior => vec![behavior],
+            Page::Keys => vec![
+                keys,
+                div()
+                    .text_size(px(11.5))
+                    .text_color(rgba(0xffffff70))
+                    .child(
+                        "Several keys pressed in turn make a sequence (⌘E then 1). They're \
+                         saved in [keys] of the config file, which also takes Ghostty's way \
+                         (cmd+e>1 = text:è).",
+                    )
+                    .into_any_element(),
+            ],
+            Page::Sessions => vec![sessions],
+            Page::Machines => vec![self.servers_section(cx)],
+            Page::Agents => vec![agents],
+        };
 
         div()
             .id("settings")
@@ -921,6 +1031,7 @@ impl Render for Settings {
                     .text_color(rgba(0xffffffb8))
                     .child("Settings"),
             )
+            .child(div().flex_none().flex().justify_center().gap_1().pb_3().children(tabs))
             .child(
                 div()
                     .id("settings-scroll")
@@ -937,11 +1048,13 @@ impl Render for Settings {
                     .when_some(self.status.clone(), |d, status| {
                         d.child(div().text_size(px(12.)).text_color(rgba(0xffffffb0)).child(status))
                     })
-                    .child(appearance)
-                    .child(behavior)
-                    .child(sessions)
-                    .child(self.servers_section(cx))
-                    .child(agents),
+                    .children(content),
             )
+            // A theme file dropped here: imported.
+            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+                if let Some(path) = paths.paths().first() {
+                    this.import_theme(path, cx);
+                }
+            }))
     }
 }

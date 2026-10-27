@@ -95,8 +95,14 @@ fish, neovim) can tell Shift+Enter, Ctrl+I and Escape apart.
 
 ## Configuration
 
-⌘, opens Settings for the common options (themes, font, cursor style, opacity and blur,
-keyboard, bell, notifications, sessions). Everything lives in
+⌘, opens Settings for the common options, in pages: Appearance (themes,
+font, cursor style, opacity and blur), Behavior, Keys (your bindings; record
+a new one — several keys make a sequence — and choose an action or text to
+type), Sessions, Machines and Agents. A theme can come from another
+terminal: Import… (or drop the file on Settings) reads iTerm2's
+`.itermcolors`, Ghostty's, kitty's, Alacritty's, WezTerm's and Windows
+Terminal's; with Ghostty installed, its few hundred themes are listed, to
+try with a click. Everything lives in
 `~/.config/artty/config.toml`, which Settings edits in place and every window
 reloads when it changes; see [`config.example.toml`](config.example.toml).
 Its `[keys]` table rebinds keys: `"cmd-shift-t" = "new-tab"`, `"cmd-t" =

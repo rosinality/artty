@@ -42,7 +42,7 @@ fn action_name(name: &str) -> String {
 
 /// Ghostty's keystrokes (`super+e>one`) as GPUI's (`cmd-e 1`); others as
 /// they are.
-fn keystrokes(written: &str) -> String {
+pub(crate) fn keystrokes(written: &str) -> String {
     if !written.contains(['+', '>']) {
         return written.to_owned();
     }
@@ -109,7 +109,7 @@ fn key_name(key: &str) -> String {
 
 /// Ghostty's `text:` escapes: `\xHH` (bytes, of UTF-8), `\u{HEX}`, `\n`,
 /// `\r`, `\t`, `\e`, `\\`, `\"`.
-fn unescape(text: &str) -> String {
+pub(crate) fn unescape(text: &str) -> String {
     let mut bytes: Vec<u8> = Vec::new();
     let mut chars = text.chars().peekable();
     let push = |bytes: &mut Vec<u8>, c: char| {
