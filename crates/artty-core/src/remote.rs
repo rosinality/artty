@@ -76,6 +76,11 @@ pub fn open(config: &ServerConfig) -> Result<Opened, String> {
             // Let the last of stderr arrive.
             std::thread::sleep(Duration::from_millis(100));
             let said = said.lock().unwrap().clone();
+            if said.contains("not found") && said.contains("artty") {
+                return Err(format!(
+                    "{said} (install artty there: scripts/remote-install.sh in artty's source)"
+                ));
+            }
             Err(if said.is_empty() { format!("no answer: {err}") } else { said })
         },
     }

@@ -217,7 +217,60 @@ pub fn processes() -> Vec<ProcessSample> {
     samples
 }
 
-#[cfg(not(target_os = "macos"))]
+/// This user's processes, from /proc.
+#[cfg(target_os = "linux")]
+pub fn processes() -> Vec<ProcessSample> {
+    use std::os::unix::fs::MetadataExt;
+    // SAFETY: plain queries.
+    let (ticks, page, uid) = unsafe {
+        (
+            libc::sysconf(libc::_SC_CLK_TCK).max(1) as u64,
+            libc::sysconf(libc::_SC_PAGESIZE).max(1) as u64,
+            libc::getuid(),
+        )
+    };
+    let boot: f64 = std::fs::read_to_string("/proc/stat")
+        .ok()
+        .and_then(|stat| stat.lines().find_map(|l| l.strip_prefix("btime ")?.trim().parse().ok()))
+        .unwrap_or(0.);
+    let Ok(entries) = std::fs::read_dir("/proc") else { return Vec::new() };
+    let mut samples = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else {
+            continue;
+        };
+        if entry.metadata().map_or(true, |m| m.uid() != uid) {
+            continue;
+        }
+        let Some(sample) = linux_sample(pid, ticks, page, boot) else { continue };
+        samples.push(sample);
+    }
+    samples
+}
+
+/// One process from /proc/PID/stat: `pid (comm) state ppid pgrp ...`.
+#[cfg(target_os = "linux")]
+fn linux_sample(pid: i32, ticks: u64, page: u64, boot: f64) -> Option<ProcessSample> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (head, rest) = stat.rsplit_once(')')?;
+    let name = head.split_once('(')?.1.to_owned();
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let field = |i: usize| fields.get(i).and_then(|f| f.parse::<u64>().ok());
+    // After the name: state 0, ppid 1, pgrp 2, utime 11, stime 12,
+    // starttime 19 (ticks since boot), rss 21 (pages).
+    let name = script_name(pid, &name).unwrap_or(name);
+    Some(ProcessSample {
+        pid,
+        ppid: field(1)? as i32,
+        pgid: field(2)? as i32,
+        name,
+        cpu_ns: (field(11)? + field(12)?) * 1_000_000_000 / ticks,
+        memory: field(21)? * page,
+        started: boot + field(19)? as f64 / ticks as f64,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn processes() -> Vec<ProcessSample> {
     Vec::new()
 }
@@ -247,7 +300,17 @@ fn script_name(pid: i32, name: &str) -> Option<String> {
         return None;
     }
     let args = process_args(pid)?;
-    let script = args.iter().skip(1).find(|arg| !arg.starts_with('-'))?;
+    let mut rest = args.iter().skip(1);
+    let script = loop {
+        match rest.next()?.as_str() {
+            // Code on the command line: no script to name it after.
+            "-c" | "-e" | "--eval" | "-p" | "--print" => return None,
+            // `python -m module`: the module.
+            "-m" => return rest.next().cloned(),
+            arg if arg.starts_with('-') => continue,
+            arg => break arg,
+        }
+    };
     let file = std::path::Path::new(script).file_stem()?.to_str()?;
     // `node /usr/lib/node_modules/x/dist/index.js`: the package is the name.
     if matches!(file, "index" | "main" | "cli") {

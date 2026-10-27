@@ -250,6 +250,10 @@ ssh = "me@devbox"
 
 The connection is ssh running `artty server --stdio` there (artty must be
 installed there; ssh uses your config and keys, without password prompts).
+On Linux, artty is the server and the `artty` command (the app is macOS
+only); `./scripts/remote-install.sh DESTINATION` builds it there from this
+source with that machine's cargo and installs it in `~/.local/bin`, handing
+a running server over to the new build.
 Like this Mac's, that server keeps its sessions running on its own, and it
 sends screens rather than a stream of output, so a dropped connection —
 sleep, a new network — loses nothing: artty reconnects with backoff (a

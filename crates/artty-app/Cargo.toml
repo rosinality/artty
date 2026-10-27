@@ -9,14 +9,15 @@ publish = false
 [dependencies]
 artty-core = { path = "../artty-core" }
 artty-server = { path = "../artty-server" }
-futures = "0.3"
 libc = "0.2"
-gpui = { version = "0.2.2", features = ["runtime_shaders"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico", "qoi"] }
 log = "0.4"
 serde_json = "1"
 
+# The app is macOS only; elsewhere artty is the command and the server.
 [target.'cfg(target_os = "macos")'.dependencies]
+futures = "0.3"
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff", "ico", "qoi"] }
 block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSBundle", "NSLocale", "NSString", "NSError"] }
