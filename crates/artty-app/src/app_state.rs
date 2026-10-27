@@ -1643,14 +1643,76 @@ mod tests {
                 break at.duration_since(sent).as_millis();
             }
         };
-        send(&ClientMessage::Input { pane, bytes: vec![3] });
-        send(&ClientMessage::Input { pane, bytes: b"exit\r".to_vec() });
+        // Close the pane, and wait for that: the server must not be left
+        // printing `yes` after the connection goes.
+        send(&ClientMessage::ClosePane { pane });
+        let closed = Instant::now() + Duration::from_secs(10);
+        loop {
+            let wait = closed.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(wait).map(|(message, _, _)| message) {
+                Ok(ServerMessage::Sync { seq }) => send(&ClientMessage::Ack { seq }),
+                Ok(ServerMessage::WindowClosed { window: w }) if Some(w) == window => break,
+                Ok(_) => {},
+                Err(_) => panic!("the pane wasn't closed"),
+            }
+        }
         println!(
             "round trips {rtts:?} ms; flooding 5 s: {syncs} batches, {frames} screens, {} KB/s; \
              a ping during it: {pong} ms",
             bytes / 5 / 1024
         );
         let _ = child.kill();
+    }
+
+    /// Panes that never stop printing, in windows no app shows, don't hold
+    /// back another window's screens, or answers.
+    #[test]
+    fn floods_elsewhere_dont_hold_back_screens() {
+        let Some((mut busy, dir)) = scratch_server("flood") else { return };
+        for _ in 0..2 {
+            let pane = attach_window(&mut busy);
+            let input = ClientMessage::Input { pane, bytes: b"yes\r".to_vec() };
+            write_message(&mut busy.writer, &input).unwrap();
+        }
+        // That app goes away, leaving them printing for a while.
+        let _ = busy.child.kill();
+        let _ = busy.child.wait();
+        std::thread::sleep(Duration::from_secs(1));
+
+        let (mut opened, _) = scratch_server("flood").unwrap();
+        let pane = attach_window(&mut opened);
+        let artty_core::remote::Opened { mut child, mut reader, mut writer, .. } = opened;
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok(message) = read_message::<ServerMessage>(&mut reader) {
+                if tx.send(message).is_err() {
+                    break;
+                }
+            }
+        });
+        let input = ClientMessage::Input { pane, bytes: b"echo hi\r".to_vec() };
+        write_message(&mut writer, &input).unwrap();
+        write_message(&mut writer, &ClientMessage::Ping { id: 1 }).unwrap();
+        let (mut screen, mut pong) = (false, false);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !(screen && pong) {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(wait) {
+                Ok(ServerMessage::Sync { seq }) => {
+                    write_message(&mut writer, &ClientMessage::Ack { seq }).unwrap()
+                },
+                Ok(ServerMessage::Frame { pane: p, .. }) => screen |= p == pane,
+                Ok(ServerMessage::Pong { id: 1 }) => pong = true,
+                Ok(_) => {},
+                Err(_) => panic!("screen {screen}, answer {pong} after 2 s"),
+            }
+        }
+
+        let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
+        write_message(&mut writer, &stop).unwrap();
+        while rx.recv_timeout(Duration::from_secs(2)).is_ok() {}
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Screens wait for acknowledgment: two batches unacknowledged and the

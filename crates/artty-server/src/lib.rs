@@ -71,6 +71,10 @@ pub fn resume(header: &Path) -> io::Result<()> {
     serve_on(listener, server_socket_path(), Some((header, snapshots)))
 }
 
+/// The longest the main loop handles queued inputs before its per-batch
+/// work (screens, among others).
+const BATCH_TIME: Duration = Duration::from_millis(8);
+
 type Handover =
     (handover::Header, std::collections::HashMap<u64, artty_core::vt::term::TermSnapshot>);
 
@@ -103,9 +107,13 @@ fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -
             Err(mpsc::RecvTimeoutError::Timeout) => {},
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        // Handle everything already queued before doing per-batch work, so a
-        // burst of output costs one screen update.
-        while let Ok(input) = rx.try_recv() {
+        // Handle what's already queued before doing per-batch work, so a
+        // burst of output costs one screen update; but only for so long, or
+        // panes that never pause would hold back every screen.
+        let end = Instant::now() + BATCH_TIME;
+        while Instant::now() < end
+            && let Ok(input) = rx.try_recv()
+        {
             survive("handling an input", || server.handle(input));
         }
         survive("updating", || server.after_batch());

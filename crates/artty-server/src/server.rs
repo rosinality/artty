@@ -1308,6 +1308,10 @@ impl Server {
         let visible = self.visible(id);
         let Some(pane) = self.panes.get_mut(&id) else { return };
         let Some(notice) = pane.session.handle(event) else { return };
+        // Output alone changes no status (and the status reads the terminal,
+        // so waiting for its reader on every piece of output): poll() also
+        // refreshes it every second.
+        let refresh = !matches!(notice, Notice::Redraw);
         match notice {
             Notice::Redraw => {},
             Notice::Title(title) => pane.set_title(Some(title)),
@@ -1367,7 +1371,7 @@ impl Server {
                 return;
             },
         }
-        if let Some(pane) = self.panes.get_mut(&id) {
+        if refresh && let Some(pane) = self.panes.get_mut(&id) {
             pane.refresh();
         }
         self.mark_dirty(id);
