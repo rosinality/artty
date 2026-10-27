@@ -86,20 +86,33 @@ impl Echo {
         }
     }
 
-    /// A new screen from the server: drop the guesses it shows; if one is
-    /// overdue (or the cursor left the line), all were wrong.
+    /// A new screen from the server. The guesses its cursor has gone past
+    /// were echoed: each must show what was typed (then it's done with), or
+    /// all were wrong. Ones still ahead of it wait, even if their cell
+    /// already shows the character — that can be a shell's suggestion for
+    /// the rest of the line, not the echo. Overdue, or the cursor off the
+    /// line: wrong.
     pub fn confirm(&mut self, frame: &Frame, round_trip: Duration, now: Instant) {
-        if self.guesses.is_empty() {
-            return;
+        let (Some(first), Some(last)) = (self.guesses.first(), self.guesses.last()) else { return };
+        let Some(cursor) = frame.cursor.filter(|c| c.line == first.line) else {
+            return self.wrong();
+        };
+        // Further on than typed: the shell is drawing elsewhere on the
+        // line for a moment (a right prompt); judge a later screen.
+        if cursor.column <= last.column + 1 {
+            let echoed = self.guesses.iter().take_while(|g| g.column < cursor.column).count();
+            if self.guesses[..echoed]
+                .iter()
+                .any(|g| cell(frame, g.line, g.column) != Some(g.character))
+            {
+                return self.wrong();
+            }
+            if echoed > 0 {
+                self.guesses.drain(..echoed);
+                self.trusted = true;
+            }
         }
-        let before = self.guesses.len();
-        self.guesses.retain(|g| cell(frame, g.line, g.column) != Some(g.character));
-        if self.guesses.len() < before {
-            self.trusted = true;
-        }
-        let moved =
-            frame.cursor.is_none_or(|c| self.guesses.first().is_some_and(|g| c.line != g.line));
-        if moved || self.overdue(round_trip, now) {
+        if self.overdue(round_trip, now) {
             self.wrong();
         }
     }
@@ -250,6 +263,14 @@ mod tests {
         }
     }
 
+    /// `typed` with a shell's suggestion for the rest after the cursor
+    /// (zsh-autosuggestions, fish), as it draws it.
+    fn suggested(typed: &str, suggestion: &str) -> Frame {
+        let mut frame = screen(&format!("{typed}{suggestion}"));
+        frame.cursor.as_mut().unwrap().column = typed.chars().count();
+        frame
+    }
+
     fn shown(echo: &Echo, frame: &Frame) -> String {
         let mut frame = frame.clone();
         echo.overlay(&mut frame);
@@ -279,6 +300,47 @@ mod tests {
         assert_eq!(shown(&echo, &screen("$ ls")), "$ ls ");
         echo.confirm(&screen("$ ls "), TRIP, now);
         assert!(echo.is_empty());
+    }
+
+    /// Typing what the shell suggests: the suggestion's characters are
+    /// already in the cells being guessed, which isn't the server's echo.
+    /// (Taking it for one placed later guesses a cell behind: "herdrr".)
+    #[test]
+    fn a_suggestion_is_not_an_echo() {
+        let now = Instant::now();
+        let mut echo = Echo::default();
+        echo.typed(&screen("$ "), TermMode::empty(), b"h", now);
+        echo.confirm(&suggested("$ h", "erdr"), TRIP, now);
+        // Typed faster than the echo: e, r, d, r, all in suggested cells.
+        let stale = suggested("$ h", "erdr");
+        echo.typed(&stale, TermMode::empty(), b"er", now);
+        echo.confirm(&stale, TRIP, now);
+        echo.typed(&stale, TermMode::empty(), b"dr", now);
+        assert_eq!(shown(&echo, &stale), "$ herdr");
+        // The server catches up a key at a time.
+        for done in ["$ he", "$ her", "$ herd"] {
+            let frame = suggested(done, &"$ herdr"[done.len()..]);
+            echo.confirm(&frame, TRIP, now);
+            assert_eq!(shown(&echo, &frame), "$ herdr", "at {done}");
+        }
+        echo.confirm(&screen("$ herdr"), TRIP, now);
+        assert!(echo.is_empty());
+        assert_eq!(shown(&echo, &screen("$ herdr")), "$ herdr");
+    }
+
+    /// The server's cursor went past a guess with something else there:
+    /// wrong at once, not after waiting.
+    #[test]
+    fn a_different_echo_is_wrong_at_once() {
+        let now = Instant::now();
+        let mut echo = Echo::default();
+        echo.typed(&screen("$ "), TermMode::empty(), b"a", now);
+        echo.confirm(&screen("$ a"), TRIP, now);
+        echo.typed(&screen("$ a"), TermMode::empty(), b"b", now);
+        echo.confirm(&screen("$ aX"), TRIP, now);
+        assert!(echo.is_empty());
+        echo.typed(&screen("$ aX"), TermMode::empty(), b"c", now);
+        assert!(echo.is_empty(), "off until Enter");
     }
 
     #[test]
