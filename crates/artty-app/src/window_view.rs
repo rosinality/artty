@@ -2171,6 +2171,14 @@ impl WindowView {
             })
     }
 
+    /// Whether the workspace at `position` comes first under its server.
+    fn first_on_server(&self, position: usize) -> bool {
+        let workspaces = &self.layout.workspaces;
+        position == 0
+            || ids::server_of(workspaces[position - 1].id)
+                != ids::server_of(workspaces[position].id)
+    }
+
     /// A new workspace on `server`: in its window here, or in a new window
     /// of it shown here.
     fn new_workspace_on(&mut self, server: ServerId, cx: &mut Context<Self>) {
@@ -2254,7 +2262,8 @@ impl WindowView {
             .flex()
             .items_center()
             .gap(px(4.))
-            .mt(px(if position == 0 { 0. } else { 8. }))
+            // Apart from the section above, but not from its server's header.
+            .mt(px(if self.first_on_server(position) { 0. } else { 8. }))
             .h(px(24.))
             // Right padding as the WORKSPACES heading's, so their + line up.
             .pl(px(4.))

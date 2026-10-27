@@ -238,7 +238,9 @@ over ssh, say — `artty shell-integration zsh|bash` prints a script to source.
 artty can show other machines' servers beside this Mac's, in the same
 window: each server's workspaces go under its name in the sidebar, and its
 tabs work as local ones do — splits, agents' status, notifications, images,
-the `artty` command inside them. Add them to the config:
+the `artty` command inside them. Add one in Settings (Other machines), with
+`artty remote add devbox --ssh me@devbox` (both check the connection first),
+or in the config:
 
 ```toml
 [[servers]]

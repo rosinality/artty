@@ -4,9 +4,9 @@
 use std::io;
 use std::path::PathBuf;
 
-use toml_edit::{Array, DocumentMut, Item, Table, value};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, value};
 
-use crate::Config;
+use crate::{Config, ServerConfig};
 
 pub struct ConfigFile {
     path: PathBuf,
@@ -66,6 +66,46 @@ impl ConfigFile {
         colors["selection"] = value(theme.selection);
         colors["palette"] = value(theme.palette.iter().copied().collect::<Array>());
         self.doc["colors"] = Item::Table(colors);
+    }
+
+    /// Add another machine's server, or replace the one of the same name.
+    pub fn add_server(&mut self, server: &ServerConfig) {
+        let mut table = Table::new();
+        table["name"] = value(&server.name);
+        if let Some(ssh) = &server.ssh {
+            table["ssh"] = value(ssh);
+        }
+        if let Some(artty) = &server.artty {
+            table["artty"] = value(artty);
+        }
+        if !server.command.is_empty() {
+            table["command"] = value(server.command.iter().collect::<Array>());
+        }
+        if !self.doc.get("servers").is_some_and(Item::is_array_of_tables) {
+            self.doc["servers"] = Item::ArrayOfTables(ArrayOfTables::new());
+        }
+        let servers = self.doc["servers"].as_array_of_tables_mut().unwrap();
+        let named = |t: &Table| t.get("name").and_then(Item::as_str) == Some(server.name.as_str());
+        let index = servers.iter().position(named);
+        match index {
+            Some(index) => *servers.get_mut(index).unwrap() = table,
+            None => servers.push(table),
+        }
+    }
+
+    /// Remove the server named `name`; returns whether there was one.
+    pub fn remove_server(&mut self, name: &str) -> bool {
+        let Some(servers) = self.doc.get_mut("servers").and_then(Item::as_array_of_tables_mut)
+        else {
+            return false;
+        };
+        let before = servers.len();
+        servers.retain(|t| t.get("name").and_then(Item::as_str) != Some(name));
+        let removed = servers.len() < before;
+        if servers.is_empty() {
+            self.doc.remove("servers");
+        }
+        removed
     }
 
     pub fn save(&self) -> io::Result<()> {
@@ -156,6 +196,36 @@ mod tests {
         assert_eq!(config.font_size, 14.);
         assert!(!config.background_blur);
         assert_eq!(config.colors.foreground.map(|c| c.r), Some(255));
+    }
+
+    #[test]
+    fn adding_and_removing_servers() {
+        let mut file = ConfigFile::parse(PathBuf::from("/x"), "font-size = 13\n").unwrap();
+        let devbox = ServerConfig {
+            name: "devbox".into(),
+            ssh: Some("me@devbox".into()),
+            ..Default::default()
+        };
+        file.add_server(&devbox);
+        file.add_server(&ServerConfig {
+            name: "other".into(),
+            ssh: Some("o".into()),
+            ..Default::default()
+        });
+        // Same name: replaced in place.
+        file.add_server(&ServerConfig { artty: Some("~/bin/artty".into()), ..devbox.clone() });
+        file.set_bool("background-blur", false);
+        let config = Config::parse(&file.doc.to_string()).unwrap();
+        assert_eq!(config.servers.len(), 2);
+        assert_eq!(config.servers[0].artty.as_deref(), Some("~/bin/artty"));
+        assert!(!config.background_blur);
+
+        assert!(file.remove_server("devbox"));
+        assert!(!file.remove_server("devbox"));
+        assert!(file.remove_server("other"));
+        let config = Config::parse(&file.doc.to_string()).unwrap();
+        assert!(config.servers.is_empty());
+        assert_eq!(config.font_size, 13.);
     }
 
     #[test]

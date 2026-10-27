@@ -14,6 +14,7 @@ pub mod logging;
 pub mod pane;
 mod process;
 pub mod protocol;
+pub mod remote;
 mod session;
 mod shell;
 mod state;

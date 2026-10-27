@@ -10,6 +10,9 @@ use gpui::{
 };
 
 use crate::hooks::{self, Status};
+
+#[path = "settings_servers.rs"]
+mod servers;
 use crate::terminal::hsla;
 
 /// A number setting edited with `−` and `+`, or typed in.
@@ -66,6 +69,10 @@ pub struct Settings {
     font_menu: bool,
     status: Option<String>,
     editing: Option<Editing>,
+    /// The form adding another machine's server, when open.
+    adding: Option<servers::AddServer>,
+    /// A server whose Remove was clicked once; a second click removes it.
+    removing: Option<String>,
     focus: FocusHandle,
 }
 
@@ -120,6 +127,8 @@ impl Settings {
             font_menu: false,
             status: None,
             editing: None,
+            adding: None,
+            removing: None,
             focus: cx.focus_handle(),
         }
     }
@@ -214,6 +223,9 @@ impl Settings {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.server_form_key(event, cx) {
+            return cx.stop_propagation();
+        }
         let Some(editing) = self.editing.as_mut() else { return };
         let keystroke = &event.keystroke;
         match keystroke.key.as_str() {
@@ -885,6 +897,7 @@ impl Render for Settings {
                     .child(appearance)
                     .child(behavior)
                     .child(sessions)
+                    .child(self.servers_section(cx))
                     .child(agents),
             )
     }

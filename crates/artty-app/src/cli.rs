@@ -27,6 +27,7 @@ pub const COMMANDS: &[&str] = &[
     "settings",
     "restart",
     "server",
+    "remote",
     "ps",
     "top",
     "kill",
@@ -93,6 +94,17 @@ artty, your own pane is found automatically:
                                          or move it to this build (programs keep
                                          running; a server too old to hand over
                                          restarts, and tabs and agents return)
+  artty remote [list]                    other machines' servers shown in the app
+  artty remote add NAME --ssh DESTINATION [--artty PATH] [--no-test]
+                                         add one, reached over ssh (artty must be
+                                         installed there; --artty if it isn't on
+                                         the login shell's PATH); checks it first
+  artty remote add NAME --command COMMAND
+                                         or reached by any shell command that
+                                         runs `artty server --stdio` somewhere
+  artty remote remove NAME               stop showing it (its sessions keep
+                                         running there)
+  artty remote test NAME                 try connecting to it
   artty server --stdio                   carry an app's connection to this
                                          machine's server over stdin and stdout
                                          (what a remote artty app runs over ssh)
@@ -160,6 +172,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             println!("{}", artty_server::handover_check());
             return Ok(0);
         },
+        (Some("remote"), _, _) => return remote(&args[1..]),
         (Some("server"), Some("--stdio"), _) => {
             let exe = std::env::current_exe().map_err(|err| err.to_string())?;
             return artty_server::stdio_relay(&exe)
@@ -772,6 +785,110 @@ fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String
 }
 
 /// `artty hooks` subcommands: show, status, install, uninstall.
+/// `artty remote`: other machines' servers, in the config file.
+fn remote(args: &[String]) -> Result<i32, String> {
+    use artty_core::config_file::ConfigFile;
+    use artty_core::{Config, ServerConfig};
+    let describe = |server: &ServerConfig| match (&server.ssh, server.command.is_empty()) {
+        (_, false) => server.command.join(" "),
+        (Some(ssh), true) => format!("ssh {ssh}"),
+        (None, true) => "(no ssh or command)".to_owned(),
+    };
+    let find = |name: Option<&String>| -> Result<ServerConfig, String> {
+        let name = name.ok_or("expected a server's name")?;
+        Config::load()
+            .0
+            .servers
+            .into_iter()
+            .find(|s| &s.name == name)
+            .ok_or_else(|| format!("no server named {name} (see `artty remote list`)"))
+    };
+    match args.first().map(String::as_str) {
+        None | Some("list") => {
+            let servers = Config::load().0.servers;
+            if servers.is_empty() {
+                println!(
+                    "No other machines' servers. Add one: artty remote add NAME --ssh DESTINATION"
+                );
+            }
+            for server in servers {
+                println!("{:<16} {}", server.name, describe(&server));
+            }
+            Ok(0)
+        },
+        Some("add") => {
+            let name = args
+                .get(1)
+                .filter(|name| !name.starts_with("--") && !name.trim().is_empty())
+                .ok_or("remote add: expected a name, then --ssh DESTINATION")?;
+            let mut server = ServerConfig { name: name.trim().to_owned(), ..Default::default() };
+            let mut test = true;
+            let mut rest = args[2..].iter();
+            while let Some(arg) = rest.next() {
+                let mut value = || rest.next().cloned().ok_or(format!("{arg}: expected a value"));
+                match arg.as_str() {
+                    "--ssh" => server.ssh = Some(value()?),
+                    "--artty" => server.artty = Some(value()?),
+                    "--command" => server.command = vec!["sh".into(), "-c".into(), value()?],
+                    "--no-test" => test = false,
+                    other => return Err(format!("remote add: unknown option {other}")),
+                }
+            }
+            if server.connect_command().is_none() {
+                return Err("remote add: expected --ssh DESTINATION (or --command)".into());
+            }
+            if test {
+                remote_test(&server)?;
+            }
+            let mut file = ConfigFile::open().map_err(|err| err.to_string())?;
+            file.add_server(&server);
+            file.save().map_err(|err| err.to_string())?;
+            println!("Added {}: the app shows it in the sidebar.", server.name);
+            Ok(0)
+        },
+        Some("remove") => {
+            let server = find(args.get(1))?;
+            let mut file = ConfigFile::open().map_err(|err| err.to_string())?;
+            file.remove_server(&server.name);
+            file.save().map_err(|err| err.to_string())?;
+            println!("Removed {}; its sessions keep running there.", server.name);
+            Ok(0)
+        },
+        Some("test") => {
+            remote_test(&find(args.get(1))?)?;
+            Ok(0)
+        },
+        Some(other) => Err(format!("remote: unknown action {other} (list, add, remove, test)")),
+    }
+}
+
+/// Connect to a server and say how it went.
+fn remote_test(server: &artty_core::ServerConfig) -> Result<(), String> {
+    use artty_core::protocol::ServerMessage;
+    eprintln!(
+        "Connecting to {} ({})…",
+        server.name,
+        server.connect_command().unwrap_or_default().join(" ")
+    );
+    let mut opened = artty_core::remote::open(server)
+        .map_err(|err| format!("couldn't reach {}: {err}", server.name))?;
+    let _ = opened.child.kill();
+    let _ = opened.child.wait();
+    match opened.welcome {
+        ServerMessage::Welcome { version, server_version }
+            if version == artty_core::protocol::protocol_version() =>
+        {
+            println!("{}: artty {server_version}, ready.", server.name);
+            Ok(())
+        },
+        ServerMessage::Welcome { server_version, .. } => Err(format!(
+            "{} runs another artty build ({server_version}); install this one there",
+            server.name
+        )),
+        _ => Err(format!("{}: unexpected answer", server.name)),
+    }
+}
+
 fn hooks(args: &[String]) -> Result<i32, String> {
     let names: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
     match args.first().map(String::as_str) {
