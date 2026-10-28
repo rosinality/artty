@@ -2427,6 +2427,7 @@ impl WindowView {
         let folded = self.folded_servers.contains(&server);
         let workspaces =
             self.layout.workspaces.iter().filter(|w| ids::server_of(w.id) == server).count();
+        let lone = self.lone_workspace(server);
         div()
             .id(("server", server as usize))
             .group(group.clone())
@@ -2485,22 +2486,47 @@ impl WindowView {
                                 }),
                         )
                     })
+                    // A workspace there; with only one (its header left
+                    // out), ⊞ for another and + for a tab in it.
                     .when(connected, |d| {
-                        d.child(
+                        let button = |id: &'static str, label: &'static str, tip: &'static str| {
                             div()
-                                .id(("new-workspace-on", server as usize))
+                                .id((id, server as usize))
                                 .opacity(0.)
                                 .group_hover(group.clone(), |s| s.opacity(1.))
-                                .px_1()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .min_w(px(18.))
+                                .h(px(18.))
                                 .rounded(px(4.))
                                 .hover(|d| d.bg(ui(0xffffff14)))
                                 .text_size(px(14.))
-                                .child("+")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.new_workspace_on(server, cx);
-                                    cx.stop_propagation();
-                                })),
-                        )
+                                .child(label)
+                                .tooltip(move |_, cx| cx.new(|_| Tooltip(tip.into())).into())
+                        };
+                        let new_workspace = cx.listener(move |this, _, _, cx| {
+                            this.new_workspace_on(server, cx);
+                            cx.stop_propagation();
+                        });
+                        match lone.filter(|_| !folded) {
+                            Some(workspace) => d
+                                .child(
+                                    button("new-workspace-on", "⊞", "New Workspace")
+                                        .text_size(px(12.))
+                                        .on_click(new_workspace),
+                                )
+                                .child(button("new-tab-on", "+", "New Tab").on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.open_tab_in(Some(workspace), cx);
+                                        cx.stop_propagation();
+                                    },
+                                ))),
+                            None => d.child(
+                                button("new-workspace-on", "+", "New Workspace")
+                                    .on_click(new_workspace),
+                            ),
+                        }
                     }),
             )
             .when_some(note, |d, note| {
@@ -3078,7 +3104,8 @@ impl WindowView {
     /// WORKSPACES, with a + for another; or, for a lone workspace, TABS with
     /// a + for a tab and ⊞ for another workspace.
     fn sidebar_heading(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let lone = self.lone_workspace(cx).then(|| self.layout.workspaces[0].id);
+        // Without other machines', every workspace is this Mac's.
+        let lone = self.lone_workspace(LOCAL);
         let button = |id: &'static str, label: &'static str, tip: &'static str| {
             div()
                 .id(id)
@@ -3124,13 +3151,19 @@ impl WindowView {
             })
     }
 
-    /// One workspace, on one server, listed: its header would only repeat
-    /// the heading, so the heading is its (TABS, with its + and a way to a
-    /// second workspace, which brings the headers back).
-    fn lone_workspace(&self, cx: &App) -> bool {
-        self.layout.workspaces.len() == 1
-            && self.config.sidebar_style != artty_core::SidebarStyle::Switcher
-            && !app_state::several_servers(cx)
+    /// A server's only workspace here: its header would only repeat the
+    /// heading above it (TABS, or the server's), which speaks for it — with
+    /// its + and ⊞ for a second workspace, which brings the headers back.
+    fn lone_workspace(&self, server: ServerId) -> Option<WorkspaceId> {
+        if self.config.sidebar_style == artty_core::SidebarStyle::Switcher {
+            return None;
+        }
+        let mut on_server =
+            self.layout.workspaces.iter().filter(|w| ids::server_of(w.id) == server);
+        match (on_server.next(), on_server.next()) {
+            (Some(only), None) => Some(only.id),
+            _ => None,
+        }
     }
 
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3172,7 +3205,7 @@ impl WindowView {
                 continue;
             }
             // The only one: no header (the heading stands for it), never folded.
-            if self.lone_workspace(cx) {
+            if self.lone_workspace(server).is_some() {
                 rows.extend(workspace.tabs.iter().map(|tab| {
                     let row = self.tab_row(index, tab, cx).into_any_element();
                     index += 1;
