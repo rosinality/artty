@@ -2585,7 +2585,8 @@ impl WindowView {
             .group(group.clone())
             .flex()
             .items_center()
-            .gap(px(4.))
+            // As a tab row's, after its icon.
+            .gap(px(6.))
             // Apart from the section above, but not from its server's header.
             .mt(px(if self.first_on_server(position) { 0. } else { 8. }))
             .h(px(24.))
