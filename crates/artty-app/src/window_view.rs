@@ -2013,7 +2013,7 @@ impl WindowView {
             _ => None,
         };
         div()
-            .w(px(12.))
+            .w(px(10.))
             .flex_none()
             .flex()
             .justify_center()
@@ -2112,7 +2112,7 @@ impl WindowView {
             div()
                 .flex()
                 .items_center()
-                .gap(px(6.))
+                .gap(px(4.))
                 .h(px(22.))
                 .child(self.icon_cell(summary))
                 .child(match renaming {
@@ -2162,7 +2162,7 @@ impl WindowView {
                         .id(("pane", id as usize))
                         .flex()
                         .items_center()
-                        .gap(px(6.))
+                        .gap(px(4.))
                         .rounded(px(5.))
                         .hover(|d| d.bg(ui(0xffffff0c)))
                         // Under the tab's own line, indented and smaller;
@@ -2436,7 +2436,7 @@ impl WindowView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(4.))
                     .h(px(28.))
                     .px_1()
                     .rounded(px(7.))
@@ -2449,7 +2449,7 @@ impl WindowView {
                     .child(
                         div()
                             .id(("server-fold", server as usize))
-                            .w(px(12.))
+                            .w(px(10.))
                             .h(px(14.))
                             .flex_none()
                             .flex()
@@ -2504,7 +2504,7 @@ impl WindowView {
                 d.child(
                     // Under its name.
                     Self::one_line(note)
-                        .pl(px(22.))
+                        .pl(px(18.))
                         .pr_2()
                         .pb(px(4.))
                         .text_size(px(10.5))
@@ -2626,7 +2626,7 @@ impl WindowView {
             .flex()
             .items_center()
             // As a tab row's, after its icon.
-            .gap(px(6.))
+            .gap(px(4.))
             // Apart from the section above, but not from its server's header.
             .mt(px(if self.first_on_server(position) { 0. } else { 8. }))
             // A box as a tab row's.
@@ -2642,7 +2642,7 @@ impl WindowView {
             .child(
                 div()
                     .id(("workspace-fold", id as usize))
-                    .w(px(12.))
+                    .w(px(10.))
                     .h(px(16.))
                     .flex_none()
                     .flex()
@@ -2890,7 +2890,7 @@ impl WindowView {
             .id("workspace-switcher")
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(px(4.))
             .h(px(28.))
             .mb(px(4.))
             .px_2()
@@ -2914,7 +2914,7 @@ impl WindowView {
                     )
                 })
             })
-            .child(div().flex_none().w(px(12.)).flex().justify_center().child(chevron(true, ui(0xffffff90))))
+            .child(div().flex_none().w(px(10.)).flex().justify_center().child(chevron(true, ui(0xffffff90))))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.switcher_open = !this.switcher_open;
                 cx.notify();
@@ -3189,7 +3189,7 @@ impl WindowView {
                     .id("activity")
                     .flex()
                     .items_center()
-                    .gap(px(6.))
+                    .gap(px(4.))
                     // A box as a tab row's.
                     .h(px(28.))
                     .mb(px(8.))
@@ -3198,7 +3198,7 @@ impl WindowView {
                     .text_color(if self.showing_activity() { ui(0xffffffee) } else { ui(0xffffffb0) })
                     .when(self.showing_activity(), |d| d.bg(ui(0xffffff1c)))
                     .hover(|d| d.bg(ui(0xffffff10)))
-                    .child(div().w(px(12.)).flex_none().flex().justify_center().text_color(ui(0x8fb4ffff)).child("◔"))
+                    .child(div().w(px(10.)).flex_none().flex().justify_center().text_color(ui(0x8fb4ffff)).child("◔"))
                     .child(div().flex_1().child("Activity"))
                     .child(div().text_xs().text_color(ui(0xffffff66)).child("⇧⌘A"))
                     .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
