@@ -290,11 +290,13 @@ impl WindowView {
         // As the sidebar: the theme's background (nearly opaque, over the
         // terminal), its rows' boxes.
         let theme = crate::terminal::hsla(self.theme.background);
-        let header = div()
+        // In the titlebar's strip (a double-click there zooms, as anywhere
+        // in it), then the path.
+        let header = Self::titlebar("files-titlebar")
             .flex()
             .flex_col()
             .px(px(8.))
-            .pt(px(6.))
+            .pt(px(2.))
             .pb(px(6.))
             .border_b_1()
             .border_color(ui(0xffffff12))
@@ -343,8 +345,9 @@ impl WindowView {
                             cx.notify();
                         }),
                     ))
+                    // Away again, as the sidebar folds: ⇥.
                     .child(
-                        small_button("files-close".into(), "×", false)
+                        small_button("files-close".into(), "⇥", false)
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_files(cx))),
                     ),
             )
@@ -474,7 +477,8 @@ impl WindowView {
                 .right_0()
                 .h_full()
                 .w(px(WIDTH))
-                .bg(gpui::Hsla { a: 0.97, ..theme })
+                // Some of what's under it shows through.
+                .bg(gpui::Hsla { a: 0.88, ..theme })
                 .border_l_1()
                 .border_color(ui(0xffffff12))
                 .shadow_md()

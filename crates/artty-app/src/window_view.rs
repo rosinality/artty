@@ -3984,6 +3984,21 @@ impl Render for WindowView {
                             // the sidebar's way back and what it would show.
                             .when(self.sidebar_hidden, |d| d.pl(px(170.)).pr(px(170.)))
                             .children(self.sidebar_hidden.then(|| self.folded_sidebar_bar(cx)))
+                            // The files drawer's way in (⌘⇧E), as the sidebar's.
+                            .child(
+                                div()
+                                    .id("show-files")
+                                    .absolute()
+                                    .right(px(8.))
+                                    .top(px(7.))
+                                    .px(px(5.))
+                                    .rounded(px(4.))
+                                    .text_size(px(11.5))
+                                    .text_color(ui(0xffffff70))
+                                    .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffee)))
+                                    .child("⇤")
+                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_files(cx))),
+                            )
                             .child(Self::one_line(title).min_w_0()),
                     )
                     .when(self.showing_activity(), |d| {
@@ -4054,7 +4069,6 @@ impl Render for WindowView {
                                 .children(self.divider_handles(container, cx))
                                 .children(self.search_bar(container, cx))
                                 .children(self.copy_mode_badge())
-                                .children(self.files_drawer(cx))
                                 .children(self.toast_overlay())
                                 .children(self.pending_keys.clone().map(|keys| {
                                     div()
@@ -4079,6 +4093,8 @@ impl Render for WindowView {
                         )
                     }),
             )
+            // The files drawer: a side panel over the window's right edge.
+            .children(self.files_drawer(cx))
             .children(self.context_menu_overlay(window.viewport_size(), cx))
             .children(self.picker_overlay(cx))
             .children(self.palette_overlay(cx))
