@@ -2633,7 +2633,8 @@ impl WindowView {
             .when(folded && renaming.is_none(), |d| {
                 d.child(div().flex_none().text_size(px(11.)).text_color(ui(0xffffff60)).child(tabs.to_string()))
             })
-            .when_some(top, |d, top| {
+            // Folded, what its tabs would show (open, they show it).
+            .when_some(top.filter(|_| folded), |d, top| {
                 d.child(self.icon_cell(Some(top))).when(count > 1, |d| {
                     d.child(div().flex_none().text_size(px(10.5)).text_color(ui(0xffffff90)).child(count.to_string()))
                 })
