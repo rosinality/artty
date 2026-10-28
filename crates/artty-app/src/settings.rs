@@ -591,7 +591,7 @@ impl Settings {
                 .overflow_y_scroll()
                 .p(px(4.))
                 .rounded(px(8.))
-                .bg(ui(0x262a33fa))
+                .bg(ui(0x262a33ff))
                 .border_1()
                 .border_color(ui(0xffffff26))
                 .shadow_lg()
@@ -639,7 +639,8 @@ impl Settings {
                         cx.notify();
                     })),
             )
-            .children(list)
+            // Drawn after (over) the rows below it, which would show through.
+            .children(list.map(|list| gpui::deferred(list).with_priority(1)))
             .into_any_element()
     }
 
@@ -752,16 +753,19 @@ impl Settings {
             .py(px(8.))
             .border_b_1()
             .border_color(ui(0xffffff0d))
+            // The words give way (and wrap) to the control.
             .child(
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
+                    .min_w_0()
                     .child(div().text_color(ui(0xffffffee)).child(label))
                     .when_some(hint, |d, hint| {
                         d.child(div().text_size(px(11.)).text_color(ui(0xffffff70)).child(hint))
                     }),
             )
-            .child(control)
+            .child(div().flex_none().child(control))
             .into_any_element()
     }
 }
@@ -889,7 +893,7 @@ impl Render for Settings {
                 ),
                 Self::row(
                     "Workspaces in the sidebar",
-                    Some("All · only the current one open · only the current one, with a switcher"),
+                    Some("All, the current one open, or a switcher"),
                     self.sidebar_picker(cx),
                 ),
                 Self::row(

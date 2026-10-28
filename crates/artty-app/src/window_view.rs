@@ -2,7 +2,7 @@
 //! live in the artty server; this view draws what it sends and forwards
 //! input, so closing the window leaves them running.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -155,6 +155,8 @@ enum MenuCommand {
     RootFromCurrentDirectory,
     ClearRoot,
     ReconnectFromScratch,
+    Connect,
+    Disconnect,
 }
 
 /// The shade of a workspace color (see `WORKSPACE_COLORS`).
@@ -391,6 +393,8 @@ pub struct WindowView {
     switcher_open: bool,
     /// A key sequence's keys so far (`cmd-e 1` waiting after ⌘E), shown.
     pending_keys: Option<String>,
+    /// Servers whose workspaces are folded away in the sidebar.
+    folded_servers: HashSet<ServerId>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -442,6 +446,10 @@ impl WindowView {
         let activation = cx.observe_window_activation(window, |this, window, cx| {
             this.window_active = window.is_window_active();
             this.update_secure_input(cx);
+            // Away to another window or app: a name being typed is saved.
+            if !this.window_active && this.renaming.is_some() {
+                this.finish_rename(true, cx);
+            }
             // ⌘-Tab away and back: the key-up went elsewhere.
             this.command_held = false;
             for (&server, &(id, _)) in &this.servers {
@@ -515,6 +523,7 @@ impl WindowView {
             search_all: None,
             switcher_open: false,
             pending_keys: None,
+            folded_servers: HashSet::new(),
             _tasks: vec![blink, poll, spinner],
             _subscriptions: vec![activation, pending],
         }
@@ -1297,8 +1306,16 @@ impl WindowView {
                 return cx.notify();
             },
             MenuTarget::Server(server) => {
-                if command == MenuCommand::ReconnectFromScratch {
-                    app_state::reconnect_from_scratch(server, cx);
+                match command {
+                    MenuCommand::ReconnectFromScratch => {
+                        app_state::reconnect_from_scratch(server, cx)
+                    },
+                    MenuCommand::Connect => app_state::connect_remote(server, cx),
+                    // (After this view's update: it updates every view.)
+                    MenuCommand::Disconnect => {
+                        cx.defer(move |cx| app_state::disconnect_remote(server, cx))
+                    },
+                    _ => {},
                 }
                 return cx.notify();
             },
@@ -2068,6 +2085,7 @@ impl WindowView {
                     Some(renaming) => {
                         let marked = self.marked_text.as_deref().unwrap_or_default();
                         div()
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .flex_1()
                             .min_w_0()
                             .px_1()
@@ -2367,11 +2385,12 @@ impl WindowView {
         };
         let connected = status == Status::Connected;
         let install = matches!(status, Status::NeedsInstall(_));
-        let by_ssh = server != LOCAL
-            && app_state::remote_config(server, cx).is_some_and(|r| r.ssh.is_some());
         let away =
             matches!(status, Status::Waiting { .. } | Status::Off(_) | Status::NeedsLogin(_))
                 || install;
+        let folded = self.folded_servers.contains(&server);
+        let workspaces =
+            self.layout.workspaces.iter().filter(|w| ids::server_of(w.id) == server).count();
         div()
             .id(("server", server as usize))
             .group(group.clone())
@@ -2388,21 +2407,44 @@ impl WindowView {
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(ui(0xffffff70))
-                    .child(div().flex_none().size(px(6.)).rounded_full().bg(ui(dot)))
-                    .child(Self::one_line(name.to_uppercase()).flex_1().min_w_0())
-                    // Another machine's round trip, as of its last ping.
-                    .when_some(
-                        app_state::latency(server, cx).filter(|_| connected && server != LOCAL),
-                        |d, latency| {
-                            d.child(
-                                div()
-                                    .flex_none()
-                                    .font_weight(FontWeight::NORMAL)
-                                    .text_color(ui(0xffffff50))
-                                    .child(format!("{} ms", latency.as_millis())),
-                            )
-                        },
+                    // Its state, where the workspaces' arrows are; a click
+                    // folds its workspaces away (a ring while folded).
+                    .child(
+                        div()
+                            .id(("server-fold", server as usize))
+                            .w(px(12.))
+                            .h(px(14.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(3.))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(ui(0xffffff14)))
+                            .child(div().size(px(6.)).rounded_full().map(|d| {
+                                if folded { d.border_1().border_color(ui(dot)) } else { d.bg(ui(dot)) }
+                            }))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.folded_servers.remove(&server) {
+                                    this.folded_servers.insert(server);
+                                }
+                                cx.stop_propagation();
+                                cx.notify();
+                            })),
                     )
+                    .child(Self::one_line(name.to_uppercase()).flex_1().min_w_0())
+                    .when(folded, |d| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(ui(0xffffff50))
+                                .child(match workspaces {
+                                    1 => "1 workspace".to_owned(),
+                                    n => format!("{n} workspaces"),
+                                }),
+                        )
+                    })
                     .when(connected, |d| {
                         d.child(
                             div()
@@ -2429,9 +2471,9 @@ impl WindowView {
                         .text_color(ui(0xffffff50)),
                 )
             })
-            // A fresh ssh connection (the shared one closed first): the
-            // host's key checked again, ssh's config and keys read again.
-            .when(by_ssh, |d| {
+            // Its menu: connect or disconnect; for one reached by ssh, a
+            // fresh connection (the host's key checked again).
+            .when(server != LOCAL, |d| {
                 d.on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -2509,6 +2551,7 @@ impl WindowView {
             Some(renaming) => {
                 let marked = self.marked_text.as_deref().unwrap_or_default();
                 div()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .flex_1()
                     .px_1()
                     .rounded(px(4.))
@@ -2546,23 +2589,45 @@ impl WindowView {
             // Apart from the section above, but not from its server's header.
             .mt(px(if self.first_on_server(position) { 0. } else { 8. }))
             .h(px(24.))
-            // Right padding as the WORKSPACES heading's, so their + line up.
-            .pl(px(4.))
-            .pr_2()
+            // As a tab's row: the arrow where its icon is, the name where its
+            // title is (the WORKSPACES heading's + lines up on the right).
+            .px_2()
             .rounded(px(6.))
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
             .hover(|d| d.bg(ui(0xffffff0a)))
+            // Only the arrow folds it.
             .child(
                 div()
+                    .id(("workspace-fold", id as usize))
                     .w(px(12.))
+                    .h(px(16.))
                     .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(3.))
                     .text_size(px(9.))
                     .text_color(ui(0xffffff70))
-                    .child(if folded { "▶" } else { "▼" }),
+                    .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffd0)))
+                    .child(if folded { "▶" } else { "▼" })
+                    .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        if event.click_count() > 1 {
+                            return;
+                        }
+                        let accordion =
+                            this.config.sidebar_style == artty_core::SidebarStyle::Accordion;
+                        if accordion && position != this.layout.active {
+                            // An accordion opens the one unfolded: going to it.
+                            this.show_workspace_at(position, cx);
+                        } else {
+                            this.toggle_collapsed(id, cx);
+                        }
+                    })),
             )
-            .when_some(color, |d, color| d.child(div().flex_none().size(px(7.)).rounded_full().bg(rgba(color << 8 | 0xff))))
             .child(name)
+            .when_some(color, |d, color| d.child(div().flex_none().size(px(7.)).rounded_full().bg(rgba(color << 8 | 0xff))))
             // Folded, it says how many tabs it holds.
             .when(folded && renaming.is_none(), |d| {
                 d.child(div().flex_none().text_size(px(11.)).text_color(ui(0xffffff60)).child(tabs.to_string()))
@@ -2633,15 +2698,12 @@ impl WindowView {
                     cx.notify();
                 }
             }))
+            // Clicked (not on its arrow): going to it; twice, renaming it.
             .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
-                let accordion = this.config.sidebar_style == artty_core::SidebarStyle::Accordion;
                 if event.click_count() >= 2 {
                     this.start_workspace_rename(id, cx);
-                } else if accordion && position != this.layout.active {
-                    // An accordion opens the one clicked: going to it.
+                } else if position != this.layout.active {
                     this.show_workspace_at(position, cx);
-                } else {
-                    this.toggle_collapsed(id, cx);
                 }
             }))
             .on_mouse_down(
@@ -2700,9 +2762,12 @@ impl WindowView {
             .justify_between()
             .gap_2()
             .child(
+                // (It wraps, so the button stays inside.)
                 div()
                     .flex()
                     .flex_col()
+                    .flex_1()
+                    .min_w_0()
                     .child(div().text_color(ui(0xffffffee)).child(title))
                     .child(div().text_size(px(11.)).text_color(ui(0xffffff80)).child(hint)),
             )
@@ -2996,6 +3061,11 @@ impl WindowView {
             while let Some((id, name, status)) = headers.next_if(|(id, _, _)| *id <= server) {
                 rows.push(self.server_header(id, name, status, cx).into_any_element());
             }
+            // Its server folded: its workspaces out of the way.
+            if several && self.folded_servers.contains(&server) {
+                index += workspace.tabs.len();
+                continue;
+            }
             // An accordion has only the current workspace open.
             let folded =
                 workspace.collapsed || style == artty_core::SidebarStyle::Accordion && !current;
@@ -3043,6 +3113,15 @@ impl WindowView {
             .border_r_1()
             .border_color(ui(0xffffff12))
             .pt(px(44.))
+            // A click elsewhere in it (another tab, say) saves a name being typed.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.renaming.is_some() {
+                        this.finish_rename(true, cx);
+                    }
+                }),
+            )
             // The titlebar goes on above the sidebar, behind the window buttons.
             .child(Self::titlebar("sidebar-titlebar").absolute().top_0().left_0().right_0().h(px(TITLEBAR_HEIGHT)))
             .child(
@@ -3170,8 +3249,30 @@ impl WindowView {
                 ]);
                 items
             },
-            MenuTarget::Server(_) => {
-                vec![item("Reconnect from Scratch", "", true, MenuCommand::ReconnectFromScratch)]
+            MenuTarget::Server(server) => {
+                let status = app_state::servers(cx)
+                    .into_iter()
+                    .find(|(id, _, _)| *id == server)
+                    .map(|(_, _, status)| status);
+                let connected = matches!(
+                    status,
+                    Some(app_state::Status::Connected | app_state::Status::Connecting)
+                );
+                let by_ssh = app_state::remote_config(server, cx).is_some_and(|r| r.ssh.is_some());
+                let mut items = vec![if connected {
+                    item("Disconnect", "", true, MenuCommand::Disconnect)
+                } else {
+                    item("Connect", "", true, MenuCommand::Connect)
+                }];
+                if by_ssh {
+                    items.push(item(
+                        "Reconnect from Scratch",
+                        "",
+                        true,
+                        MenuCommand::ReconnectFromScratch,
+                    ));
+                }
+                items
             },
             MenuTarget::Tab(index) => {
                 // A workspace's only tab is a workspace already.

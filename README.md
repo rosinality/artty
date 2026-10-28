@@ -71,7 +71,8 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘B | Fold the sidebar away, and back (folded, the titlebar says how many tabs need you; a click goes there) |
 | Settings > Workspaces in the sidebar | List (every workspace with its tabs), Accordion (only the current one open; the others a line each, with what needs you there; a click goes to one), or Switcher (only the current one's tabs, under a button listing the others by server, with what needs you in each) |
 | ⌃⌘[ / ⌃⌘] | Previous / next workspace |
-| Click / double-click / drag a workspace header | Fold it / rename it / reorder workspaces |
+| Click a workspace header's arrow / the header / double-click / drag | Fold it / go to it / rename it (a click elsewhere saves the name) / reorder workspaces |
+| Click a server header's dot / right-click the header | Fold its workspaces away / connect or disconnect, reconnect from scratch |
 | Right-click (or ⌃-click) | In a pane: copy, paste, links, split, rename, clear, close. On a tab or workspace in the sidebar: rename, move to a new workspace, fold, close |
 | ⌘J | Jump to the next tab that needs attention |
 | ⌘C / ⌘V | Copy selection / paste (several lines into a program that would run them one by one asks first) |
@@ -292,7 +293,7 @@ Like this Mac's, that server keeps its sessions running on its own, and it
 sends screens rather than a stream of output, so a dropped connection —
 sleep, a new network — loses nothing: artty reconnects with backoff (a
 click on the server's header tries at once) and shows the same tabs again.
-A server's header also shows its round trip. Tabs and panes stay on their server (they can't be
+Tabs and panes stay on their server (they can't be
 dragged to another); Activity and the workspace picker (⌘⇧O) show every
 server's.
 

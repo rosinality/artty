@@ -17,6 +17,33 @@ pub(super) struct AddKey {
     filter: String,
     text: String,
     action: Option<String>,
+    /// The binding being edited (its keys as written), replaced on saving.
+    replacing: Option<String>,
+    /// Its text was `{ send = … }` (kept so), not `text:…`.
+    send_form: bool,
+}
+
+impl AddKey {
+    /// A form for changing the binding of `written` to `action`.
+    fn editing(written: &str, action: &KeyAction) -> Self {
+        let keys = crate::keymap::keystrokes(written).split(' ').map(str::to_owned).collect();
+        let mut form = Self { keys, replacing: Some(written.to_owned()), ..Default::default() };
+        match action {
+            KeyAction::Send { send } => {
+                form.text_mode = true;
+                form.send_form = true;
+                form.text = send.clone();
+            },
+            KeyAction::Named(name) => match name.strip_prefix("text:") {
+                Some(text) => {
+                    form.text_mode = true;
+                    form.text = text.to_owned();
+                },
+                None => form.action = Some(name.clone()),
+            },
+        }
+        form
+    }
 }
 
 /// `artty::NewTab` as `new-tab`.
@@ -127,6 +154,22 @@ impl Settings {
                             .text_ellipsis()
                             .text_color(ui(0xffffffb0))
                             .child(shown_action(action)),
+                    )
+                    .child(
+                        Self::form_button(
+                            ElementId::Name(format!("edit-key-{keys}").into()),
+                            "Edit",
+                            false,
+                        )
+                        .on_click(cx.listener({
+                            let (keys, action) = (keys.clone(), action.clone());
+                            move |this, _, _, cx| {
+                                this.recording = None;
+                                this.adding_key = Some(AddKey::editing(&keys, &action));
+                                this.typing = None;
+                                cx.notify();
+                            }
+                        })),
                     )
                     .child(
                         Self::form_button(
@@ -413,8 +456,12 @@ impl Settings {
                         }),
                     ))
                     .child(
-                        Self::form_button("key-save".into(), "Add", ready)
-                            .on_click(cx.listener(|this, _, _, cx| this.save_key(cx))),
+                        Self::form_button(
+                            "key-save".into(),
+                            if adding.replacing.is_some() { "Save" } else { "Add" },
+                            ready,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.save_key(cx))),
                     ),
             )
             .into_any_element()
@@ -452,17 +499,31 @@ impl Settings {
             return;
         }
         let action = match (&adding.action, adding.text_mode) {
+            (_, true) if !adding.text.is_empty() && adding.send_form => {
+                KeyAction::Send { send: adding.text.clone() }
+            },
             (_, true) if !adding.text.is_empty() => {
                 KeyAction::Named(format!("text:{}", adding.text))
             },
             (Some(action), false) => KeyAction::Named(action.clone()),
             _ => return,
         };
-        let keys = adding.keys.join(" ");
+        // Edited and the keys unchanged: written as they were.
+        let recorded = adding.keys.join(" ");
+        let replacing = adding.replacing.clone();
+        let keys = match &replacing {
+            Some(old) if crate::keymap::keystrokes(old) == recorded => old.clone(),
+            _ => recorded,
+        };
         self.adding_key = None;
         self.typing = None;
         self.recording = None;
-        self.edit(cx, |file| file.set_key(&keys, &action));
+        self.edit(cx, |file| {
+            if let Some(old) = replacing.as_ref().filter(|old| **old != keys) {
+                file.remove_key(old);
+            }
+            file.set_key(&keys, &action);
+        });
     }
 
     /// Typing into the form. Returns whether the key was used.

@@ -17,6 +17,9 @@ pub(super) struct AddServer {
     field: usize,
     checking: bool,
     error: Option<String>,
+    /// The server being edited (else one is being added): what the form
+    /// doesn't show (its artty, a command) stays.
+    editing: Option<ServerConfig>,
 }
 
 impl Settings {
@@ -49,8 +52,7 @@ impl Settings {
             (Some(ssh), true) => format!("ssh {ssh}"),
             (None, true) => "no ssh destination".to_owned(),
         };
-        let name = server.name.clone();
-        let armed = self.removing.as_deref() == Some(name.as_str());
+        let remove = self.remove_server_button(server.name.clone(), cx);
         div()
             .flex()
             .items_center()
@@ -76,26 +78,61 @@ impl Settings {
                     ),
             )
             .child(
-                Self::form_button(
-                    ElementId::Name(format!("remove-{name}").into()),
-                    if armed { "Remove?" } else { "Remove" },
-                    armed,
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    // Twice: once to arm, once to remove.
-                    if this.removing.as_deref() == Some(name.as_str()) {
-                        this.removing = None;
-                        let name = name.clone();
-                        this.edit(cx, |file| {
-                            file.remove_server(&name);
-                        });
-                    } else {
-                        this.removing = Some(name.clone());
-                        cx.notify();
-                    }
-                })),
+                div()
+                    .flex()
+                    .flex_none()
+                    .gap_2()
+                    .child(
+                        Self::form_button(
+                            ElementId::Name(format!("edit-{}", server.name).into()),
+                            "Edit",
+                            false,
+                        )
+                        .on_click(cx.listener({
+                            let server = server.clone();
+                            move |this, _, window, cx| {
+                                this.commit_editing(cx);
+                                this.adding = Some(AddServer {
+                                    name: server.name.clone(),
+                                    ssh: server.ssh.clone().unwrap_or_default(),
+                                    editing: Some(server.clone()),
+                                    ..Default::default()
+                                });
+                                window.focus(&this.focus);
+                                cx.notify();
+                            }
+                        })),
+                    )
+                    .child(remove),
             )
             .into_any_element()
+    }
+
+    /// Remove, armed by a first click.
+    fn remove_server_button(
+        &self,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let armed = self.removing.as_deref() == Some(name.as_str());
+        Self::form_button(
+            ElementId::Name(format!("remove-{name}").into()),
+            if armed { "Remove?" } else { "Remove" },
+            armed,
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            // Twice: once to arm, once to remove.
+            if this.removing.as_deref() == Some(name.as_str()) {
+                this.removing = None;
+                let name = name.clone();
+                this.edit(cx, |file| {
+                    file.remove_server(&name);
+                });
+            } else {
+                this.removing = Some(name.clone());
+                cx.notify();
+            }
+        }))
     }
 
     fn add_form(&self, adding: &AddServer, cx: &mut Context<Self>) -> AnyElement {
@@ -130,7 +167,9 @@ impl Settings {
                     cx.notify();
                 }))
         };
-        let can_add = !adding.name.trim().is_empty() && !adding.ssh.trim().is_empty();
+        let by_command = adding.editing.as_ref().is_some_and(|s| !s.command.is_empty());
+        let can_add =
+            !adding.name.trim().is_empty() && (!adding.ssh.trim().is_empty() || by_command);
         div()
             .flex()
             .flex_col()
@@ -160,15 +199,22 @@ impl Settings {
                     ))
                     .when(adding.error.is_some() && !adding.checking, |d| {
                         d.child(
-                            Self::form_button("add-anyway".into(), "Add Anyway", false).on_click(
-                                cx.listener(|this, _, _, cx| this.submit_server(false, cx)),
-                            ),
+                            Self::form_button(
+                                "add-anyway".into(),
+                                if adding.editing.is_some() { "Save Anyway" } else { "Add Anyway" },
+                                false,
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.submit_server(false, cx))),
                         )
                     })
                     .child(
                         Self::form_button(
                             "add-server-button".into(),
-                            if adding.checking { "Checking…" } else { "Add" },
+                            match (adding.checking, adding.editing.is_some()) {
+                                (true, _) => "Checking…",
+                                (false, true) => "Save",
+                                (false, false) => "Add",
+                            },
                             can_add && !adding.checking,
                         )
                         .on_click(cx.listener(|this, _, _, cx| this.submit_server(true, cx))),
@@ -199,11 +245,18 @@ impl Settings {
     fn submit_server(&mut self, check: bool, cx: &mut Context<Self>) {
         let Some(adding) = self.adding.as_mut().filter(|a| !a.checking) else { return };
         let (name, ssh) = (adding.name.trim().to_owned(), adding.ssh.trim().to_owned());
-        if name.is_empty() || ssh.is_empty() {
+        // One reached by a command (edited) may keep it, without ssh.
+        let by_command = adding.editing.as_ref().is_some_and(|s| !s.command.is_empty());
+        if name.is_empty() || ssh.is_empty() && !by_command {
             adding.error = Some("Give it a name and an ssh destination.".to_owned());
             return cx.notify();
         }
-        let server = ServerConfig { name, ssh: Some(ssh), ..Default::default() };
+        let mut server = adding.editing.clone().unwrap_or_default();
+        server.name = name;
+        if !ssh.is_empty() {
+            server.ssh = Some(ssh);
+            server.command.clear();
+        }
         if !check {
             return self.save_server(server, cx);
         }
@@ -256,10 +309,25 @@ impl Settings {
     }
 
     fn save_server(&mut self, server: ServerConfig, cx: &mut Context<Self>) {
-        self.adding = None;
-        self.edit(cx, |file| file.add_server(&server));
+        let renamed = self
+            .adding
+            .take()
+            .and_then(|a| a.editing)
+            .map(|old| old.name)
+            .filter(|old| *old != server.name);
+        let edited = renamed.is_some() || self.config.servers.iter().any(|s| s.name == server.name);
+        self.edit(cx, |file| {
+            if let Some(old) = &renamed {
+                file.remove_server(old);
+            }
+            file.add_server(&server);
+        });
         if self.status.is_none() {
-            self.status = Some(format!("Added {}: it shows in the sidebar.", server.name));
+            self.status = Some(if edited {
+                format!("Saved {}.", server.name)
+            } else {
+                format!("Added {}: it shows in the sidebar.", server.name)
+            });
         }
     }
 

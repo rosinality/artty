@@ -1357,6 +1357,19 @@ fn by_ssh(server: ServerId, cx: &App) -> bool {
         .is_some_and(|r| r.ssh.is_some())
 }
 
+/// Disconnect from another machine's server, until connected again (a
+/// click on its header): its sessions keep running there.
+pub fn disconnect_remote(server: ServerId, cx: &mut App) {
+    if server == LOCAL {
+        return;
+    }
+    drop_remote(server, cx);
+    if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) {
+        connection.status = Status::Off("disconnected · click to connect".to_owned());
+    }
+    cx.refresh_windows();
+}
+
 /// Connect to `server` from scratch: end its shared ssh connection, so ssh
 /// makes a new one — checking the host's key again, reading its config and
 /// keys again. Its connection (and forwards) end with it, and it reconnects
