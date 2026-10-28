@@ -23,12 +23,10 @@ impl Settings {
     }
 
     fn use_theme(&mut self, theme: &ImportedTheme, cx: &mut Context<Self>) {
-        let name = theme.name.clone();
         self.edit(cx, |file| file.set_colors(theme));
         if self.status.is_none() {
-            self.status = Some(format!("Theme: {name}"));
+            self.status = Some(format!("Theme: {}", theme.name));
         }
-        self.chosen_theme = Some(name);
     }
 
     fn choose_theme_file(&mut self, cx: &mut Context<Self>) {
@@ -76,6 +74,8 @@ impl Settings {
 
     pub(super) fn theme_import_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         self.load_ghostty_themes(cx);
+        let current = self.config.theme();
+        let in_use = |theme: &ImportedTheme| theme.theme().same_colors(&current);
         let import = div()
             .flex()
             .items_center()
@@ -101,7 +101,7 @@ impl Settings {
         let mut rows = vec![import];
         // Ghostty's own choice, to take with a click.
         if let Some(name) = self.ghostty_config.as_ref().and_then(|c| c.theme.clone()) {
-            let using = self.chosen_theme.as_deref() == Some(name.as_str());
+            let using = self.ghostty.iter().flatten().any(|t| t.name == name && in_use(t));
             rows.push(
                 div()
                     .flex()
@@ -183,7 +183,7 @@ impl Settings {
             .filter(|(_, theme)| filter.is_empty() || theme.name.to_lowercase().contains(&filter))
             .take(LISTED)
             .map(|(i, theme)| {
-                let chosen = self.chosen_theme.as_deref() == Some(theme.name.as_str());
+                let chosen = in_use(theme);
                 let background = theme.background.map(hsla_of);
                 let foreground = theme.foreground.map(hsla_of);
                 div()
@@ -247,14 +247,19 @@ impl Settings {
             .collect();
         rows.push(
             div()
-                .id("ghostty-themes")
                 .mx_3()
                 .my(px(6.))
-                .max_h(px(220.))
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .children(shown)
+                // Scrolling the list doesn't scroll the page too.
+                .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                .child(
+                    div()
+                        .id("ghostty-themes")
+                        .max_h(px(220.))
+                        .overflow_y_scroll()
+                        .flex()
+                        .flex_col()
+                        .children(shown),
+                )
                 .into_any_element(),
         );
         rows

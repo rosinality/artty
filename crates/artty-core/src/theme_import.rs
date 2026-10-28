@@ -19,6 +19,17 @@ pub struct ImportedTheme {
 }
 
 impl ImportedTheme {
+    /// Its colors over the built-in ones, as `[colors]` would make them.
+    pub fn theme(&self) -> crate::Theme {
+        let mut theme = crate::Theme::default();
+        theme.foreground = self.foreground.unwrap_or(theme.foreground);
+        theme.background = self.background.unwrap_or(theme.background);
+        theme.cursor = self.cursor.unwrap_or(theme.cursor);
+        theme.selection = self.selection.unwrap_or(theme.selection);
+        theme.ansi[..self.palette.len()].copy_from_slice(&self.palette);
+        theme
+    }
+
     fn color(&mut self, index: usize, rgb: Rgb) {
         if index < 16 {
             if self.palette.len() <= index {

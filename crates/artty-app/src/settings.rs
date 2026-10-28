@@ -12,6 +12,8 @@ use gpui::{
 use crate::chrome::ui;
 use crate::hooks::{self, Status};
 
+#[path = "settings_colors.rs"]
+mod colors;
 #[path = "settings_keys.rs"]
 mod keys;
 #[path = "settings_servers.rs"]
@@ -59,6 +61,7 @@ enum Typing {
     ThemeFilter,
     ActionFilter,
     KeyText,
+    Color(colors::Slot),
 }
 
 /// A number setting edited with `−` and `+`, or typed in.
@@ -124,8 +127,10 @@ pub struct Settings {
     theme_filter: String,
     /// Ghostty's themes, once read (empty while reading, or without it).
     ghostty: Option<Vec<artty_core::theme_import::ImportedTheme>>,
-    /// The theme last chosen here, by name.
-    chosen_theme: Option<String>,
+    /// A color being typed (`#rrggbb`), and whether it's untouched yet (the
+    /// first key replaces it).
+    color_text: String,
+    color_fresh: bool,
     /// Ghostty's config (its theme, its key bindings), if it has one.
     ghostty_config: Option<artty_core::theme_import::GhosttyConfig>,
     /// The key binding being made, and its keys being recorded.
@@ -191,7 +196,8 @@ impl Settings {
             typing: None,
             theme_filter: String::new(),
             ghostty: None,
-            chosen_theme: None,
+            color_text: String::new(),
+            color_fresh: false,
             ghostty_config: artty_core::theme_import::ghostty_config(),
             adding_key: None,
             recording: None,
@@ -212,12 +218,14 @@ impl Settings {
         cx.notify();
     }
 
-    fn current_theme(&self) -> Option<&'static ThemePreset> {
-        let background = self.config.colors.background?;
-        THEMES.iter().find(|theme| {
-            let hex = format!("#{:02x}{:02x}{:02x}", background.r, background.g, background.b);
-            theme.background.eq_ignore_ascii_case(&hex)
-        })
+    /// The theme in use: the built-in one (`Some(None)`), a preset, or
+    /// neither (`None`: another terminal's, or edited).
+    fn current_preset(&self) -> Option<Option<&'static ThemePreset>> {
+        let current = self.config.theme();
+        if current.same_colors(&artty_core::Theme::default()) {
+            return Some(None);
+        }
+        THEMES.iter().find(|preset| preset.theme().same_colors(&current)).map(Some)
     }
 
     // Controls.
@@ -267,6 +275,7 @@ impl Settings {
 
     /// Save the typed number (clamped to its range), if any.
     fn commit_editing(&mut self, cx: &mut Context<Self>) {
+        self.commit_color(cx);
         let Some(editing) = self.editing.take() else { return };
         let Ok(typed) = editing.text.trim().parse::<f64>() else {
             self.status = Some(format!("“{}” isn't a number", editing.text.trim()));
@@ -292,6 +301,7 @@ impl Settings {
         if self.server_form_key(event, cx)
             || self.theme_filter_key(event, cx)
             || self.key_form_key(event, cx)
+            || self.color_key(event, cx)
         {
             return cx.stop_propagation();
         }
@@ -645,17 +655,17 @@ impl Settings {
     }
 
     fn theme_chips(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.current_theme().map(|theme| theme.name);
-        let defaults = artty_core::Theme::default();
+        let current = self.current_preset();
         let hex =
             |rgb: artty_core::vt::ansi::Rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b);
-        let builtin_palette: Vec<String> = defaults.ansi.iter().map(|c| hex(*c)).collect();
+        let palette_of = |theme: &artty_core::Theme| theme.ansi.iter().map(|c| hex(*c)).collect();
+        // `pick`: the theme to use on a click (none for the one in use).
         let chip = |id: usize,
-                    name: &'static str,
+                    name: SharedString,
                     background: String,
                     palette: Vec<String>,
                     selected: bool,
-                    preset: Option<&'static ThemePreset>,
+                    pick: Option<Option<&'static ThemePreset>>,
                     cx: &mut Context<Self>| {
             let color = |hex: &str| -> Hsla {
                 let value = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
@@ -686,29 +696,56 @@ impl Settings {
                                 .map(|i| div().size(px(8.)).rounded_full().bg(color(&palette[i]))),
                         ),
                 )
-                .child(div().text_size(px(11.5)).text_color(ui(0xffffffcc)).child(name))
-                .on_click(
-                    cx.listener(move |this, _, _, cx| this.edit(cx, |file| file.set_theme(preset))),
+                .child(
+                    div()
+                        .w(px(84.))
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .text_size(px(11.5))
+                        .text_color(ui(0xffffffcc))
+                        .child(name),
                 )
+                .when_some(pick, |d, preset| {
+                    d.on_click(cx.listener(move |this, _, _, cx| {
+                        this.edit(cx, |file| file.set_theme(preset))
+                    }))
+                })
         };
-        let mut chips = vec![chip(
+        let mut chips = Vec::new();
+        // Another terminal's theme, or one edited: first, as the one in use.
+        if current.is_none() {
+            let theme = self.config.theme();
+            let name = self.config.colors.name.clone().unwrap_or_else(|| "Custom".to_owned());
+            chips.push(chip(
+                THEMES.len() + 1,
+                name.into(),
+                hex(theme.background),
+                palette_of(&theme),
+                true,
+                None,
+                cx,
+            ));
+        }
+        let defaults = artty_core::Theme::default();
+        chips.push(chip(
             0,
-            "artty",
+            "artty".into(),
             hex(defaults.background),
-            builtin_palette,
-            current.is_none(),
-            None,
+            palette_of(&defaults),
+            matches!(current, Some(None)),
+            Some(None),
             cx,
-        )];
+        ));
         for (i, theme) in THEMES.iter().enumerate() {
             let palette = theme.palette.iter().map(|s| s.to_string()).collect();
             chips.push(chip(
                 i + 1,
-                theme.name,
+                theme.name.into(),
                 theme.background.to_owned(),
                 palette,
-                current == Some(theme.name),
-                Some(theme),
+                current.flatten().is_some_and(|c| std::ptr::eq(c, theme)),
+                Some(Some(theme)),
                 cx,
             ));
         }
@@ -997,7 +1034,7 @@ impl Render for Settings {
                 }))
         });
         let content: Vec<AnyElement> = match page {
-            Page::Appearance => vec![themes, appearance],
+            Page::Appearance => vec![themes, self.colors_section(cx), appearance],
             Page::Behavior => vec![behavior],
             Page::Keys => vec![
                 keys,

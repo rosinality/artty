@@ -49,6 +49,16 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// The same colors as `other`, but for search matches (no theme sets
+    /// those).
+    pub fn same_colors(&self, other: &Theme) -> bool {
+        self.foreground == other.foreground
+            && self.background == other.background
+            && self.cursor == other.cursor
+            && self.selection == other.selection
+            && self.ansi == other.ansi
+    }
+
     /// Resolve a cell color, preferring colors the program set via OSC 4/10/11.
     pub fn resolve(&self, color: Color, overrides: &Colors) -> Rgb {
         match color {

@@ -60,6 +60,7 @@ impl ConfigFile {
             return;
         };
         let mut colors = Table::new();
+        colors["name"] = value(theme.name);
         colors["foreground"] = value(theme.foreground);
         colors["background"] = value(theme.background);
         colors["cursor"] = value(theme.cursor);
@@ -70,8 +71,10 @@ impl ConfigFile {
 
     /// Use colors read from another terminal's theme.
     pub fn set_colors(&mut self, theme: &crate::theme_import::ImportedTheme) {
-        let hex = |rgb: crate::vt::ansi::Rgb| format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b);
         let mut colors = Table::new();
+        if !theme.name.is_empty() {
+            colors["name"] = value(&theme.name);
+        }
         for (key, color) in [
             ("foreground", theme.foreground),
             ("background", theme.background),
@@ -86,6 +89,35 @@ impl ConfigFile {
             colors["palette"] = value(theme.palette.iter().map(|&c| hex(c)).collect::<Array>());
         }
         self.doc["colors"] = Item::Table(colors);
+    }
+
+    /// The `[colors]` table, made if missing.
+    fn colors(&mut self) -> &mut Table {
+        if !self.doc.get("colors").is_some_and(Item::is_table) {
+            self.doc["colors"] = Item::Table(Table::new());
+        }
+        self.doc["colors"].as_table_mut().expect("just made")
+    }
+
+    /// Set one color of `[colors]` (`foreground`, `background`, `cursor`,
+    /// `selection`).
+    pub fn set_color(&mut self, key: &str, color: crate::vt::ansi::Rgb) {
+        self.colors()[key] = value(hex(color));
+    }
+
+    /// Set the 16 ANSI colors.
+    pub fn set_palette(&mut self, palette: &[crate::vt::ansi::Rgb]) {
+        self.colors()["palette"] = value(palette.iter().map(|&c| hex(c)).collect::<Array>());
+    }
+
+    /// Name the colors (the theme they came from), or not.
+    pub fn set_colors_name(&mut self, name: Option<&str>) {
+        match name {
+            Some(name) => self.colors()["name"] = value(name),
+            None => {
+                self.colors().remove("name");
+            },
+        }
     }
 
     /// The `[keys]` table, made if missing.
@@ -164,6 +196,10 @@ impl ConfigFile {
     }
 }
 
+fn hex(rgb: crate::vt::ansi::Rgb) -> String {
+    format!("#{:02x}{:02x}{:02x}", rgb.r, rgb.g, rgb.b)
+}
+
 /// A built-in color theme.
 pub struct ThemePreset {
     pub name: &'static str,
@@ -172,6 +208,24 @@ pub struct ThemePreset {
     pub cursor: &'static str,
     pub selection: &'static str,
     pub palette: [&'static str; 16],
+}
+
+impl ThemePreset {
+    /// Its colors, as `[colors]` would make them.
+    pub fn theme(&self) -> crate::Theme {
+        let parse = |s: &str| s.parse().unwrap_or_default();
+        let mut theme = crate::Theme {
+            foreground: parse(self.foreground),
+            background: parse(self.background),
+            cursor: parse(self.cursor),
+            selection: parse(self.selection),
+            ..Default::default()
+        };
+        for (slot, color) in theme.ansi.iter_mut().zip(self.palette) {
+            *slot = parse(color);
+        }
+        theme
+    }
 }
 
 /// Themes to choose from (dark, then light: the app's own colors follow).
@@ -305,7 +359,22 @@ mod tests {
             let config = Config::parse(&file.doc.to_string())
                 .unwrap_or_else(|e| panic!("{}: {e}", theme.name));
             assert_eq!(config.colors.palette.len(), 16);
+            // Named, and told by its colors.
+            assert_eq!(config.colors.name.as_deref(), Some(theme.name));
+            assert!(config.theme().same_colors(&theme.theme()));
         }
+        // One color changed: no longer the preset's, named so.
+        file.set_theme(Some(&THEMES[0]));
+        let mut palette = THEMES[0].theme().ansi;
+        palette[3] = "#123456".parse().unwrap();
+        file.set_palette(&palette);
+        file.set_color("selection", "#3e4f6b".parse().unwrap());
+        file.set_colors_name(Some("Tokyo Night (edited)"));
+        let config = Config::parse(&file.doc.to_string()).unwrap();
+        assert!(!config.theme().same_colors(&THEMES[0].theme()));
+        assert_eq!(config.theme().ansi[3], "#123456".parse().unwrap());
+        assert_eq!(config.theme().selection, "#3e4f6b".parse().unwrap());
+        assert_eq!(config.colors.name.as_deref(), Some("Tokyo Night (edited)"));
         file.set_theme(None);
         assert!(Config::parse(&file.doc.to_string()).unwrap().colors.foreground.is_none());
     }

@@ -341,6 +341,8 @@ impl Default for Config {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Colors {
+    /// The theme these came from (shown in Settings), possibly edited.
+    pub name: Option<String>,
     #[serde(deserialize_with = "color")]
     pub foreground: Option<Rgb>,
     #[serde(deserialize_with = "color")]
