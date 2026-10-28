@@ -2160,7 +2160,7 @@ impl WindowView {
             .flex_col()
             .gap(px(1.))
             .py(px(3.))
-            .px_2()
+            .px_1()
             .rounded(px(7.))
             .when(selected, |d| match self.tab_color(index) {
                 // A colored workspace tints its selected tab.
@@ -2404,7 +2404,7 @@ impl WindowView {
                     .items_center()
                     .gap(px(6.))
                     .h(px(28.))
-                    .px_2()
+                    .px_1()
                     .rounded(px(7.))
                     .hover(|d| d.bg(ui(0xffffff10)))
                     .text_size(px(10.5))
@@ -2470,7 +2470,7 @@ impl WindowView {
                 d.child(
                     // Under its name.
                     Self::one_line(note)
-                        .pl(px(26.))
+                        .pl(px(22.))
                         .pr_2()
                         .pb(px(4.))
                         .text_size(px(10.5))
@@ -2570,7 +2570,7 @@ impl WindowView {
             None => Self::one_line(title.clone())
                 .flex_1()
                 .min_w_0()
-                .text_color(if active { ui(0xffffffd8) } else { ui(0xffffff90) })
+                .text_color(if active { ui(0xffffffa0) } else { ui(0xffffff78) })
                 .when(attention, |d| d.text_color(ui(0xe0af68ff))),
         };
         let tabs = workspace.tabs.len();
@@ -2599,7 +2599,7 @@ impl WindowView {
             .h(px(28.))
             // As a tab's row: the arrow where its icon is, the name where its
             // title is (the WORKSPACES heading's + lines up on the right).
-            .px_2()
+            .px_1()
             .rounded(px(7.))
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
@@ -2615,10 +2615,10 @@ impl WindowView {
                     .items_center()
                     .justify_center()
                     .rounded(px(3.))
-                    .text_size(px(9.))
+                    .text_size(px(12.))
                     .text_color(ui(0xffffff70))
                     .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffd0)))
-                    .child(if folded { "▶" } else { "▼" })
+                    .child(if folded { "˃" } else { "˅" })
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                         cx.stop_propagation();
                         if event.click_count() > 1 {
@@ -2880,7 +2880,7 @@ impl WindowView {
                     )
                 })
             })
-            .child(div().flex_none().text_size(px(9.)).text_color(ui(0xffffff70)).child("▼"))
+            .child(div().flex_none().text_size(px(12.)).text_color(ui(0xffffff70)).child("˅"))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.switcher_open = !this.switcher_open;
                 cx.notify();
@@ -3159,7 +3159,7 @@ impl WindowView {
                     // A box as a tab row's.
                     .h(px(28.))
                     .mb(px(8.))
-                    .px_2()
+                    .px_1()
                     .rounded(px(7.))
                     .text_color(if self.showing_activity() { ui(0xffffffee) } else { ui(0xffffffb0) })
                     .when(self.showing_activity(), |d| d.bg(ui(0xffffff1c)))
