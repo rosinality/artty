@@ -19,6 +19,11 @@ pub struct ProcessInfo {
     pub at_shell: bool,
     /// The foreground process group.
     pub foreground_group: Option<i32>,
+    /// The terminal is out of its line mode: the program takes keys one by
+    /// one, as a line editor (a REPL's prompt, a shell's) does while it
+    /// waits for you, or a full-screen program. A command at work — a
+    /// build, a REPL running your code — leaves it in line mode.
+    pub reading_keys: bool,
 }
 
 impl ProcessProbe {
@@ -46,7 +51,24 @@ impl ProcessProbe {
         let name = process_name(pgrp).map(|name| script_name(pgrp, &name).unwrap_or(name));
         // The session's process is the shell, or `login` running the shell.
         let at_shell = pgrp == self.shell_pid || parent_pid(pgrp) == Some(self.shell_pid);
-        ProcessInfo { foreground: name, at_shell, foreground_group: Some(pgrp) }
+        ProcessInfo {
+            foreground: name,
+            at_shell,
+            foreground_group: Some(pgrp),
+            reading_keys: self.reading_keys(),
+        }
+    }
+
+    /// Whether the terminal is out of its line mode (`ICANON` off). The
+    /// controller's attributes are its terminal's.
+    fn reading_keys(&self) -> bool {
+        let mut termios = std::mem::MaybeUninit::<libc::termios>::zeroed();
+        // SAFETY: `termios` is valid for writing; the descriptor is ours.
+        if unsafe { libc::tcgetattr(self.pty.as_raw_fd(), termios.as_mut_ptr()) } != 0 {
+            return false;
+        }
+        // SAFETY: filled by `tcgetattr`.
+        unsafe { termios.assume_init() }.c_lflag & libc::ICANON == 0
     }
 
     pub(crate) fn shell_pid(&self) -> i32 {

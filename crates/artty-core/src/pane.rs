@@ -110,6 +110,8 @@ pub struct Pane {
     reported_agent: Option<String>,
     /// Typed into the shell once it shows a prompt (resuming an agent).
     pending_input: Option<(String, Instant)>,
+    /// The foreground program, seen waiting for keys.
+    reading: Option<Reading>,
 }
 
 /// How long to wait for a prompt before typing pending input anyway (for
@@ -117,6 +119,18 @@ pub struct Pane {
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(3);
 
 const TITLE_ANIMATION_WINDOW: Duration = Duration::from_secs(2);
+
+/// How long a program that was waiting for keys must be at work before it
+/// counts as busy: a REPL running a quick line shouldn't flash a spinner.
+const AT_WORK_AFTER: Duration = Duration::from_secs(1);
+
+/// A program seen waiting for keys (its process group), and since when it
+/// stopped, if it did.
+#[derive(Clone, Copy, Debug)]
+struct Reading {
+    group: i32,
+    stopped: Option<Instant>,
+}
 
 /// Whether a process name is an interactive shell (login shells start with `-`).
 fn is_shell(name: &str) -> bool {
@@ -153,6 +167,7 @@ impl Pane {
             agent_session: None,
             reported_agent: None,
             pending_input: None,
+            reading: None,
         }
     }
 
@@ -231,6 +246,7 @@ impl Pane {
 
     /// Recompute the status from the latest process info and reports.
     pub fn refresh(&mut self) {
+        self.note_reading();
         // A program that reports agent status counts as an agent even if its
         // name isn't on the list, until a shell is back in the foreground.
         let reporter = || {
@@ -342,9 +358,33 @@ impl Pane {
         }
     }
 
-    /// Whether what's running is used rather than waited for: a full-screen
-    /// program (mosh, vim, htop), or one of the usual interactive ones.
+    /// Follow whether the foreground program waits for keys.
+    fn note_reading(&mut self) {
+        let Some(group) = self.process.foreground_group else {
+            self.reading = None;
+            return;
+        };
+        if self.process.reading_keys {
+            self.reading = Some(Reading { group, stopped: None });
+        } else if let Some(reading) = &mut self.reading {
+            if reading.group != group {
+                self.reading = None;
+            } else if reading.stopped.is_none() {
+                reading.stopped = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Whether what's running is used rather than waited for: a program
+    /// waiting for keys (a REPL at its prompt, a full-screen program) or
+    /// only just done waiting, or one of the usual interactive ones.
     fn interactive(&self) -> bool {
+        let waiting = self.reading.is_some_and(|r| {
+            Some(r.group) == self.process.foreground_group
+                && r.stopped.is_none_or(|t| t.elapsed() < AT_WORK_AFTER)
+        });
+        // REPLs aren't listed: at their prompt they wait for keys, and
+        // running your code they're at work.
         const INTERACTIVE: &[&str] = &[
             "ssh",
             "mosh",
@@ -368,17 +408,9 @@ impl Pane {
             "htop",
             "btop",
             "top",
-            "python",
-            "python3",
-            "node",
-            "irb",
-            "ghci",
-            "psql",
-            "mysql",
-            "sqlite3",
-            "redis-cli",
         ];
-        self.session.mode().contains(artty_vt::term::TermMode::ALT_SCREEN)
+        waiting
+            || self.session.mode().contains(artty_vt::term::TermMode::ALT_SCREEN)
             || self.process.foreground.as_deref().is_some_and(|name| INTERACTIVE.contains(&name))
     }
 
