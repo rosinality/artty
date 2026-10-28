@@ -287,19 +287,24 @@ impl WindowView {
                 .hover(|d| d.bg(ui(0xffffff26)))
                 .child(label)
         };
+        // As the sidebar: the theme's background (nearly opaque, over the
+        // terminal), its rows' boxes.
+        let theme = crate::terminal::hsla(self.theme.background);
         let header = div()
             .flex()
             .flex_col()
-            .gap(px(6.))
-            .px(px(10.))
-            .py(px(8.))
+            .px(px(8.))
+            .pt(px(6.))
+            .pb(px(6.))
             .border_b_1()
-            .border_color(ui(0xffffff14))
+            .border_color(ui(0xffffff12))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(4.))
+                    .h(px(28.))
+                    .px_1()
                     .child(
                         Self::one_line(format!(
                             "FILES · {}",
@@ -343,8 +348,11 @@ impl WindowView {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_files(cx))),
                     ),
             )
+            // Where the names start.
             .child(
                 Self::one_line(path.as_ref().map_or_else(|| "…".to_owned(), shown))
+                    .pl(px(18.))
+                    .pr_1()
                     .text_size(px(11.5))
                     .text_color(ui(0xffffffb0)),
             );
@@ -361,16 +369,18 @@ impl WindowView {
                 let open = full.clone();
                 let copy = full.clone();
                 let download = full.clone();
+                // A box as a sidebar row's.
                 div()
                     .id(("files-row", i))
                     .group(group.clone())
                     .relative()
                     .flex()
                     .items_center()
-                    .gap(px(6.))
-                    .h(px(22.))
-                    .px(px(10.))
-                    .hover(|d| d.bg(ui(0xffffff0c)))
+                    .gap(px(4.))
+                    .h(px(28.))
+                    .px_1()
+                    .rounded(px(7.))
+                    .hover(|d| d.bg(ui(0xffffff10)))
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                         if dir {
                             this.open_folder(open.clone(), cx);
@@ -378,12 +388,21 @@ impl WindowView {
                             this.open_file(open.clone(), cx);
                         }
                     }))
+                    // A folder's arrowhead (it opens), a file's dot.
                     .child(
                         div()
                             .flex_none()
-                            .w(px(12.))
-                            .text_color(if dir { ui(0x7aa2f7ff) } else { ui(0xffffff50) })
-                            .child(if dir { "▸" } else { "·" }),
+                            .w(px(10.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .map(|d| {
+                                if dir {
+                                    d.child(chevron(false, ui(0x7aa2f7ff)))
+                                } else {
+                                    d.child(div().size(px(3.)).rounded_full().bg(ui(0xffffff50)))
+                                }
+                            }),
                     )
                     .child(
                         Self::one_line(if entry.link {
@@ -413,7 +432,7 @@ impl WindowView {
                             .flex()
                             .gap(px(2.))
                             .absolute()
-                            .right(px(8.))
+                            .right(px(4.))
                             .opacity(0.)
                             .group_hover(group, |s| s.opacity(1.))
                             .when(!dir, |d| {
@@ -423,7 +442,7 @@ impl WindowView {
                                         if server == LOCAL { "Reveal" } else { "Download" },
                                         false,
                                     )
-                                    .bg(ui(0x1e2430ff))
+                                    .bg(theme)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.download_file(download.clone(), cx);
                                         cx.stop_propagation();
@@ -432,7 +451,7 @@ impl WindowView {
                             })
                             .child(
                                 small_button(format!("files-copy-{i}").into(), "Copy Path", false)
-                                    .bg(ui(0x1e2430ff))
+                                    .bg(theme)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
                                             copy.display().to_string(),
@@ -455,12 +474,10 @@ impl WindowView {
                 .right_0()
                 .h_full()
                 .w(px(WIDTH))
-                .flex()
-                .flex_col()
-                .bg(ui(0x161a22f4))
+                .bg(gpui::Hsla { a: 0.97, ..theme })
                 .border_l_1()
-                .border_color(ui(0xffffff1f))
-                .shadow_lg()
+                .border_color(ui(0xffffff12))
+                .shadow_md()
                 .text_size(px(12.5))
                 // Clicks and scrolls here aren't the terminal's.
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -470,23 +487,46 @@ impl WindowView {
                     this.drop_into_folder(paths, window, cx);
                     cx.stop_propagation();
                 }))
-                .child(header)
-                .when_some(files.error.clone(), |d, error| {
-                    d.child(
-                        div().px(px(10.)).py(px(6.)).text_size(px(11.5)).text_color(ui(0xf7768eff)).child(error),
-                    )
-                })
+                // The sidebar's tint over it.
                 .child(
                     div()
-                        .id("files-rows")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .py(px(4.))
-                        .children(rows)
-                        .when(empty && files.path.is_some(), |d| {
-                            d.child(div().px(px(10.)).text_color(ui(0xffffff50)).child("Nothing here"))
-                        }),
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .bg(ui(0xffffff0a))
+                        .child(header)
+                        .when_some(files.error.clone(), |d, error| {
+                            d.child(
+                                div()
+                                    .px(px(12.))
+                                    .py(px(6.))
+                                    .text_size(px(11.5))
+                                    .text_color(ui(0xf7768eff))
+                                    .child(error),
+                            )
+                        })
+                        .child(
+                            div()
+                                .id("files-rows")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.))
+                                .px(px(8.))
+                                .py(px(6.))
+                                .children(rows)
+                                .when(empty && files.path.is_some(), |d| {
+                                    d.child(
+                                        div()
+                                            .pl(px(22.))
+                                            .py(px(6.))
+                                            .text_color(ui(0xffffff50))
+                                            .child("Nothing here"),
+                                    )
+                                }),
+                        ),
                 ),
         )
     }
