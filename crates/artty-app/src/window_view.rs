@@ -2396,7 +2396,7 @@ impl WindowView {
             .group(group.clone())
             .flex()
             .flex_col()
-            .mt(px(if server == LOCAL { 0. } else { 8. }))
+            .mt(px(if server == LOCAL { 0. } else { 4. }))
             // Its line: a box as a tab row's.
             .child(
                 div()
@@ -2984,7 +2984,7 @@ impl WindowView {
         let panel = div()
             .id("switcher")
             .absolute()
-            .top(px(116.))
+            .top(px(102.))
             .left(px(8.))
             .w(px(SIDEBAR_WIDTH + 40.))
             .max_h(px(440.))
@@ -3121,7 +3121,7 @@ impl WindowView {
             .bg(ui(0xffffff0a))
             .border_r_1()
             .border_color(ui(0xffffff12))
-            .pt(px(44.))
+            .pt(px(34.))
             // A click elsewhere in it (another tab, say) saves a name being typed.
             .on_mouse_down(
                 MouseButton::Left,
