@@ -159,6 +159,40 @@ enum MenuCommand {
     Disconnect,
 }
 
+/// A fold's arrowhead, drawn (a font's are thin, narrow, and sit where
+/// they will): pointing down when `open`, right when not; wide, centered.
+fn chevron(open: bool, color: gpui::Rgba) -> impl IntoElement {
+    gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let center = bounds.center();
+            // Half its width across, half that deep.
+            let (wide, deep) = (px(3.5), px(1.75));
+            let points = if open {
+                [
+                    point(center.x - wide, center.y - deep),
+                    point(center.x, center.y + deep),
+                    point(center.x + wide, center.y - deep),
+                ]
+            } else {
+                [
+                    point(center.x - deep, center.y - wide),
+                    point(center.x + deep, center.y),
+                    point(center.x - deep, center.y + wide),
+                ]
+            };
+            let mut path = gpui::PathBuilder::stroke(px(1.5));
+            path.move_to(points[0]);
+            path.line_to(points[1]);
+            path.line_to(points[2]);
+            if let Ok(path) = path.build() {
+                window.paint_path(path, color);
+            }
+        },
+    )
+    .size(px(10.))
+}
+
 /// The shade of a workspace color (see `WORKSPACE_COLORS`).
 fn workspace_color(name: &str) -> Option<u32> {
     Some(match name {
@@ -2618,7 +2652,7 @@ impl WindowView {
                     .text_size(px(12.))
                     .text_color(ui(0xffffff70))
                     .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffd0)))
-                    .child(if folded { "˃" } else { "˅" })
+                    .child(chevron(!folded, ui(0xffffff90)))
                     .on_click(cx.listener(move |this, event: &gpui::ClickEvent, _, cx| {
                         cx.stop_propagation();
                         if event.click_count() > 1 {
@@ -2880,7 +2914,7 @@ impl WindowView {
                     )
                 })
             })
-            .child(div().flex_none().text_size(px(12.)).text_color(ui(0xffffff70)).child("˅"))
+            .child(div().flex_none().w(px(12.)).flex().justify_center().child(chevron(true, ui(0xffffff90))))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.switcher_open = !this.switcher_open;
                 cx.notify();
