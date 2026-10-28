@@ -377,6 +377,9 @@ impl WindowView {
                     .id(("files-row", i))
                     .group(group.clone())
                     .relative()
+                    // Its height, however many there are (else a long list
+                    // squeezes them to fit).
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(4.))

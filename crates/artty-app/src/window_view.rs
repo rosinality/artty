@@ -2190,6 +2190,8 @@ impl WindowView {
         div()
             .id(("tab", index))
             .group(group)
+            // Its height, however many there are.
+            .flex_none()
             .flex()
             .flex_col()
             .gap(px(1.))
@@ -2428,6 +2430,7 @@ impl WindowView {
         div()
             .id(("server", server as usize))
             .group(group.clone())
+            .flex_none()
             .flex()
             .flex_col()
             .mt(px(if server == LOCAL { 0. } else { 4. }))
@@ -2623,6 +2626,7 @@ impl WindowView {
         div()
             .id(("workspace", id as usize))
             .group(group.clone())
+            .flex_none()
             .flex()
             .items_center()
             // As a tab row's, after its icon.
