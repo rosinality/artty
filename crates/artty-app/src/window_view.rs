@@ -2396,14 +2396,17 @@ impl WindowView {
             .group(group.clone())
             .flex()
             .flex_col()
-            .mt(px(if server == LOCAL { 0. } else { 10. }))
-            .px_2()
-            .pb(px(4.))
+            .mt(px(if server == LOCAL { 0. } else { 8. }))
+            // Its line: a box as a tab row's.
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.))
+                    .h(px(28.))
+                    .px_2()
+                    .rounded(px(7.))
+                    .hover(|d| d.bg(ui(0xffffff10)))
                     .text_size(px(10.5))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(ui(0xffffff70))
@@ -2465,8 +2468,11 @@ impl WindowView {
             )
             .when_some(note, |d, note| {
                 d.child(
+                    // Under its name.
                     Self::one_line(note)
-                        .pl(px(12.))
+                        .pl(px(26.))
+                        .pr_2()
+                        .pb(px(4.))
                         .text_size(px(10.5))
                         .text_color(ui(0xffffff50)),
                 )
@@ -2589,14 +2595,15 @@ impl WindowView {
             .gap(px(6.))
             // Apart from the section above, but not from its server's header.
             .mt(px(if self.first_on_server(position) { 0. } else { 8. }))
-            .h(px(24.))
+            // A box as a tab row's.
+            .h(px(28.))
             // As a tab's row: the arrow where its icon is, the name where its
             // title is (the WORKSPACES heading's + lines up on the right).
             .px_2()
-            .rounded(px(6.))
+            .rounded(px(7.))
             .text_size(px(11.5))
             .font_weight(FontWeight::SEMIBOLD)
-            .hover(|d| d.bg(ui(0xffffff0a)))
+            .hover(|d| d.bg(ui(0xffffff10)))
             // Only the arrow folds it.
             .child(
                 div()
@@ -3149,8 +3156,9 @@ impl WindowView {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .h(px(30.))
-                    .mb(px(10.))
+                    // A box as a tab row's.
+                    .h(px(28.))
+                    .mb(px(8.))
                     .px_2()
                     .rounded(px(7.))
                     .text_color(if self.showing_activity() { ui(0xffffffee) } else { ui(0xffffffb0) })
