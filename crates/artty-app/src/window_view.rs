@@ -3075,6 +3075,64 @@ impl WindowView {
         Some(div().absolute().top_0().left_0().size_full().child(backdrop).child(panel))
     }
 
+    /// WORKSPACES, with a + for another; or, for a lone workspace, TABS with
+    /// a + for a tab and ⊞ for another workspace.
+    fn sidebar_heading(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let lone = self.lone_workspace(cx).then(|| self.layout.workspaces[0].id);
+        let button = |id: &'static str, label: &'static str, tip: &'static str| {
+            div()
+                .id(id)
+                // Shown on hover, like the sections' own +.
+                .opacity(0.)
+                .group_hover("sidebar-heading", |s| s.opacity(1.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .min_w(px(18.))
+                .h(px(18.))
+                .rounded(px(4.))
+                .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffd0)))
+                .text_size(px(14.))
+                .child(label)
+                .tooltip(move |_, cx| cx.new(|_| Tooltip(tip.into())).into())
+        };
+        div()
+            .id("sidebar-heading")
+            .group("sidebar-heading")
+            .flex()
+            .gap(px(2.))
+            .items_center()
+            .px_2()
+            .pb_2()
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(ui(0xffffff70))
+            .child(div().flex_1().child(if lone.is_some() { "TABS" } else { "WORKSPACES" }))
+            .when_some(lone, |d, workspace| {
+                d.child(button("new-workspace", "⊞", "New Workspace  ⇧⌘N").text_size(px(12.)).on_click(
+                    cx.listener(|this, _, _, cx| this.new_workspace(cx)),
+                ))
+                .child(button("new-tab-here", "+", "New Tab  ⌘T").on_click(cx.listener(
+                    move |this, _, _, cx| this.open_tab_in(Some(workspace), cx),
+                )))
+            })
+            .when(lone.is_none(), |d| {
+                d.child(
+                    button("new-workspace", "+", "New Workspace  ⇧⌘N")
+                        .on_click(cx.listener(|this, _, _, cx| this.new_workspace(cx))),
+                )
+            })
+    }
+
+    /// One workspace, on one server, listed: its header would only repeat
+    /// the heading, so the heading is its (TABS, with its + and a way to a
+    /// second workspace, which brings the headers back).
+    fn lone_workspace(&self, cx: &App) -> bool {
+        self.layout.workspaces.len() == 1
+            && self.config.sidebar_style != artty_core::SidebarStyle::Switcher
+            && !app_state::several_servers(cx)
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Workspaces are sections (there's always one); a folded one still
         // shows the tab on screen.
@@ -3111,6 +3169,15 @@ impl WindowView {
             // Its server folded: its workspaces out of the way.
             if several && self.folded_servers.contains(&server) {
                 index += workspace.tabs.len();
+                continue;
+            }
+            // The only one: no header (the heading stands for it), never folded.
+            if self.lone_workspace(cx) {
+                rows.extend(workspace.tabs.iter().map(|tab| {
+                    let row = self.tab_row(index, tab, cx).into_any_element();
+                    index += 1;
+                    row
+                }));
                 continue;
             }
             // An accordion has only the current workspace open.
@@ -3207,33 +3274,7 @@ impl WindowView {
                     .child(div().text_xs().text_color(ui(0xffffff66)).child("⇧⌘A"))
                     .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
             )
-            .when(!app_state::several_servers(cx), |d| d.child(
-                div()
-                    .id("sidebar-heading")
-                    .group("sidebar-heading")
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .px_2()
-                    .pb_2()
-                    .text_size(px(10.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(ui(0xffffff70))
-                    .child("WORKSPACES")
-                    .child(
-                        div()
-                            .id("new-workspace")
-                            // Shown on hover, like the sections' own +.
-                            .opacity(0.)
-                            .group_hover("sidebar-heading", |s| s.opacity(1.))
-                            .px_1()
-                            .rounded(px(4.))
-                            .hover(|d| d.bg(ui(0xffffff14)))
-                            .text_size(px(14.))
-                            .child("+")
-                            .on_click(cx.listener(|this, _, _, cx| this.new_workspace(cx))),
-                    ),
-            ))
+            .when(!app_state::several_servers(cx), |d| d.child(self.sidebar_heading(cx)))
             .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(3.)).overflow_y_scroll().children(rows))
             .when_some(self.config_error.clone(), |d, error| {
                 d.child(
