@@ -2418,6 +2418,13 @@ impl WindowView {
             },
             Status::Installing => (0xe0af68ff, Some("installing artty there…".to_owned())),
             Status::NeedsLogin(reason) => (0xe0af68ff, Some(format!("{reason} · click to log in"))),
+            Status::SignIn(_) => {
+                (0xe0af68ff, Some("sign in to continue · click to open the browser".to_owned()))
+            },
+        };
+        let sign_in = match &status {
+            Status::SignIn(url) => Some(url.clone()),
+            _ => None,
         };
         let connected = status == Status::Connected;
         let install = matches!(status, Status::NeedsInstall(_));
@@ -2550,6 +2557,10 @@ impl WindowView {
                         cx.stop_propagation();
                     }),
                 )
+            })
+            // Waiting for a sign-in: the browser, where it's done.
+            .when_some(sign_in, |d, url| {
+                d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
             })
             .when(away && server != LOCAL, |d| {
                 d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {

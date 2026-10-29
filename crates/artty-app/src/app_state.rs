@@ -133,6 +133,9 @@ pub enum Status {
     Installing,
     /// Logging in failed, or was cancelled: trying again asks again.
     NeedsLogin(String),
+    /// Logging in waits for a sign-in in the browser, at this address
+    /// (Tailscale SSH's check, say): it goes on once that's done.
+    SignIn(String),
 }
 
 impl Connection {
@@ -1268,7 +1271,31 @@ pub fn connect_remote(server: ServerId, cx: &mut App) {
     connection.attempt += 1;
     let attempt = connection.attempt;
     cx.refresh_windows();
-    let askpass = crate::askpass::askpass(&server_name(server, cx), cx);
+    let mut askpass = crate::askpass::askpass(&server_name(server, cx), cx);
+    // A sign-in asked for in the browser: shown, to be clicked.
+    let (sign_in, mut signing_in) = futures::channel::mpsc::unbounded::<String>();
+    if let Some(askpass) = askpass.as_mut() {
+        askpass.sign_in = Some(std::sync::Arc::new(move |url| {
+            let _ = sign_in.unbounded_send(url);
+        }));
+    }
+    cx.spawn(async move |cx| {
+        use futures::StreamExt;
+        while let Some(url) = signing_in.next().await {
+            let _ = cx.update(|cx| {
+                let shared = cx.global_mut::<Shared>();
+                if let Some(connection) = shared.connections.get_mut(server as usize)
+                    && connection.attempt == attempt
+                    && connection.status == Status::Connecting
+                {
+                    log::info!("server {}: sign in at {url}", connection.name);
+                    connection.status = Status::SignIn(url);
+                    cx.refresh_windows();
+                }
+            });
+        }
+    })
+    .detach();
     let opening = cx.background_spawn(async move {
         let prompts = askpass.as_ref().map_or(Prompts::Never, Prompts::Helper);
         artty_core::remote::open(&config, prompts)

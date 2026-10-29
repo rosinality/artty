@@ -43,6 +43,29 @@ pub struct Askpass {
     pub token: String,
     pub name: String,
     pub key: u64,
+    /// Told the address when logging in waits for a sign-in in the browser
+    /// ([`sign_in_url`]).
+    pub sign_in: Option<SignIn>,
+}
+
+/// Where a login waiting for the browser is told to go.
+pub type SignIn = Arc<dyn Fn(String) + Send + Sync>;
+
+/// How long a login may wait for a sign-in in the browser.
+const SIGN_IN_TIME: u32 = 600;
+
+/// The address in what ssh passes on from the server while logging in,
+/// when it asks for a sign-in in the browser — Tailscale SSH's check mode:
+/// "To authenticate, visit: https://login.tailscale.com/a/…". It waits
+/// (without a word more) until that's done.
+pub fn sign_in_url(line: &str) -> Option<&str> {
+    let lower = line.to_lowercase();
+    if !["visit", "authenticate", "sign in", "log in", "login"].iter().any(|w| lower.contains(w)) {
+        return None;
+    }
+    let at = line.find("https://")?;
+    let url = line[at..].split_whitespace().next()?;
+    Some(url.trim_end_matches(['.', ',', ')', '"', '\'']))
 }
 
 /// Connections with a question open, by [`Askpass::key`].
@@ -143,6 +166,13 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
         Prompts::Helper(askpass) => Some(askpass.key),
         _ => None,
     };
+    let sign_in = match &prompts {
+        Prompts::Helper(askpass) => askpass.sign_in.clone(),
+        _ => None,
+    };
+    let terminal = matches!(prompts, Prompts::Terminal);
+    // A sign-in in the browser asked for: waiting for it.
+    let signing_in = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut child = prompting_command(command, &prompts)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -155,9 +185,21 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
     if let Some(stderr) = child.stderr.take() {
         let said = said.clone();
         let name = config.name.clone();
+        let signing_in = signing_in.clone();
         std::thread::spawn(move || {
             for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
                 log::info!("server {name}: {line}");
+                // Waited for, if someone is told where to sign in (else it
+                // fails in time, saying where).
+                if let Some(url) = sign_in_url(&line).filter(|_| sign_in.is_some() || terminal) {
+                    signing_in.store(true, std::sync::atomic::Ordering::SeqCst);
+                    if let Some(sign_in) = &sign_in {
+                        sign_in(url.to_owned());
+                    }
+                    if terminal {
+                        eprintln!("{}", line.trim_start_matches(['#', ' ']));
+                    }
+                }
                 if !line.trim().is_empty() {
                     let mut said = said.lock().unwrap();
                     if said.len() == 4 {
@@ -173,15 +215,19 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
     let greeted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
         let (greeted, pid) = (greeted.clone(), child.id() as i32);
+        let signing_in = signing_in.clone();
         std::thread::spawn(move || {
-            // (Not counting time a question waits for the user.)
-            let mut waited = 0;
-            while waited < 30 {
+            // (Not counting time a question waits for the user, nor a while
+            // for a sign-in in the browser.)
+            let (mut waited, mut signing) = (0, 0);
+            while waited < 30 && signing < SIGN_IN_TIME {
                 std::thread::sleep(Duration::from_secs(1));
                 if greeted.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                if !key.is_some_and(prompting) {
+                if signing_in.load(std::sync::atomic::Ordering::SeqCst) {
+                    signing += 1;
+                } else if !key.is_some_and(prompting) {
                     waited += 1;
                 }
             }
@@ -353,6 +399,7 @@ mod tests {
             token: "t".into(),
             name: "devbox".into(),
             key: 3,
+            sign_in: None,
         };
         let command =
             prompting_command(config.connect_command().unwrap(), &Prompts::Helper(&askpass));
@@ -378,4 +425,20 @@ mod tests {
         assert_eq!(on_path.artty_setting(Some("/opt/artty")), Some(None));
         assert_eq!(off_path.artty_setting(Some("/opt/artty")), Some(Some(INSTALLED_AT.to_owned())));
     }
+
+    #[test]
+    fn a_sign_in_in_the_browser_is_noticed() {
+        assert_eq!(
+            sign_in_url("# To authenticate, visit: https://login.tailscale.com/a/l1da9c4b01451ee"),
+            Some("https://login.tailscale.com/a/l1da9c4b01451ee")
+        );
+        assert_eq!(
+            sign_in_url("Please log in at https://example.com/device."),
+            Some("https://example.com/device")
+        );
+        // An address, but not asking for anything.
+        assert_eq!(sign_in_url("See https://example.com for the docs"), None);
+        assert_eq!(sign_in_url("Permission denied (publickey)."), None);
+    }
+
 }
