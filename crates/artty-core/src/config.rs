@@ -122,6 +122,24 @@ impl ServerConfig {
         Some(command)
     }
 
+    /// ssh logging in to the machine in a terminal, where it can ask for
+    /// anything a login needs: it becomes the shared connection (see
+    /// [`ServerConfig::shared`]), which the app's then goes through. A
+    /// shell there, once in.
+    pub fn login_command(&self) -> Option<Vec<String>> {
+        let destination = self.ssh.as_ref()?;
+        let mut command = vec!["ssh".to_owned()];
+        command.extend(
+            shared_options()
+                .chunks(2)
+                .filter(|option| option[1] != "BatchMode=yes")
+                .flatten()
+                .cloned(),
+        );
+        command.push(destination.clone());
+        Some(command)
+    }
+
     /// One ssh connection to the machine, shared: the app's, forwards'
     /// and installs' sessions all go through it (OpenSSH's ControlMaster),
     /// so a login that needs a password or a code is made once. It
@@ -467,6 +485,11 @@ mod tests {
         let forward = server.shared("forward", Some("127.0.0.1:1:localhost:2")).unwrap();
         let tail: Vec<&str> = forward.iter().rev().take(5).rev().map(String::as_str).collect();
         assert_eq!(tail, ["-O", "forward", "-L", "127.0.0.1:1:localhost:2", "me@devbox"]);
+        // Logging in in a terminal: may ask, shares, and gets a shell there.
+        let login = server.login_command().unwrap();
+        assert!(!has(&login, "BatchMode=yes") && !has(&login, "-T"));
+        assert!(has(&login, "ControlMaster=auto") && has(&login, "ControlPersist=600"));
+        assert_eq!(login.last().map(String::as_str), Some("me@devbox"));
     }
 
     #[test]

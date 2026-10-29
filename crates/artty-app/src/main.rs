@@ -43,6 +43,7 @@ mod terminal;
 mod transfer;
 #[cfg(target_os = "macos")]
 mod window_view;
+use window_view::login_sheet;
 
 #[cfg(target_os = "macos")]
 pub use app::{bind_default_keys, menus};

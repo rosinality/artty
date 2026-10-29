@@ -16,7 +16,7 @@ use artty_core::protocol::{
     AppCommand, ClientMessage, Hello, PaneSpec, PaneState, Query, Reply, ServerMessage, WindowId,
     decode_response, encode_request, read_message, write_message,
 };
-use artty_core::remote::Prompts;
+use artty_core::remote::{Login, Prompts};
 use artty_core::vt::term::TermMode;
 use artty_core::{Config, Frame, SavedWindow, ServerConfig};
 use futures::StreamExt;
@@ -59,6 +59,8 @@ pub struct Connection {
     traffic: Arc<(std::sync::atomic::AtomicU64, std::sync::atomic::AtomicU64)>,
     /// How the link has been, for Activity.
     pub network: Network,
+    /// What ssh said in the latest attempt.
+    pub output: Vec<String>,
 }
 
 /// A connection's last minute and history, for Activity.
@@ -133,9 +135,13 @@ pub enum Status {
     Installing,
     /// Logging in failed, or was cancelled: trying again asks again.
     NeedsLogin(String),
-    /// Logging in waits for a sign-in in the browser, at this address
-    /// (Tailscale SSH's check, say): it goes on once that's done.
-    SignIn(String),
+    /// Logging in waits for someone (ssh said something, then went quiet):
+    /// a sign-in in the browser (Tailscale SSH's check), a push to approve,
+    /// a key to touch. What it said last, and the attempt's process.
+    WaitsForYou { said: String, pid: i32 },
+    /// Logging in in a tab (see [`login_in_tab`]): it connects once that's
+    /// done.
+    LoggingInTab,
 }
 
 impl Connection {
@@ -151,6 +157,7 @@ impl Connection {
             attempt: 0,
             stopped: false,
             last_heard: Instant::now(),
+            output: Vec::new(),
             ping: None,
             latency: None,
             probe_until: None,
@@ -1269,30 +1276,21 @@ pub fn connect_remote(server: ServerId, cx: &mut App) {
     connection.close();
     connection.status = Status::Connecting;
     connection.attempt += 1;
+    connection.output.clear();
     let attempt = connection.attempt;
     cx.refresh_windows();
     let mut askpass = crate::askpass::askpass(&server_name(server, cx), cx);
-    // A sign-in asked for in the browser: shown, to be clicked.
-    let (sign_in, mut signing_in) = futures::channel::mpsc::unbounded::<String>();
+    // What logging in says, kept; and when it waits for you, a sheet.
+    let (watch, mut said) = futures::channel::mpsc::unbounded::<Login>();
     if let Some(askpass) = askpass.as_mut() {
-        askpass.sign_in = Some(std::sync::Arc::new(move |url| {
-            let _ = sign_in.unbounded_send(url);
+        askpass.watch = Some(std::sync::Arc::new(move |login| {
+            let _ = watch.unbounded_send(login);
         }));
     }
     cx.spawn(async move |cx| {
         use futures::StreamExt;
-        while let Some(url) = signing_in.next().await {
-            let _ = cx.update(|cx| {
-                let shared = cx.global_mut::<Shared>();
-                if let Some(connection) = shared.connections.get_mut(server as usize)
-                    && connection.attempt == attempt
-                    && connection.status == Status::Connecting
-                {
-                    log::info!("server {}: sign in at {url}", connection.name);
-                    connection.status = Status::SignIn(url);
-                    cx.refresh_windows();
-                }
-            });
+        while let Some(login) = said.next().await {
+            let _ = cx.update(|cx| login_said(server, attempt, login, cx));
         }
     })
     .detach();
@@ -1307,6 +1305,154 @@ pub fn connect_remote(server: ServerId, cx: &mut App) {
     .detach();
 }
 
+/// What the login of `server`'s `attempt` said: kept, and when it waits
+/// for you, asked in the window in front.
+fn login_said(server: ServerId, attempt: u64, login: Login, cx: &mut App) {
+    let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
+        return;
+    };
+    if connection.attempt != attempt {
+        return;
+    }
+    match login {
+        Login::Said(line) => {
+            if connection.output.len() == 200 {
+                connection.output.remove(0);
+            }
+            connection.output.push(line);
+        },
+        Login::Stalled { said, url, pid } => {
+            if !matches!(connection.status, Status::Connecting | Status::WaitsForYou { .. }) {
+                return;
+            }
+            log::info!("server {}: login waits: {}", connection.name, said.join(" / "));
+            connection.status =
+                Status::WaitsForYou { said: said.last().cloned().unwrap_or_default(), pid };
+            let name = connection.name.clone();
+            let sheet = crate::login_sheet::Sheet::Waits { server, name, said, url, pid };
+            crate::login_sheet::show(sheet, cx);
+            cx.refresh_windows();
+        },
+    }
+}
+
+/// Stop `server`'s login waiting for you (its process `pid`): not tried
+/// again until asked.
+pub fn cancel_login(server: ServerId, pid: i32, cx: &mut App) {
+    let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
+        return;
+    };
+    // Its outcome is no one's now.
+    connection.attempt += 1;
+    connection.status = Status::NeedsLogin("login cancelled".to_owned());
+    // SAFETY: plain syscall; the attempt's own ssh.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    crate::login_sheet::dismiss(server, cx);
+    cx.refresh_windows();
+}
+
+/// Log in to `server` in a tab of `view` (on this Mac), where ssh can ask
+/// for anything a login needs; it becomes the shared connection, and once
+/// it's up the app connects through it. The attempt waiting (`pid`) ends.
+pub fn login_in_tab(
+    server: ServerId,
+    pid: Option<i32>,
+    view: &gpui::Entity<WindowView>,
+    cx: &mut App,
+) {
+    let Some(config) = remote_config(server, cx) else { return };
+    let (Some(login), Some(check)) = (config.login_command(), config.shared("check", None)) else {
+        return;
+    };
+    let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
+        return;
+    };
+    connection.attempt += 1;
+    let attempt = connection.attempt;
+    connection.status = Status::LoggingInTab;
+    if let Some(pid) = pid {
+        // SAFETY: plain syscall; the attempt's own ssh.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    crate::login_sheet::dismiss(server, cx);
+    let title = format!("Log in to {}", config.name);
+    view.update(cx, |view, cx| view.open_command_tab(login, title, cx));
+    cx.refresh_windows();
+    // Up once ssh there is in: then connected through it.
+    cx.spawn(async move |cx| {
+        const EVERY: Duration = Duration::from_secs(2);
+        const AT_MOST: u32 = 600 / 2;
+        for _ in 0..AT_MOST {
+            cx.background_executor().timer(EVERY).await;
+            let still = cx
+                .update(|cx| {
+                    cx.global::<Shared>().connections.get(server as usize).is_some_and(|c| {
+                        c.attempt == attempt && c.status == Status::LoggingInTab
+                    })
+                })
+                .unwrap_or(false);
+            if !still {
+                return;
+            }
+            let check = check.clone();
+            let up = cx
+                .background_spawn(async move {
+                    artty_core::remote::ssh_process(&check)
+                        .output()
+                        .is_ok_and(|output| output.status.success())
+                })
+                .await;
+            if up {
+                let _ = cx.update(|cx| connect_remote(server, cx));
+                return;
+            }
+        }
+        let _ = cx.update(|cx| {
+            if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize)
+                && connection.attempt == attempt
+            {
+                connection.status = Status::NeedsLogin("not logged in".to_owned());
+                cx.refresh_windows();
+            }
+        });
+    })
+    .detach();
+}
+
+/// Show what `server`'s login said: waiting for you (its process `pid`), or
+/// failing.
+pub fn show_login_sheet(server: ServerId, waiting: Option<i32>, cx: &mut App) {
+    let name = server_name(server, cx);
+    let (output, error) = last_attempt(server, cx);
+    let said = crate::login_sheet::worth_showing(&output);
+    let sheet = match waiting {
+        Some(pid) => {
+            let url = said
+                .iter()
+                .rev()
+                .find_map(|line| artty_core::remote::sign_in_url(line))
+                .map(str::to_owned);
+            crate::login_sheet::Sheet::Waits { server, name, said, url, pid }
+        },
+        None => crate::login_sheet::Sheet::Failed { server, name, error, said: output },
+    };
+    crate::login_sheet::show(sheet, cx);
+}
+
+/// What `server`'s latest attempt said, and what went wrong last.
+pub fn last_attempt(server: ServerId, cx: &App) -> (Vec<String>, Option<String>) {
+    cx.global::<Shared>().connections.get(server as usize).map_or_else(Default::default, |c| {
+        (c.output.clone(), c.network.last_error.as_ref().map(|(error, _)| error.clone()))
+    })
+}
+
+/// While `server` tries again after failing: what went wrong.
+pub fn retrying_after(server: ServerId, cx: &App) -> Option<String> {
+    let connection = cx.global::<Shared>().connections.get(server as usize)?;
+    (connection.failures > 0)
+        .then(|| connection.network.last_error.as_ref().map(|(error, _)| error.clone()))?
+}
+
 fn remote_opened(
     server: ServerId,
     attempt: u64,
@@ -1318,6 +1464,10 @@ fn remote_opened(
         .connections
         .get(server as usize)
         .is_some_and(|c| c.attempt == attempt && c.remote.is_some());
+    // Past waiting for anyone, whichever way it went.
+    if current {
+        crate::login_sheet::dismiss(server, cx);
+    }
     let opened = match opened {
         Ok(mut opened) if !current => {
             let _ = opened.child.kill();
@@ -1341,7 +1491,17 @@ fn remote_opened(
             cx.refresh_windows();
             return;
         },
-        Err(error) => return retry_later(server, error, cx),
+        Err(error) => {
+            // No answer in time: its shared ssh connection may be what
+            // hangs (a network gone under it); the next attempt makes a new
+            // one.
+            if error.starts_with(artty_core::remote::TIMED_OUT)
+                && let Some(exit) = remote_config(server, cx).and_then(|r| r.shared("exit", None))
+            {
+                std::thread::spawn(move || artty_core::remote::ssh_process(&exit).output());
+            }
+            return retry_later(server, error, cx);
+        },
     };
     let artty_core::remote::Opened { mut child, reader, writer, welcome } = opened;
     let version = artty_core::protocol::protocol_version();
@@ -1390,6 +1550,14 @@ pub fn disconnect_remote(server: ServerId, cx: &mut App) {
     if server == LOCAL {
         return;
     }
+    // A login waiting for you ends too.
+    if let Some(Status::WaitsForYou { pid, .. }) =
+        cx.global::<Shared>().connections.get(server as usize).map(|c| &c.status)
+    {
+        // SAFETY: plain syscall; the attempt's own ssh.
+        unsafe { libc::kill(*pid, libc::SIGTERM) };
+    }
+    crate::login_sheet::dismiss(server, cx);
     drop_remote(server, cx);
     if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) {
         connection.status = Status::Off("disconnected · click to connect".to_owned());

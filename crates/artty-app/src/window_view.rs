@@ -34,6 +34,8 @@ use crate::terminal::{self, Metrics, hsla};
 mod activity;
 #[path = "ask_sheet.rs"]
 mod ask_sheet;
+#[path = "login_sheet.rs"]
+pub mod login_sheet;
 #[path = "copy_mode.rs"]
 mod copy_mode;
 #[path = "files_drawer.rs"]
@@ -415,6 +417,8 @@ pub struct WindowView {
     toast: Option<(SharedString, Instant)>,
     /// Questions ssh asks while logging in, the first shown.
     asks: Vec<ask_sheet::AskSheet>,
+    /// A machine's login needing you, or why it couldn't connect.
+    login: Option<login_sheet::Sheet>,
     /// The files drawer (⌘⇧E), when open.
     files: Option<files_drawer::Files>,
     /// The sidebar folded away (⌘B): the terminal takes its width.
@@ -551,6 +555,7 @@ impl WindowView {
             copy_mode: None,
             toast: None,
             asks: Vec::new(),
+            login: None,
             files: None,
             sidebar_hidden: false,
             palette: None,
@@ -1582,6 +1587,9 @@ impl WindowView {
             self.ask_key(event, cx);
             return;
         }
+        if self.login_key(event, cx) {
+            return;
+        }
         if self.switcher_open && keystroke.key == "escape" {
             self.switcher_open = false;
             cx.stop_propagation();
@@ -2410,7 +2418,7 @@ impl WindowView {
             Status::Connecting => (0xe0af68ff, Some("connecting…".to_owned())),
             Status::Waiting { error, retry_at } => {
                 let seconds = retry_at.saturating_duration_since(Instant::now()).as_secs();
-                (0xe0af68ff, Some(format!("{error} · again in {seconds}s · click to retry")))
+                (0xe0af68ff, Some(format!("{error} · again in {seconds}s · click for details")))
             },
             Status::Off(reason) => (0xffffff40, Some(reason.clone())),
             Status::NeedsInstall(reason) => {
@@ -2418,12 +2426,24 @@ impl WindowView {
             },
             Status::Installing => (0xe0af68ff, Some("installing artty there…".to_owned())),
             Status::NeedsLogin(reason) => (0xe0af68ff, Some(format!("{reason} · click to log in"))),
-            Status::SignIn(_) => {
-                (0xe0af68ff, Some("sign in to continue · click to open the browser".to_owned()))
+            Status::WaitsForYou { said, .. } => {
+                (0xe0af68ff, Some(format!("{said} · click to see")))
+            },
+            Status::LoggingInTab => {
+                (0xe0af68ff, Some("logging in in a tab · connects once you're in".to_owned()))
             },
         };
-        let sign_in = match &status {
-            Status::SignIn(url) => Some(url.clone()),
+        // Trying again: what went wrong, until it's through.
+        let retrying = app_state::retrying_after(server, cx);
+        let note = match (&status, &retrying) {
+            (Status::Connecting, Some(error)) => Some(format!("connecting… · last: {error}")),
+            _ => note,
+        };
+        // A click shows what ssh said: waiting for you, or failing.
+        let details = match &status {
+            Status::WaitsForYou { pid, .. } => Some(Some(*pid)),
+            Status::Waiting { .. } => Some(None),
+            Status::Connecting if retrying.is_some() => Some(None),
             _ => None,
         };
         let connected = status == Status::Connected;
@@ -2558,11 +2578,12 @@ impl WindowView {
                     }),
                 )
             })
-            // Waiting for a sign-in: the browser, where it's done.
-            .when_some(sign_in, |d, url| {
-                d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url)))
+            .when_some(details.filter(|_| server != LOCAL), |d, waiting| {
+                d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
+                    cx.defer(move |cx| app_state::show_login_sheet(server, waiting, cx));
+                }))
             })
-            .when(away && server != LOCAL, |d| {
+            .when(away && details.is_none() && server != LOCAL, |d| {
                 d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
                     if install {
                         app_state::install_remote(server, cx)
@@ -4189,6 +4210,7 @@ impl Render for WindowView {
             .children(self.palette_overlay(cx))
             .children(self.search_all_overlay(cx))
             .children(self.switcher_overlay(cx))
+            .children(self.login_overlay(cx))
             .children(self.ask_overlay(cx))
     }
 }

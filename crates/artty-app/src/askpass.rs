@@ -137,7 +137,7 @@ pub fn askpass(name: &str, cx: &mut App) -> Option<Askpass> {
         token: asking.token.clone(),
         name: name.to_owned(),
         key: asking.next_key,
-        sign_in: None,
+        watch: None,
     })
 }
 

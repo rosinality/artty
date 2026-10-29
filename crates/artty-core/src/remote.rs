@@ -43,16 +43,42 @@ pub struct Askpass {
     pub token: String,
     pub name: String,
     pub key: u64,
-    /// Told the address when logging in waits for a sign-in in the browser
-    /// ([`sign_in_url`]).
-    pub sign_in: Option<SignIn>,
+    /// Told what logging in says, as it goes.
+    pub watch: Option<LoginWatch>,
 }
 
-/// Where a login waiting for the browser is told to go.
-pub type SignIn = Arc<dyn Fn(String) + Send + Sync>;
+/// What logging in says, as it goes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Login {
+    /// A line from ssh (or from the server, through it).
+    Said(String),
+    /// It said something, then nothing for a while, without getting
+    /// through: it waits for someone — a sign-in in the browser, a push to
+    /// approve, a key to touch. What it said (without ssh's routine
+    /// notices), the address to sign in at if it gave one, and its
+    /// process (to end the attempt).
+    Stalled { said: Vec<String>, url: Option<String>, pid: i32 },
+}
 
-/// How long a login may wait for a sign-in in the browser.
-const SIGN_IN_TIME: u32 = 600;
+/// Where what logging in says goes.
+pub type LoginWatch = Arc<dyn Fn(Login) + Send + Sync>;
+
+/// How long after its last word a login that hasn't got through is taken
+/// to be waiting for someone (a banner is followed by more, at once).
+const STALL: Duration = Duration::from_secs(3);
+
+/// How long an attempt waits for the greeting: in all, and while a login
+/// waits for someone who's been told.
+const GREETING_TIME: Duration = Duration::from_secs(30);
+const WAITING_FOR_YOU: Duration = Duration::from_secs(600);
+
+/// How [`open`]'s error starts when the attempt got no greeting in time.
+pub const TIMED_OUT: &str = "no answer in time";
+
+/// ssh's routine word, not a login waiting for anything.
+pub fn routine(line: &str) -> bool {
+    line.trim().is_empty() || line.starts_with("Warning: Permanently added")
+}
 
 /// The address in what ssh passes on from the server while logging in,
 /// when it asks for a sign-in in the browser — Tailscale SSH's check mode:
@@ -155,6 +181,16 @@ fn prompting_command(mut command: Vec<String>, prompts: &Prompts) -> std::proces
     process
 }
 
+/// What a login has said that may be for someone.
+#[derive(Default)]
+struct Talk {
+    lines: Vec<String>,
+    /// When it last said something.
+    last: Option<std::time::Instant>,
+    /// How many lines someone has been told.
+    told: usize,
+}
+
 /// Run the command reaching the server and wait for its greeting; ssh may
 /// ask for a login as `prompts` says.
 pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
@@ -166,13 +202,11 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
         Prompts::Helper(askpass) => Some(askpass.key),
         _ => None,
     };
-    let sign_in = match &prompts {
-        Prompts::Helper(askpass) => askpass.sign_in.clone(),
+    let watch = match &prompts {
+        Prompts::Helper(askpass) => askpass.watch.clone(),
         _ => None,
     };
     let terminal = matches!(prompts, Prompts::Terminal);
-    // A sign-in in the browser asked for: waiting for it.
-    let signing_in = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut child = prompting_command(command, &prompts)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -182,23 +216,16 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
     // What it says on stderr is the reason, when it fails (its last few
     // lines: fish follows its error with the command and a marker).
     let said = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    // And what it's said that may be for someone, and when it last did.
+    let talk = Arc::new(std::sync::Mutex::new(Talk::default()));
     if let Some(stderr) = child.stderr.take() {
-        let said = said.clone();
+        let (said, talk, watch) = (said.clone(), talk.clone(), watch.clone());
         let name = config.name.clone();
-        let signing_in = signing_in.clone();
         std::thread::spawn(move || {
             for line in std::io::BufReader::new(stderr).lines().map_while(Result::ok) {
                 log::info!("server {name}: {line}");
-                // Waited for, if someone is told where to sign in (else it
-                // fails in time, saying where).
-                if let Some(url) = sign_in_url(&line).filter(|_| sign_in.is_some() || terminal) {
-                    signing_in.store(true, std::sync::atomic::Ordering::SeqCst);
-                    if let Some(sign_in) = &sign_in {
-                        sign_in(url.to_owned());
-                    }
-                    if terminal {
-                        eprintln!("{}", line.trim_start_matches(['#', ' ']));
-                    }
+                if let Some(watch) = &watch {
+                    watch(Login::Said(line.clone()));
                 }
                 if !line.trim().is_empty() {
                     let mut said = said.lock().unwrap();
@@ -207,30 +234,64 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
                     }
                     said.push(line.trim().to_owned());
                 }
+                if !routine(&line) {
+                    let mut talk = talk.lock().unwrap();
+                    if talk.lines.len() == 40 {
+                        talk.lines.remove(0);
+                    }
+                    talk.lines.push(line.trim_start_matches(['#', ' ']).trim_end().to_owned());
+                    talk.last = Some(std::time::Instant::now());
+                }
             }
         });
     }
     // No greeting in time (a login asking for something, a hung network):
-    // give up on this attempt.
+    // give up on this attempt. A login that went quiet after saying
+    // something waits for someone: they're told (if anyone can be), and it
+    // has longer.
     let greeted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let timed_out = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
-        let (greeted, pid) = (greeted.clone(), child.id() as i32);
-        let signing_in = signing_in.clone();
+        let (greeted, timed_out, pid) = (greeted.clone(), timed_out.clone(), child.id() as i32);
+        let tellable = watch.is_some() || terminal;
         std::thread::spawn(move || {
-            // (Not counting time a question waits for the user, nor a while
-            // for a sign-in in the browser.)
-            let (mut waited, mut signing) = (0, 0);
-            while waited < 30 && signing < SIGN_IN_TIME {
-                std::thread::sleep(Duration::from_secs(1));
+            const TICK: Duration = Duration::from_millis(500);
+            let (mut waited, mut waiting_for_you) = (Duration::ZERO, Duration::ZERO);
+            while waited < GREETING_TIME && waiting_for_you < WAITING_FOR_YOU {
+                std::thread::sleep(TICK);
                 if greeted.load(std::sync::atomic::Ordering::SeqCst) {
                     return;
                 }
-                if signing_in.load(std::sync::atomic::Ordering::SeqCst) {
-                    signing += 1;
+                let stalled = {
+                    let mut talk = talk.lock().unwrap();
+                    let stalled = tellable && talk.last.is_some_and(|at| at.elapsed() >= STALL);
+                    // Told once for each new word.
+                    if stalled && talk.told < talk.lines.len() {
+                        let new = &talk.lines[talk.told..];
+                        if terminal {
+                            for line in new {
+                                eprintln!("{line}");
+                            }
+                        }
+                        if let Some(watch) = &watch {
+                            watch(Login::Stalled {
+                                said: talk.lines.clone(),
+                                url: talk.lines.iter().rev().find_map(|l| sign_in_url(l)).map(str::to_owned),
+                                pid,
+                            });
+                        }
+                        talk.told = talk.lines.len();
+                    }
+                    stalled
+                };
+                // (Not counting time a question waits for the user.)
+                if stalled {
+                    waiting_for_you += TICK;
                 } else if !key.is_some_and(prompting) {
-                    waited += 1;
+                    waited += TICK;
                 }
             }
+            timed_out.store(true, std::sync::atomic::Ordering::SeqCst);
             // SAFETY: plain syscall on our own child.
             unsafe { libc::kill(pid, libc::SIGTERM) };
         });
@@ -267,7 +328,10 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
             if let Some(missing) = missing {
                 return Err(format!("{NOT_INSTALLED} ({missing})"));
             }
+            let timed_out = timed_out.load(std::sync::atomic::Ordering::SeqCst);
             match said.last() {
+                Some(said) if timed_out => Err(format!("{TIMED_OUT}: {said}")),
+                None if timed_out => Err(TIMED_OUT.to_owned()),
                 Some(said) => Err(said.clone()),
                 None => Err(format!("no answer: {err}")),
             }
@@ -399,7 +463,7 @@ mod tests {
             token: "t".into(),
             name: "devbox".into(),
             key: 3,
-            sign_in: None,
+            watch: None,
         };
         let command =
             prompting_command(config.connect_command().unwrap(), &Prompts::Helper(&askpass));
@@ -439,6 +503,66 @@ mod tests {
         // An address, but not asking for anything.
         assert_eq!(sign_in_url("See https://example.com for the docs"), None);
         assert_eq!(sign_in_url("Permission denied (publickey)."), None);
+    }
+
+
+    /// `open` of a "server" that's `script` (sh), told what it says.
+    fn open_script(script: &str) -> (Result<Opened, String>, Vec<Login>) {
+        let config = ServerConfig {
+            name: "test".into(),
+            command: vec!["sh".into(), "-c".into(), script.into()],
+            ..Default::default()
+        };
+        let heard = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let askpass = Askpass {
+            program: "/nonexistent".into(),
+            socket: "/nonexistent".into(),
+            token: "t".into(),
+            name: "test".into(),
+            key: 990_001,
+            watch: Some({
+                let heard = heard.clone();
+                Arc::new(move |login: Login| {
+                    // Waiting for someone who isn't there: end it.
+                    if let Login::Stalled { pid, .. } = &login {
+                        // SAFETY: plain syscall on the test's own child.
+                        unsafe { libc::kill(*pid, libc::SIGTERM) };
+                    }
+                    heard.lock().unwrap().push(login);
+                })
+            }),
+        };
+        let opened = open(&config, Prompts::Helper(&askpass));
+        let heard = heard.lock().unwrap().clone();
+        (opened, heard)
+    }
+
+    #[test]
+    fn a_login_gone_quiet_after_a_word_waits_for_you() {
+        let started = std::time::Instant::now();
+        let (opened, heard) = open_script(
+            "echo 'Warning: Permanently added x (ED25519) to the list of known hosts.' >&2; \
+             echo '# To authenticate, visit: https://login.example.com/a/xyz' >&2; exec sleep 20",
+        );
+        assert!(opened.is_err());
+        // Told after it went quiet, well before the greeting's time ran out.
+        assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+        let stalled = heard.iter().find_map(|login| match login {
+            Login::Stalled { said, url, .. } => Some((said.clone(), url.clone())),
+            Login::Said(_) => None,
+        });
+        let (said, url) = stalled.expect("told it waits");
+        // ssh's routine notice isn't what it waits on.
+        assert_eq!(said, ["To authenticate, visit: https://login.example.com/a/xyz"]);
+        assert_eq!(url.as_deref(), Some("https://login.example.com/a/xyz"));
+        assert!(heard.iter().filter(|l| matches!(l, Login::Said(_))).count() == 2);
+    }
+
+    #[test]
+    fn a_failure_is_not_a_wait() {
+        let (opened, heard) = open_script("echo 'Permission denied (publickey).' >&2; exit 255");
+        assert_eq!(opened.err().as_deref(), Some("Permission denied (publickey)."));
+        assert!(!heard.iter().any(|l| matches!(l, Login::Stalled { .. })));
     }
 
 }
