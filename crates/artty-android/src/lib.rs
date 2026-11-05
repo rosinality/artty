@@ -381,6 +381,12 @@ impl Connection {
         self.client.silent_for().as_secs_f64()
     }
 
+    /// Ask the server whether it's there now: `silent_seconds` soon says
+    /// whether it answered.
+    pub fn ping(&self) -> Result<(), ConnectError> {
+        Ok(self.client.ping()?)
+    }
+
     /// Ask for the server's windows: `ClientEvent::Windows`.
     pub fn list_windows(&self) -> Result<(), ConnectError> {
         Ok(self.client.list_windows()?)

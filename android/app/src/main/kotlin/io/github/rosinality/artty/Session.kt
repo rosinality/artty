@@ -1,5 +1,9 @@
 package io.github.rosinality.artty
 
+import android.content.Context
+import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.getValue
@@ -24,7 +28,8 @@ sealed interface Phase {
     data class Connecting(val server: Server, val said: List<String> = emptyList()) : Phase
     /** Connected: which window to show (`null` while asking). */
     data class Choosing(val server: Server, val windows: List<WindowItem>? = null) : Phase
-    data class Shown(val server: Server, val window: ULong) : Phase
+    /** A window shown; `reconnecting` says why it's being reached again, meanwhile. */
+    data class Shown(val server: Server, val window: ULong, val reconnecting: String? = null) : Phase
     data class Failed(val server: Server, val reason: String) : Phase
 }
 
@@ -44,8 +49,15 @@ sealed interface Question {
     ) : Question
 }
 
-/** The connection to a server, and what its windows show. */
-object Session : Events, LoginAsker {
+/**
+ * The connection to a server, and what its windows show.
+ *
+ * A connection lost — closed, silent too long, or not answering after the network changed —
+ * is made again, and the window shown is shown again (the server kept it running): a phone
+ * sleeping, or going from Wi-Fi to mobile data, only pauses it. A foreground service keeps
+ * the app running meanwhile, in the background too.
+ */
+object Session : LoginAsker {
     private val main = Handler(Looper.getMainLooper())
 
     var phase by mutableStateOf<Phase>(Phase.Servers)
@@ -64,6 +76,8 @@ object Session : Events, LoginAsker {
         private set
     /** Told when a pane's screen changes (on the main thread). */
     var onScreen: ((ULong) -> Unit)? = null
+    /** Told when a window is shown again after reconnecting: sizes are sent again. */
+    var onReattached: (() -> Unit)? = null
 
     /** The tab shown, and the pane shown of it. */
     val activeTab get() = tabs.firstOrNull { it.active }
@@ -73,40 +87,154 @@ object Session : Events, LoginAsker {
             return chosenPane?.takeIf { it in tab.panes } ?: tab.focused
         }
 
-    fun connect(server: Server, store: Store) {
+    private lateinit var context: Context
+    private lateinit var store: Store
+    /** The server connected to (or being reached again), until the user disconnects. */
+    private var server: Server? = null
+    /** Which connection is current: what older ones say is ignored. */
+    private var generation = 0
+    /** Failed attempts in a row, for waiting longer between them. */
+    private var failures = 0
+    /** Reaching the server again, after a wait. */
+    private val retry = Runnable { open() }
+
+    /** Silent this long (seconds), the connection is taken for lost (pings go every 5). */
+    private const val SILENCE = 20.0
+    /** After a probe (a ping), an answer is expected within this long. */
+    private const val PROBE_MS = 5000L
+
+    fun init(context: Context, store: Store) {
+        if (this::context.isInitialized) return
+        this.context = context.applicationContext
+        this.store = store
+        // A new network: the connection is probably on the old one.
+        context.getSystemService(ConnectivityManager::class.java).registerDefaultNetworkCallback(
+            object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    main.post { networkChanged() }
+                }
+            },
+        )
+        main.post(watchdog)
+    }
+
+    fun connect(server: Server) {
         disconnect()
+        this.server = server
+        failures = 0
         phase = Phase.Connecting(server)
+        updateService()
+        open()
+    }
+
+    fun disconnect() {
+        main.removeCallbacks(retry)
+        server = null
+        generation++
+        drop()
+        tabs = emptyList()
+        chosenPane = null
+        question = null
+        phase = Phase.Servers
+        updateService()
+    }
+
+    /** Let the connection go (it's lost, or done with). */
+    private fun drop() {
+        val connection = connection ?: return
+        this.connection = null
+        (phase as? Phase.Shown)?.let { runCatching { connection.detach(it.window) } }
+        Thread { connection.destroy() }.start()
+    }
+
+    /** Log in to the server (again); a window shown before is shown again. */
+    private fun open() {
+        val server = server ?: return
+        val generation = ++generation
         val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty)
         val key = store.privateKey()
         val knownHosts = store.knownHosts
         Thread {
             try {
-                val connection = connect(address, key, knownHosts, this, this)
+                val connection = connect(address, key, knownHosts, this, ConnectionEvents(generation))
                 main.post {
-                    if ((phase as? Phase.Connecting)?.server != server) {
-                        connection.destroy()
+                    if (generation != this.generation) {
+                        Thread { connection.destroy() }.start()
                         return@post
                     }
                     this.connection = connection
-                    phase = Phase.Choosing(server)
+                    failures = 0
+                    // Shown before: found again in the server's windows (WindowsListed).
+                    if (phase !is Phase.Shown) phase = Phase.Choosing(server)
+                    updateService()
                     runCatching { connection.listWindows() }
                 }
             } catch (e: ConnectException) {
-                main.post { if ((phase as? Phase.Connecting)?.server == server) phase = Phase.Failed(server, e.message ?: "couldn't connect") }
+                // Its own words (the message adds the field's name).
+                val reason = (e as? ConnectException.Failed)?.reason ?: "couldn't connect"
+                main.post { if (generation == this.generation) lost(reason) }
             }
         }.start()
     }
 
-    fun disconnect() {
-        connection?.let { c ->
-            (phase as? Phase.Shown)?.let { runCatching { c.detach(it.window) } }
-            Thread { c.destroy() }.start()
+    /** The connection is gone (or never came): reach the server again, unless that can't help. */
+    private fun lost(reason: String) {
+        val server = server ?: return
+        generation++
+        drop()
+        // Not a matter of trying again: the user is asked, or must change something.
+        val final = listOf("not let in", "login cancelled", "isn't trusted", "another artty build", "not as an artty server", "artty isn't")
+            .any { it in reason }
+        val connectedBefore = phase is Phase.Shown || phase is Phase.Choosing
+        if (final || !connectedBefore && failures == 0 && phase is Phase.Connecting) {
+            // A first attempt failing: say so (the user may have a typo to fix).
+            phase = Phase.Failed(server, reason)
+            this.server = null
+            updateService()
+            return
         }
-        connection = null
-        tabs = emptyList()
-        chosenPane = null
-        question = null
-        phase = Phase.Servers
+        failures++
+        val wait = (1L shl (failures - 1).coerceAtMost(5)).coerceAtMost(30) * 1000
+        phase = when (val p = phase) {
+            is Phase.Shown -> p.copy(reconnecting = reason)
+            else -> Phase.Connecting(server, listOf("Reconnecting: $reason"))
+        }
+        updateService()
+        main.removeCallbacks(retry)
+        main.postDelayed(retry, wait)
+    }
+
+    /** Is the connection still there? Asked after the network changed, or the app came back. */
+    fun probe() {
+        val connection = connection ?: return
+        if (runCatching { connection.ping() }.isFailure) return lost("couldn't reach it")
+        val generation = generation
+        main.postDelayed({
+            if (generation == this.generation && this.connection === connection &&
+                runCatching { connection.silentSeconds() }.getOrDefault(Double.MAX_VALUE) * 1000 > PROBE_MS - 500
+            ) {
+                lost("no answer")
+            }
+        }, PROBE_MS)
+    }
+
+    private fun networkChanged() {
+        if (connection != null) return probe()
+        // Waiting to reach it again: now, on the new network.
+        if (server != null && (phase as? Phase.Shown)?.reconnecting != null) {
+            main.removeCallbacks(retry)
+            open()
+        }
+    }
+
+    /** Silence long enough means the connection is gone. */
+    private val watchdog = object : Runnable {
+        override fun run() {
+            connection?.let { c ->
+                if (runCatching { c.silentSeconds() }.getOrDefault(Double.MAX_VALUE) > SILENCE) lost("no answer for ${SILENCE.toInt()}s")
+            }
+            main.postDelayed(this, 3000)
+        }
     }
 
     /** Show `window` (`null`: a new one), shared with the apps showing it. */
@@ -125,22 +253,51 @@ object Session : Events, LoginAsker {
         runCatching { connection?.focus(shown.window, focused) }
     }
 
-    // From the Rust side, off the main thread.
+    /** The service keeping the app running while connected, and its notification. */
+    private fun updateService() {
+        val server = server
+        val intent = Intent(context, ConnectionService::class.java)
+        if (server == null) {
+            context.stopService(intent)
+            return
+        }
+        val reconnecting = when (val p = phase) {
+            is Phase.Shown -> p.reconnecting != null
+            is Phase.Connecting -> p.said.any { it.startsWith("Reconnecting") }
+            else -> false
+        }
+        intent.putExtra(ConnectionService.TEXT, if (reconnecting) "Reconnecting to ${server.name}…" else "Connected to ${server.name}")
+        context.startForegroundService(intent)
+    }
 
-    override fun event(event: ClientEvent) {
-        main.post { handle(event) }
+    /** What one connection says: dropped once it's not the current one. */
+    private class ConnectionEvents(private val generation: Int) : Events {
+        override fun event(event: ClientEvent) {
+            main.post { if (generation == Session.generation) handle(event) }
+        }
     }
 
     private fun handle(event: ClientEvent) {
+        val server = server ?: return
         when (event) {
-            is ClientEvent.Windows -> {
-                val choosing = phase as? Phase.Choosing ?: return
-                phase = choosing.copy(windows = event.windows)
+            is ClientEvent.Windows -> when (val p = phase) {
+                // Reconnected: the window shown, if it's still there.
+                is Phase.Shown -> {
+                    if (event.windows.any { it.window == p.window }) show(p.window)
+                    else {
+                        tabs = emptyList()
+                        phase = Phase.Choosing(server, event.windows)
+                    }
+                }
+                is Phase.Choosing -> phase = p.copy(windows = event.windows)
+                else -> {}
             }
             is ClientEvent.Attached -> {
-                val server = (phase as? Phase.Choosing)?.server ?: return
+                val again = (phase as? Phase.Shown)?.window == event.window
                 phase = Phase.Shown(server, event.window)
+                updateService()
                 focus(true)
+                if (again) onReattached?.invoke()
             }
             is ClientEvent.Tabs -> {
                 if ((phase as? Phase.Shown)?.window == event.window) tabs = event.tabs
@@ -149,25 +306,18 @@ object Session : Events, LoginAsker {
                 val shown = phase as? Phase.Shown ?: return
                 if (shown.window == event.window) {
                     tabs = emptyList()
-                    phase = Phase.Choosing(shown.server)
+                    phase = Phase.Choosing(server)
                     runCatching { connection?.listWindows() }
                 }
             }
             is ClientEvent.Screen -> onScreen?.invoke(event.pane)
             is ClientEvent.Clipboard -> copied?.invoke(event.text)
-            is ClientEvent.Closed -> {
-                val server = when (val p = phase) {
-                    is Phase.Shown -> p.server
-                    is Phase.Choosing -> p.server
-                    else -> return
-                }
-                connection = null
-                tabs = emptyList()
-                phase = Phase.Failed(server, "Connection closed: ${event.reason}")
-            }
+            is ClientEvent.Closed -> lost(event.reason)
             is ClientEvent.Bell, is ClientEvent.Notify -> {}
         }
     }
+
+    // Logging in asks the user, from the Rust side (off the main thread).
 
     override fun hostKey(host: String, fingerprint: String, changed: Boolean): Boolean {
         val reply = CompletableFuture<Boolean>()

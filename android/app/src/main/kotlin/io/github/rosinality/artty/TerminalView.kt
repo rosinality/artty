@@ -80,6 +80,13 @@ class TerminalView(context: Context) : View(context) {
         invalidate()
     }
 
+    /** Shown again after reconnecting: the server is told this phone's size again. */
+    fun reattached() {
+        sentSize = null
+        sendSize()
+        refresh()
+    }
+
     /** The pane's screen as last sent. */
     fun refresh() {
         val pane = pane ?: return

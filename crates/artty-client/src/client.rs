@@ -208,6 +208,13 @@ impl Client {
         self.heard.lock().unwrap().elapsed()
     }
 
+    /// Ask the server whether it's there now (after the network changed,
+    /// say): [`Client::silent_for`] says soon whether it answered.
+    pub fn ping(&self) -> Result<(), String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.send(&ClientMessage::Ping { id })
+    }
+
     /// Ask for the server's windows: [`Event::Windows`].
     pub fn list_windows(&self) -> Result<(), String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);

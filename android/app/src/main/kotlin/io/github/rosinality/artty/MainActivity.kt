@@ -4,6 +4,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -73,6 +76,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = Store(applicationContext)
+        Session.init(applicationContext, store)
+        // For the notification saying it's connected (and, later, what needs you).
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
+        }
         Session.copied = { text ->
             getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("artty", text))
         }
@@ -97,6 +107,8 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         Session.focus(true)
+        // Back after a while (the phone slept, say): still there?
+        Session.probe()
     }
 
     override fun onPause() {
@@ -145,7 +157,7 @@ private fun ServersScreen(store: Store) {
                         .padding(horizontal = 12.dp, vertical = 4.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(Panel)
-                        .combinedClickable(onClick = { Session.connect(server, store) }, onLongClick = { removing = server })
+                        .combinedClickable(onClick = { Session.connect(server) }, onLongClick = { removing = server })
                         .padding(14.dp),
                 ) {
                     Text(server.name, fontWeight = FontWeight.Medium)
@@ -298,15 +310,31 @@ private fun TerminalScreen() {
     var alt by remember { mutableStateOf(false) }
     DisposableEffect(view) {
         Session.onScreen = { pane -> if (pane == view.pane) view.refresh() }
+        Session.onReattached = { view.reattached() }
         view.onModifiers = {
             ctrl = false
             alt = false
         }
-        onDispose { Session.onScreen = null }
+        onDispose {
+            Session.onScreen = null
+            Session.onReattached = null
+        }
     }
     val tab = Session.activeTab
+    val reconnecting = (Session.phase as? Phase.Shown)?.reconnecting
     Column(Modifier.fillMaxSize()) {
         TabBar(tab)
+        // The last screen stays meanwhile; typing waits for the connection.
+        if (reconnecting != null) {
+            Row(
+                Modifier.fillMaxWidth().background(Color(0x33e0af68)).padding(horizontal = 12.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xffe0af68))
+                Spacer(Modifier.width(8.dp))
+                Text("Reconnecting… ($reconnecting)", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
         AndroidView(factory = { view.also { it.post { it.showKeyboard() } } }, modifier = Modifier.weight(1f).fillMaxWidth()) {
             it.pane = Session.pane
         }
@@ -390,7 +418,7 @@ private fun FailedScreen(phase: Phase.Failed, store: Store) {
         Text("Couldn't connect to ${phase.server.name}", fontWeight = FontWeight.SemiBold)
         Text(phase.reason, color = Faint, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { Session.connect(phase.server, store) }) { Text("Try again") }
+            Button(onClick = { Session.connect(phase.server) }) { Text("Try again") }
             TextButton(onClick = { Session.disconnect() }) { Text("Back") }
         }
     }
