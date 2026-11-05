@@ -9,6 +9,7 @@ pub mod config_file;
 pub mod control;
 mod frame;
 pub mod integration;
+pub mod keys;
 pub mod layout;
 pub mod logging;
 pub mod pane;
