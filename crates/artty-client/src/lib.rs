@@ -8,5 +8,6 @@ mod link;
 pub mod ssh;
 
 pub use artty_core::keys::Key;
+pub use artty_core::mouse::{Action as MouseAction, Button as MouseButton};
 pub use client::{Client, Event, Screen};
 pub use link::Link;

@@ -12,6 +12,7 @@ pub mod integration;
 pub mod keys;
 pub mod layout;
 pub mod logging;
+pub mod mouse;
 pub mod pane;
 mod process;
 pub mod protocol;

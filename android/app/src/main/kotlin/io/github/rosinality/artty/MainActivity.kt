@@ -314,6 +314,8 @@ private fun TerminalScreen() {
             Modifier.fillMaxWidth().background(Panel).horizontalScroll(rememberScrollState()).padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            // The keyboard (a tap on a program that takes the mouse clicks instead).
+            KeyButton("⌨") { view.showKeyboard() }
             KeyButton("Esc") { view.key("escape") }
             KeyButton("Tab") { view.key("tab") }
             KeyButton("Ctrl", on = ctrl) {

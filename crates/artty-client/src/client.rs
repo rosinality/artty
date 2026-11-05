@@ -14,6 +14,7 @@ use artty_core::Frame;
 use artty_core::TerminalSize;
 use artty_core::keys::Key;
 use artty_core::layout::PaneId;
+use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
     ClientMessage, Hello, PaneState, Query, Reply, ServerMessage, WindowId, WindowLayout,
     WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
@@ -254,10 +255,52 @@ impl Client {
     /// A key that isn't text (Enter, an arrow, Ctrl+C), in the pane's mode.
     /// Returns whether it means anything to a terminal.
     pub fn key(&self, pane: PaneId, key: &Key) -> Result<bool, String> {
-        let mode = self.screens.lock().unwrap().get(&pane).map(|s| s.mode).unwrap_or_default();
+        let mode = self.mode(pane);
         match artty_core::keys::to_esc(key, mode, true) {
             Some(bytes) => self.input(pane, bytes).map(|()| true),
             None => Ok(false),
+        }
+    }
+
+    fn mode(&self, pane: PaneId) -> TermMode {
+        self.screens.lock().unwrap().get(&pane).map(|s| s.mode).unwrap_or_default()
+    }
+
+    /// Whether the pane's program takes the mouse (a click there is its).
+    pub fn wants_mouse(&self, pane: PaneId) -> bool {
+        self.mode(pane).intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// A mouse event at viewport cell (`line`, `column`), reported to the
+    /// program if it asked for such events. Returns whether it was.
+    pub fn mouse(
+        &self,
+        pane: PaneId,
+        button: Button,
+        action: Action,
+        line: usize,
+        column: usize,
+    ) -> Result<bool, String> {
+        let report =
+            mouse::report(button, action, line, column, &Default::default(), self.mode(pane));
+        match report {
+            Some(bytes) => self.input(pane, bytes).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
+    /// The wheel turned `lines` (up, if positive) over cell (`line`,
+    /// `column`): to the program, or the history, as the terminal would.
+    pub fn wheel(
+        &self,
+        pane: PaneId,
+        lines: i32,
+        line: usize,
+        column: usize,
+    ) -> Result<(), String> {
+        match mouse::wheel(lines, line, column, &Default::default(), self.mode(pane)) {
+            Wheel::Send(bytes) => self.input(pane, bytes),
+            Wheel::History(lines) => self.scroll(pane, lines),
         }
     }
 

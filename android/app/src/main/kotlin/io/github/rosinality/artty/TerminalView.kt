@@ -7,6 +7,7 @@ import android.graphics.Typeface
 import android.text.InputType
 import android.util.TypedValue
 import android.view.GestureDetector
+import android.view.HapticFeedbackConstants
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -17,6 +18,8 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import kotlin.math.ceil
 import kotlin.math.floor
+import uniffi.artty_android.MouseAction
+import uniffi.artty_android.MouseButton
 import uniffi.artty_android.Screen
 
 /**
@@ -160,7 +163,10 @@ class TerminalView(context: Context) : View(context) {
 
     private fun argb(rgb: UInt) = (0xff000000u or rgb).toInt()
 
-    // Touch: a tap brings the keyboard, a drag scrolls history, a pinch sizes the text.
+    // Touch. A pinch sizes the text. Where the program takes the mouse (htop, vim with
+    // `mouse=a`, tmux), a tap clicks, a swipe turns the wheel, and a long press then a drag
+    // drags; elsewhere a tap brings the keyboard and a swipe scrolls the history (or, in a
+    // full-screen program, sends arrows).
 
     private val scale = ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
@@ -169,7 +175,28 @@ class TerminalView(context: Context) : View(context) {
         }
     })
 
+    /** The cell under a point, on the screen. */
+    private fun cellAt(x: Float, y: Float): Pair<UInt, UInt> {
+        val screen = screen
+        val lines = (screen?.lines?.size ?: 1).coerceAtLeast(1)
+        val columns = (screen?.columns?.toInt() ?: 1).coerceAtLeast(1)
+        val line = (y / cellHeight).toInt().coerceIn(0, lines - 1)
+        val column = (x / cellWidth).toInt().coerceIn(0, columns - 1)
+        return line.toUInt() to column.toUInt()
+    }
+
+    private fun wantsMouse() = pane?.let { Session.connection?.wantsMouse(it) } ?: false
+
+    private fun mouse(action: MouseAction, x: Float, y: Float): Boolean {
+        val pane = pane ?: return false
+        val (line, column) = cellAt(x, y)
+        return runCatching { Session.connection?.mouse(pane, MouseButton.LEFT, action, line, column) }.getOrNull() ?: false
+    }
+
     private var scrolled = 0f
+    /** A long press began a drag (the program takes the mouse): the cell it's at. */
+    private var dragging: Pair<UInt, UInt>? = null
+
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean {
             scrolled = 0f
@@ -177,8 +204,21 @@ class TerminalView(context: Context) : View(context) {
         }
 
         override fun onSingleTapUp(e: MotionEvent): Boolean {
-            showKeyboard()
+            if (wantsMouse()) {
+                mouse(MouseAction.PRESS, e.x, e.y)
+                mouse(MouseAction.RELEASE, e.x, e.y)
+            } else {
+                showKeyboard()
+            }
             return true
+        }
+
+        override fun onLongPress(e: MotionEvent) {
+            if (!wantsMouse() || scale.isInProgress) return
+            if (mouse(MouseAction.PRESS, e.x, e.y)) {
+                dragging = cellAt(e.x, e.y)
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            }
         }
 
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
@@ -187,14 +227,33 @@ class TerminalView(context: Context) : View(context) {
             val lines = (scrolled / cellHeight).toInt()
             if (lines != 0) {
                 scrolled -= lines * cellHeight
-                // A finger moving down reads back into history.
-                pane?.let { runCatching { Session.connection?.scroll(it, -lines) } }
+                // A finger moving down reads back (the wheel turned up).
+                val pane = pane ?: return true
+                val (line, column) = cellAt(e2.x, e2.y)
+                runCatching { Session.connection?.wheel(pane, -lines, line, column) }
             }
             return true
         }
     })
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Dragging: the moves and the lift are the program's.
+        dragging?.let { at ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_MOVE -> {
+                    val cell = cellAt(event.x, event.y)
+                    if (cell != at) {
+                        dragging = cell
+                        mouse(MouseAction.MOTION, event.x, event.y)
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    mouse(MouseAction.RELEASE, event.x, event.y)
+                    dragging = null
+                }
+            }
+            return true
+        }
         scale.onTouchEvent(event)
         gestures.onTouchEvent(event)
         return true

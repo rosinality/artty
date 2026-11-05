@@ -1765,7 +1765,7 @@ impl WindowView {
             return;
         }
         if self.mouse_reporting(id, &event.modifiers, cx).is_some() {
-            if let Some(button) = Button::from_gpui(event.button) {
+            if let Some(button) = mouse::button(event.button) {
                 self.reporting_button = Some(button);
                 self.last_mouse_cell = None;
                 self.report_mouse(id, button, Action::Press, event.position, &event.modifiers, cx);
@@ -1950,26 +1950,17 @@ impl WindowView {
         if lines == 0 {
             return;
         }
-        let mode = self.mode(id, cx);
-        if self.mouse_reporting(id, &event.modifiers, cx).is_some() {
-            let button = if lines > 0 { Button::WheelUp } else { Button::WheelDown };
-            for _ in 0..lines.unsigned_abs() {
-                self.report_mouse(id, button, Action::Press, event.position, &event.modifiers, cx);
-            }
-        } else if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) {
-            // Full-screen programs (less, vim) get arrow keys instead.
-            let key = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
-                (true, true) => b"\x1bOA".as_slice(),
-                (true, false) => b"\x1b[A",
-                (false, true) => b"\x1bOB",
-                (false, false) => b"\x1b[B",
-            };
-            self.send(
-                ClientMessage::Input { pane: id, bytes: key.repeat(lines.unsigned_abs() as usize) },
-                cx,
-            );
-        } else {
-            self.send(ClientMessage::Scroll { pane: id, lines }, cx);
+        let mut mode = self.mode(id, cx);
+        // Shift: the history, whatever the program asked for.
+        if self.mouse_reporting(id, &event.modifiers, cx).is_none() {
+            mode.remove(TermMode::MOUSE_MODE);
+        }
+        let (line, column, _) = self.cell_at(id, event.position);
+        match mouse::wheel(lines, line, column, &event.modifiers, mode) {
+            mouse::Wheel::Send(bytes) => self.send(ClientMessage::Input { pane: id, bytes }, cx),
+            mouse::Wheel::History(lines) => {
+                self.send(ClientMessage::Scroll { pane: id, lines }, cx)
+            },
         }
     }
 

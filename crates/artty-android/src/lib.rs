@@ -72,6 +72,20 @@ pub trait LoginAsker: Send + Sync {
     fn answer(&self, instructions: String, prompts: Vec<Prompt>) -> Option<Vec<String>>;
 }
 
+#[derive(uniffi::Enum)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+}
+
+#[derive(uniffi::Enum)]
+pub enum MouseAction {
+    Press,
+    Release,
+    Motion,
+}
+
 /// A tab, as the app lists them.
 #[derive(uniffi::Record, Clone)]
 pub struct TabItem {
@@ -417,6 +431,41 @@ impl Connection {
     ) -> Result<bool, ConnectError> {
         let key = Key { key: &name, shift, alt, control, platform: false };
         Ok(self.client.key(pane, &key)?)
+    }
+
+    /// Whether the pane's program takes the mouse: a touch there is a click.
+    pub fn wants_mouse(&self, pane: u64) -> bool {
+        self.client.wants_mouse(pane)
+    }
+
+    /// A mouse event at viewport cell (`line`, `column`), if the program
+    /// asked for such events. Returns whether it was sent.
+    pub fn mouse(
+        &self,
+        pane: u64,
+        button: MouseButton,
+        action: MouseAction,
+        line: u32,
+        column: u32,
+    ) -> Result<bool, ConnectError> {
+        let button = match button {
+            MouseButton::Left => artty_client::MouseButton::Left,
+            MouseButton::Middle => artty_client::MouseButton::Middle,
+            MouseButton::Right => artty_client::MouseButton::Right,
+        };
+        let action = match action {
+            MouseAction::Press => artty_client::MouseAction::Press,
+            MouseAction::Release => artty_client::MouseAction::Release,
+            MouseAction::Motion => artty_client::MouseAction::Motion,
+        };
+        Ok(self.client.mouse(pane, button, action, line as usize, column as usize)?)
+    }
+
+    /// The wheel turned `lines` (up, if positive) over a cell: to the
+    /// program (wheel reports, or arrows in a full-screen one), or the
+    /// history.
+    pub fn wheel(&self, pane: u64, lines: i32, line: u32, column: u32) -> Result<(), ConnectError> {
+        Ok(self.client.wheel(pane, lines, line as usize, column as usize)?)
     }
 
     /// The pane's size here: cells, and a cell's size in pixels.
