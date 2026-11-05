@@ -1,0 +1,355 @@
+//! ssh built in (russh): log in to a machine and run `artty server --stdio`
+//! there, its stdin and stdout the [`Link`]. For an app with no `ssh` to
+//! run (a phone's). What logging in needs from the user — trusting the
+//! machine's key, a password or a code, what the server says meanwhile (a
+//! banner, Tailscale's sign-in address) — goes through [`Login`].
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
+use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertificate, ssh_key};
+use russh::{ChannelMsg, Disconnect};
+
+use crate::link::{ChunkReader, ChunkWriter, Link};
+
+/// Where to log in: `user@host` or `user@host:port`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Target {
+    pub user: String,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Target {
+    pub fn parse(text: &str) -> Result<Target, String> {
+        let (user, rest) = text.split_once('@').ok_or("expected user@host")?;
+        let (host, port) = match rest.rsplit_once(':') {
+            Some((host, port)) if !host.contains(':') || host.starts_with('[') => {
+                (host.trim_matches(['[', ']']), port.parse().map_err(|_| "a bad port")?)
+            },
+            _ => (rest, 22),
+        };
+        if user.is_empty() || host.is_empty() {
+            return Err("expected user@host".to_owned());
+        }
+        Ok(Target { user: user.to_owned(), host: host.to_owned(), port })
+    }
+}
+
+/// What's known of the machine's key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostKey {
+    /// As recorded before.
+    Known,
+    /// Never seen: trust it?
+    New,
+    /// Not the one recorded: someone may be in between.
+    Changed,
+}
+
+/// What logging in asks of the user (or of the app, for them).
+pub trait Login: Send + Sync {
+    /// The machine's key (`fingerprint`, SHA-256): log in? A new one is
+    /// remembered when this says yes (see [`KnownHosts`]).
+    fn host_key(&self, target: &Target, fingerprint: &str, known: HostKey) -> bool;
+    /// What the server says while logging in: a banner, or what to do
+    /// (Tailscale SSH's check: an address to sign in at, then it waits).
+    fn said(&self, text: &str);
+    /// Answers to the server's questions (a password, a code): `echo` says
+    /// whether what's typed may show. `None` gives up.
+    fn answer(&self, instructions: &str, prompts: &[(String, bool)]) -> Option<Vec<String>>;
+}
+
+/// Ways to prove who the user is, tried in turn after none at all.
+#[derive(Default)]
+pub struct Credentials {
+    /// The ssh agent at `SSH_AUTH_SOCK` (on a desktop).
+    pub agent: bool,
+    /// Private keys (OpenSSH format), with their passphrases.
+    pub keys: Vec<(String, Option<String>)>,
+}
+
+impl Credentials {
+    /// The agent and `~/.ssh`'s usual keys, as `ssh` would try them.
+    pub fn usual() -> Credentials {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let keys = ["id_ed25519", "id_ecdsa", "id_rsa"]
+            .iter()
+            .filter_map(|name| std::fs::read_to_string(home.join(".ssh").join(name)).ok())
+            .map(|key| (key, None))
+            .collect();
+        Credentials { agent: std::env::var_os("SSH_AUTH_SOCK").is_some(), keys }
+    }
+}
+
+/// Machines' keys as OpenSSH records them (`known_hosts`).
+pub struct KnownHosts(pub PathBuf);
+
+impl KnownHosts {
+    /// `~/.ssh/known_hosts`.
+    pub fn usual() -> KnownHosts {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        KnownHosts(home.join(".ssh/known_hosts"))
+    }
+
+    pub fn check(&self, target: &Target, key: &PublicKey) -> HostKey {
+        match russh::keys::check_known_hosts_path(&target.host, target.port, key, &self.0) {
+            Ok(true) => HostKey::Known,
+            Ok(false) => HostKey::New,
+            Err(russh::keys::Error::KeyChanged { .. }) => HostKey::Changed,
+            Err(_) => HostKey::New,
+        }
+    }
+
+    pub fn learn(&self, target: &Target, key: &PublicKey) {
+        if let Err(err) = russh::keys::known_hosts::learn_known_hosts_path(
+            &target.host,
+            target.port,
+            key,
+            &self.0,
+        ) {
+            log::warn!("couldn't remember {}'s key: {err}", target.host);
+        }
+    }
+}
+
+/// The session's side of logging in: the machine's key, the server's word.
+struct Handler {
+    target: Target,
+    login: Arc<dyn Login>,
+    known: Arc<KnownHosts>,
+}
+
+impl client::Handler for Handler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        key: &PublicKeyOrCertificate,
+    ) -> Result<bool, Self::Error> {
+        // A certificate: the key it's for.
+        let key = match key {
+            PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
+            PublicKeyOrCertificate::Certificate(cert) => PublicKey::from(cert.public_key().clone()),
+        };
+        let key = &key;
+        let known = self.known.check(&self.target, key);
+        let fingerprint = key.fingerprint(ssh_key::HashAlg::Sha256).to_string();
+        let trusted = known == HostKey::Known
+            || self.login.host_key(&self.target, &fingerprint, known) && known == HostKey::New;
+        if trusted && known == HostKey::New {
+            self.known.learn(&self.target, key);
+        }
+        Ok(trusted)
+    }
+
+    async fn auth_banner(
+        &mut self,
+        banner: &str,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        self.login.said(banner);
+        Ok(())
+    }
+}
+
+/// Log in to `target` and run `command` there (`artty server --stdio`,
+/// through the login shell); its stdin and stdout are the link.
+pub fn connect(
+    target: &Target,
+    command: &str,
+    credentials: &Credentials,
+    known: KnownHosts,
+    login: Arc<dyn Login>,
+) -> Result<Link, String> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .thread_name("artty-ssh")
+        .build()
+        .map_err(|err| err.to_string())?;
+    let (handle, channel) = runtime.block_on(async {
+        let config = Arc::new(client::Config {
+            // Silence is noticed: the app's pings get answers every few
+            // seconds, and keepalives find a link gone dead.
+            keepalive_interval: Some(Duration::from_secs(15)),
+            keepalive_max: 3,
+            nodelay: true,
+            ..Default::default()
+        });
+        let handler =
+            Handler { target: target.clone(), login: login.clone(), known: Arc::new(known) };
+        let address = (target.host.as_str(), target.port);
+        let connecting = client::connect(config, address, handler);
+        let mut handle = tokio::time::timeout(Duration::from_secs(15), connecting)
+            .await
+            .map_err(|_| format!("{}: no answer in time", target.host))?
+            .map_err(|err| match err {
+                russh::Error::UnknownKey => "its key isn't trusted".to_owned(),
+                err => format!("{}: {err}", target.host),
+            })?;
+        authenticate(&mut handle, &target.user, credentials, &*login).await?;
+        let channel = handle.channel_open_session().await.map_err(|err| err.to_string())?;
+        channel.exec(true, command).await.map_err(|err| err.to_string())?;
+        Ok::<_, String>((handle, channel))
+    })?;
+
+    // Its output, read as a stream; what's written, sent.
+    let (to_reader, chunks) = std::sync::mpsc::channel::<Vec<u8>>();
+    let (writer, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let said = login;
+    runtime.spawn(async move {
+        let mut channel = channel;
+        let mut stderr = Vec::new();
+        loop {
+            tokio::select! {
+                message = channel.wait() => match message {
+                    Some(ChannelMsg::Data { data }) => {
+                        if to_reader.send(data.to_vec()).is_err() {
+                            break;
+                        }
+                    },
+                    // Its stderr: what the server (or its shell) says.
+                    Some(ChannelMsg::ExtendedData { data, .. }) => {
+                        stderr.extend_from_slice(&data);
+                        while let Some(end) = stderr.iter().position(|&b| b == b'\n') {
+                            let line: Vec<u8> = stderr.drain(..=end).collect();
+                            said.said(String::from_utf8_lossy(&line).trim_end());
+                        }
+                    },
+                    Some(ChannelMsg::Eof | ChannelMsg::Close) | None => break,
+                    Some(_) => {},
+                },
+                bytes = outgoing.recv() => match bytes {
+                    Some(bytes) => {
+                        if channel.data_bytes(bytes).await.is_err() {
+                            break;
+                        }
+                    },
+                    None => break,
+                },
+            }
+        }
+        let _ = channel.eof().await;
+    });
+    Ok(Link {
+        reader: Box::new(ChunkReader::new(chunks)),
+        writer: Box::new(ChunkWriter(writer)),
+        keep: Box::new(Session { handle: Some(handle), runtime: Some(runtime) }),
+    })
+}
+
+/// Try none, then the agent's keys, then the keys given, then the server's
+/// questions (keyboard-interactive: a password, a code).
+async fn authenticate(
+    handle: &mut Handle<Handler>,
+    user: &str,
+    credentials: &Credentials,
+    login: &dyn Login,
+) -> Result<(), String> {
+    let failed = |err: russh::Error| format!("logging in: {err}");
+    // Some servers let in with nothing (Tailscale SSH, after its check).
+    if handle.authenticate_none(user).await.map_err(failed)?.success() {
+        return Ok(());
+    }
+    let hash = handle.best_supported_rsa_hash().await.map_err(failed)?.flatten();
+    if credentials.agent
+        && let Ok(mut agent) = russh::keys::agent::client::AgentClient::connect_env().await
+    {
+        for identity in agent.request_identities().await.unwrap_or_default() {
+            let key = identity.public_key().into_owned();
+            let result = handle.authenticate_publickey_with(user, key, hash, &mut agent).await;
+            if result.is_ok_and(|r| r.success()) {
+                return Ok(());
+            }
+        }
+    }
+    for (key, passphrase) in &credentials.keys {
+        let Ok(key) = russh::keys::decode_secret_key(key, passphrase.as_deref()) else {
+            continue;
+        };
+        let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash);
+        if handle.authenticate_publickey(user, key).await.map_err(failed)?.success() {
+            return Ok(());
+        }
+    }
+    // The server's questions, until it lets in or refuses.
+    let mut reply =
+        handle.authenticate_keyboard_interactive_start(user, None).await.map_err(failed)?;
+    loop {
+        match reply {
+            KeyboardInteractiveAuthResponse::Success => return Ok(()),
+            KeyboardInteractiveAuthResponse::Failure { .. } => break,
+            KeyboardInteractiveAuthResponse::InfoRequest { instructions, prompts, .. } => {
+                if !instructions.trim().is_empty() {
+                    login.said(&instructions);
+                }
+                let asked: Vec<(String, bool)> =
+                    prompts.iter().map(|p| (p.prompt.clone(), p.echo)).collect();
+                let answers = if asked.is_empty() {
+                    Vec::new()
+                } else {
+                    login.answer(&instructions, &asked).ok_or("login cancelled")?
+                };
+                reply = handle
+                    .authenticate_keyboard_interactive_respond(answers)
+                    .await
+                    .map_err(failed)?;
+            },
+        }
+    }
+    // Last, a password, if it takes one.
+    if let Some(answers) = login.answer("", &[(format!("{user}'s password:"), false)])
+        && let Some(password) = answers.into_iter().next()
+        && handle.authenticate_password(user, password).await.map_err(failed)?.success()
+    {
+        return Ok(());
+    }
+    Err("not let in: no key or answer was accepted".to_owned())
+}
+
+/// The ssh session and the runtime it runs on, ended with the link.
+struct Session {
+    handle: Option<Handle<Handler>>,
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let (Some(handle), Some(runtime)) = (self.handle.take(), self.runtime.take()) {
+            runtime.block_on(async {
+                let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+            });
+            runtime.shutdown_timeout(Duration::from_secs(1));
+        }
+    }
+}
+
+/// `artty server --stdio` through the login shell (for the PATH its
+/// profile sets up), as the Mac app runs it.
+pub fn server_command(artty: Option<&str>) -> String {
+    let artty = artty.unwrap_or("artty");
+    format!("exec \"$SHELL\" -lc 'exec {artty} server --stdio'")
+}
+
+/// A private key file's text, for [`Credentials::keys`].
+pub fn read_key(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn targets() {
+        let t = Target::parse("me@devbox").unwrap();
+        assert_eq!((t.user.as_str(), t.host.as_str(), t.port), ("me", "devbox", 22));
+        assert_eq!(Target::parse("me@devbox:2222").unwrap().port, 2222);
+        assert_eq!(Target::parse("me@[::1]:2222").unwrap().host, "::1");
+        assert!(Target::parse("devbox").is_err());
+        assert!(Target::parse("@devbox").is_err());
+    }
+}
