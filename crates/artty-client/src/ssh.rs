@@ -327,6 +327,17 @@ impl Drop for Session {
     }
 }
 
+/// An ed25519 key from 32 random bytes: its private half in OpenSSH's
+/// format, and its public one as `authorized_keys` takes it.
+pub fn new_ed25519(seed: [u8; 32], comment: &str) -> Result<(String, String), String> {
+    let pair = ssh_key::private::Ed25519Keypair::from_seed(&seed);
+    let mut key = russh::keys::PrivateKey::from(pair);
+    key.set_comment(comment);
+    let private = key.to_openssh(ssh_key::LineEnding::LF).map_err(|err| err.to_string())?;
+    let public = key.public_key().to_openssh().map_err(|err| err.to_string())?;
+    Ok((private.to_string(), public))
+}
+
 /// `artty server --stdio` through the login shell (for the PATH its
 /// profile sets up), as the Mac app runs it.
 pub fn server_command(artty: Option<&str>) -> String {
@@ -342,6 +353,14 @@ pub fn read_key(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_key_reads_back() {
+        let (private, public) = new_ed25519([7; 32], "phone").unwrap();
+        assert!(public.starts_with("ssh-ed25519 ") && public.ends_with(" phone"));
+        let key = russh::keys::decode_secret_key(&private, None).unwrap();
+        assert_eq!(key.public_key().to_openssh().unwrap(), public);
+    }
 
     #[test]
     fn targets() {

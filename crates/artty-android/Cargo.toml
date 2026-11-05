@@ -1,0 +1,21 @@
+[package]
+name = "artty-android"
+version = "0.1.0"
+description = "artty's Android app's Rust side: artty-client for Kotlin, through UniFFI"
+license = "Apache-2.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "artty_android"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+artty-client = { path = "../artty-client" }
+artty-core = { path = "../artty-core" }
+log = "0.4"
+uniffi = { version = "0.32", features = ["cli"] }

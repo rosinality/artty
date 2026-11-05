@@ -82,7 +82,7 @@ pub struct Client {
     /// When it last sent anything.
     heard: Arc<Mutex<Instant>>,
     next_id: AtomicU64,
-    _keep: Box<dyn Send>,
+    _keep: Mutex<Box<dyn Send>>,
 }
 
 impl Client {
@@ -191,7 +191,7 @@ impl Client {
             server_version,
             heard,
             next_id: AtomicU64::new(1),
-            _keep: keep,
+            _keep: Mutex::new(keep),
         };
         Ok((client, received))
     }
