@@ -34,12 +34,12 @@ use crate::terminal::{self, Metrics, hsla};
 mod activity;
 #[path = "ask_sheet.rs"]
 mod ask_sheet;
-#[path = "login_sheet.rs"]
-pub mod login_sheet;
 #[path = "copy_mode.rs"]
 mod copy_mode;
 #[path = "files_drawer.rs"]
 mod files_drawer;
+#[path = "login_sheet.rs"]
+pub mod login_sheet;
 #[path = "palette.rs"]
 mod palette;
 #[path = "pane_actions.rs"]
@@ -2976,7 +2976,14 @@ impl WindowView {
                     )
                 })
             })
-            .child(div().flex_none().w(px(10.)).flex().justify_center().child(chevron(true, ui(0xffffff90))))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(10.))
+                    .flex()
+                    .justify_center()
+                    .child(chevron(true, ui(0xffffff90))),
+            )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.switcher_open = !this.switcher_open;
                 cx.notify();
@@ -3168,12 +3175,14 @@ impl WindowView {
             .text_color(ui(0xffffff70))
             .child(div().flex_1().child(if lone.is_some() { "TABS" } else { "WORKSPACES" }))
             .when_some(lone, |d, workspace| {
-                d.child(button("new-workspace", "⊞", "New Workspace  ⇧⌘N").text_size(px(12.)).on_click(
-                    cx.listener(|this, _, _, cx| this.new_workspace(cx)),
+                d.child(
+                    button("new-workspace", "⊞", "New Workspace  ⇧⌘N")
+                        .text_size(px(12.))
+                        .on_click(cx.listener(|this, _, _, cx| this.new_workspace(cx))),
+                )
+                .child(button("new-tab-here", "+", "New Tab  ⌘T").on_click(
+                    cx.listener(move |this, _, _, cx| this.open_tab_in(Some(workspace), cx)),
                 ))
-                .child(button("new-tab-here", "+", "New Tab  ⌘T").on_click(cx.listener(
-                    move |this, _, _, cx| this.open_tab_in(Some(workspace), cx),
-                )))
             })
             .when(lone.is_none(), |d| {
                 d.child(

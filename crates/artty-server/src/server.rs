@@ -151,9 +151,11 @@ struct Window {
     /// The workspace whose active tab the window shows.
     active: usize,
     bounds: Option<SavedWindow>,
-    /// The app showing this window, if any.
-    client: Option<ClientId>,
-    focused: bool,
+    /// The apps showing this window (a Mac's, a phone's), the one that last
+    /// used it last: its panes take that one's sizes.
+    clients: Vec<ClientId>,
+    /// The apps it has focus in.
+    focused: Vec<ClientId>,
     /// When it last had focus, to find the frontmost window.
     last_focus: Instant,
 }
@@ -161,6 +163,27 @@ struct Window {
 impl Window {
     fn active_workspace(&self) -> Option<WorkspaceId> {
         self.workspaces.get(self.active).copied()
+    }
+
+    fn shown(&self) -> bool {
+        !self.clients.is_empty()
+    }
+
+    /// The app that last used it, whose sizes its panes take (and which
+    /// gets what's for the user: a bell, the clipboard, being brought
+    /// forward).
+    fn driver(&self) -> Option<ClientId> {
+        self.clients.last().copied()
+    }
+
+    fn focused(&self) -> bool {
+        !self.focused.is_empty()
+    }
+
+    /// `client` lets it go.
+    fn remove_client(&mut self, client: ClientId) {
+        self.clients.retain(|&c| c != client);
+        self.focused.retain(|&c| c != client);
     }
 }
 
@@ -253,6 +276,8 @@ pub(crate) struct Server {
     handed: HashMap<PaneId, (HandedPane, Option<artty_core::vt::term::TermSnapshot>)>,
     /// Tabs closed lately, newest last, for reopening.
     closed: Vec<ClosedTab>,
+    /// Each app's size for each pane it shows (see [`Window::driver`]).
+    sizes: HashMap<(ClientId, PaneId), TerminalSize>,
 }
 
 /// A closed tab as saved, and where it was.
@@ -484,6 +509,7 @@ impl Server {
             runs: Vec::new(),
             next_pane: 1,
             next_window: 1,
+            sizes: HashMap::new(),
             next_workspace: 1,
             had_panes: false,
             idle_since: now,
@@ -587,8 +613,8 @@ impl Server {
                 workspaces,
                 active,
                 bounds,
-                client: None,
-                focused: false,
+                clients: Vec::new(),
+                focused: Vec::new(),
                 last_focus: Instant::now(),
             },
         );
@@ -756,13 +782,12 @@ impl Server {
 
     /// Whether a workspace is in a window the app shows.
     fn on_screen(&self, workspace: WorkspaceId) -> bool {
-        self.window_of_workspace(workspace)
-            .is_some_and(|(window, _)| self.windows[&window].client.is_some())
+        self.window_of_workspace(workspace).is_some_and(|(window, _)| self.windows[&window].shown())
     }
 
     /// The window the user last used.
     fn frontmost(&self) -> Option<WindowId> {
-        let attached = self.windows.iter().filter(|(_, w)| w.client.is_some());
+        let attached = self.windows.iter().filter(|(_, w)| w.shown());
         attached
             .max_by_key(|(_, w)| w.last_focus)
             .or_else(|| self.windows.iter().max_by_key(|(_, w)| w.last_focus))
@@ -775,7 +800,7 @@ impl Server {
 
     /// Windows the user is looking at.
     fn seen_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
-        self.windows.iter().filter(|(_, w)| w.client.is_some() && w.focused).map(|(&id, _)| id)
+        self.windows.iter().filter(|(_, w)| w.focused()).map(|(&id, _)| id)
     }
 
     /// Whether the user can see a pane right now.
@@ -917,7 +942,7 @@ impl Server {
     fn report_focus_change(&self, before: Option<PaneId>) {
         let after = self.focused_pane();
         let window_focused =
-            self.frontmost().and_then(|w| self.windows.get(&w)).is_some_and(|w| w.focused);
+            self.frontmost().and_then(|w| self.windows.get(&w)).is_some_and(Window::focused);
         if before != after && window_focused {
             self.report_focus(before, false);
             self.report_focus(after, true);
@@ -1110,9 +1135,9 @@ impl Server {
         let window = self.windows.get_mut(&window_id).unwrap();
         window.workspaces.remove(index);
         if window.workspaces.is_empty() {
-            let client = window.client;
+            let clients = std::mem::take(&mut window.clients);
             self.windows.remove(&window_id);
-            if let Some(client) = client {
+            for client in clients {
                 self.send(client, ServerMessage::WindowClosed { window: window_id });
             }
         } else if index < window.active || window.active >= window.workspaces.len() {
@@ -1203,12 +1228,10 @@ impl Server {
     fn show_workspace(&mut self, workspace: WorkspaceId, window: WindowId) {
         let before = self.focused_pane();
         match self.window_of_workspace(workspace) {
-            Some((current, index))
-                if current == window || self.windows[&current].client.is_some() =>
-            {
+            Some((current, index)) if current == window || self.windows[&current].shown() => {
                 self.windows.get_mut(&current).unwrap().active = index;
                 if current != window
-                    && let Some(client) = self.windows[&current].client
+                    && let Some(client) = self.windows[&current].driver()
                 {
                     self.send(client, ServerMessage::App(AppCommand::Activate { window: current }));
                 }
@@ -1383,7 +1406,7 @@ impl Server {
         // Attached apps post native notifications; otherwise use osascript.
         let client = self
             .frontmost()
-            .and_then(|w| self.windows.get(&w)?.client)
+            .and_then(|w| self.windows.get(&w)?.driver())
             .or_else(|| self.clients.keys().next().copied());
         match client {
             Some(client) => self.send(client, ServerMessage::Notify { title, body }),
@@ -1452,10 +1475,20 @@ impl Server {
                 for (_, receiving) in self.uploads.extract_if(|(client, _), _| *client == id) {
                     let _ = std::fs::remove_file(receiving.part);
                 }
-                // Its windows keep running, detached.
-                for window in self.windows.values_mut().filter(|w| w.client == Some(id)) {
-                    window.client = None;
-                    window.focused = false;
+                // Its windows keep running, detached (or shown by the
+                // others, now in their sizes).
+                let driven: Vec<WindowId> = self
+                    .windows
+                    .iter()
+                    .filter(|(_, w)| w.driver() == Some(id))
+                    .map(|(&window, _)| window)
+                    .collect();
+                for window in self.windows.values_mut() {
+                    window.remove_client(id);
+                }
+                self.sizes.retain(|&(client, _), _| client != id);
+                for window in driven {
+                    self.apply_sizes(window);
                 }
                 for run in self.runs.extract_if(
                     ..,
@@ -1494,7 +1527,7 @@ impl Server {
                     let client = self
                         .seen_windows()
                         .find(|&w| self.window_visible(w).contains(&id))
-                        .and_then(|w| self.windows[&w].client);
+                        .and_then(|w| self.windows[&w].driver());
                     if let Some(client) = client {
                         self.send(client, ServerMessage::Bell { pane: id });
                     }
@@ -1542,7 +1575,7 @@ impl Server {
                 // may be a server's, with no clipboard).
                 let client = self
                     .window_of(id)
-                    .and_then(|w| self.windows.get(&w)?.client)
+                    .and_then(|w| self.windows.get(&w)?.driver())
                     .or_else(|| self.app_client());
                 match client {
                     Some(client) => self.send(client, ServerMessage::Clipboard { text }),
@@ -1568,9 +1601,9 @@ impl Server {
             c.pings |= matches!(message, ClientMessage::Ping { .. });
         }
         match message {
-            ClientMessage::AttachWindow { window, spec, bounds } => {
+            ClientMessage::AttachWindow { window, spec, bounds, share } => {
                 let window = match window
-                    .filter(|w| self.windows.get(w).is_some_and(|w| w.client.is_none()))
+                    .filter(|w| self.windows.get(w).is_some_and(|w| share || !w.shown()))
                 {
                     Some(window) => window,
                     None => {
@@ -1585,7 +1618,11 @@ impl Server {
                     },
                 };
                 let state = self.windows.get_mut(&window).unwrap();
-                state.client = Some(client);
+                // Shown here too: in the sizes of the app that uses it, until
+                // this one does.
+                if !state.clients.contains(&client) {
+                    state.clients.insert(0, client);
+                }
                 state.last_focus = Instant::now();
                 let bounds = state.bounds;
                 self.send(client, ServerMessage::Attached { window, bounds });
@@ -1594,11 +1631,12 @@ impl Server {
                 }
             },
             ClientMessage::DetachWindow { window } => {
-                if let Some(state) =
-                    self.windows.get_mut(&window).filter(|w| w.client == Some(client))
-                {
-                    state.client = None;
-                    state.focused = false;
+                if let Some(state) = self.windows.get_mut(&window) {
+                    let driving = state.driver() == Some(client);
+                    state.remove_client(client);
+                    if driving {
+                        self.apply_sizes(window);
+                    }
                 }
             },
             ClientMessage::WindowBounds { window, bounds } => {
@@ -1609,12 +1647,15 @@ impl Server {
             ClientMessage::WindowFocused { window, focused } => {
                 let before = self.focused_pane();
                 if let Some(state) = self.windows.get_mut(&window) {
-                    state.focused = focused;
+                    state.focused.retain(|&c| c != client);
                     if focused {
+                        state.focused.push(client);
                         state.last_focus = Instant::now();
                     }
                 }
                 if focused {
+                    // Its user is at it.
+                    self.drive(client, window);
                     self.report_focus_change(before);
                     self.report_focus(self.focused_pane(), true);
                 } else {
@@ -1733,6 +1774,8 @@ impl Server {
                 }
             },
             ClientMessage::Input { pane, bytes } => {
+                // Typed here: this app's user is at it.
+                self.drive_pane(client, pane);
                 // A broadcasting tab gets it in every pane.
                 let targets = self
                     .place_of(pane)
@@ -1746,18 +1789,28 @@ impl Server {
                 }
             },
             ClientMessage::Resize { pane, size } => {
-                if let Some(pane) = self.panes.get_mut(&pane) {
+                // Its size here; the pane takes it if this app is the one
+                // using its window (or the only one).
+                self.sizes.insert((client, pane), size);
+                let driver = self.window_of(pane).and_then(|w| self.windows[&w].driver());
+                if driver.is_none_or(|driver| driver == client)
+                    && let Some(pane) = self.panes.get_mut(&pane)
+                {
                     pane.session.resize(size);
                 }
                 self.mark_dirty(pane);
             },
             ClientMessage::Scroll { pane, lines } => {
+                self.drive_pane(client, pane);
                 if let Some(pane) = self.panes.get(&pane) {
                     pane.session.scroll(lines);
                 }
                 self.mark_dirty(pane);
             },
             ClientMessage::Selection { pane, op } => {
+                if matches!(op, SelectionOp::Start { .. }) {
+                    self.drive_pane(client, pane);
+                }
                 if let Some(state) = self.panes.get(&pane) {
                     let side = |right: bool| if right { Side::Right } else { Side::Left };
                     match op {
@@ -1908,17 +1961,14 @@ impl Server {
                     Query::DetachedWindows => Reply::Windows(
                         self.windows
                             .iter()
-                            .filter(|(_, w)| w.client.is_none())
-                            .map(|(&window, w)| WindowSummary {
-                                window,
-                                tabs: w
-                                    .workspaces
-                                    .iter()
-                                    .filter_map(|id| self.workspaces.get(id))
-                                    .map(|ws| ws.tabs.len())
-                                    .sum(),
-                                bounds: w.bounds,
-                            })
+                            .filter(|(_, w)| !w.shown())
+                            .map(|(&window, w)| self.window_summary(window, w))
+                            .collect(),
+                    ),
+                    Query::AllWindows => Reply::Windows(
+                        self.windows
+                            .iter()
+                            .map(|(&window, w)| self.window_summary(window, w))
                             .collect(),
                     ),
                     Query::LinkSpan { pane, line, column } => Reply::Link(
@@ -2057,9 +2107,71 @@ impl Server {
         infos
     }
 
+    /// `client`'s user is at `window`: it's the one whose sizes its panes
+    /// take now.
+    fn drive(&mut self, client: ClientId, window: WindowId) {
+        let Some(state) = self.windows.get_mut(&window) else { return };
+        if state.driver() == Some(client) || !state.clients.contains(&client) {
+            return;
+        }
+        state.clients.retain(|&c| c != client);
+        state.clients.push(client);
+        self.apply_sizes(window);
+    }
+
+    fn drive_pane(&mut self, client: ClientId, pane: PaneId) {
+        if let Some(window) = self.window_of(pane) {
+            self.drive(client, window);
+        }
+    }
+
+    /// `window`'s panes in the sizes of the app using it.
+    fn apply_sizes(&mut self, window: WindowId) {
+        let Some(state) = self.windows.get(&window) else { return };
+        let Some(driver) = state.driver() else { return };
+        let panes: Vec<PaneId> = state
+            .workspaces
+            .iter()
+            .filter_map(|id| self.workspaces.get(id))
+            .flat_map(|ws| ws.tabs.iter().flat_map(|tab| tab.root.panes()))
+            .collect();
+        for id in panes {
+            if let Some(&size) = self.sizes.get(&(driver, id))
+                && let Some(pane) = self.panes.get_mut(&id)
+                && pane.session.size() != size
+            {
+                pane.session.resize(size);
+                self.mark_dirty(id);
+            }
+        }
+    }
+
+    fn window_summary(&self, window: WindowId, state: &Window) -> WindowSummary {
+        let tabs: Vec<&Tab> = state
+            .workspaces
+            .iter()
+            .filter_map(|id| self.workspaces.get(id))
+            .flat_map(|ws| ws.tabs.iter())
+            .collect();
+        WindowSummary {
+            window,
+            tabs: tabs.len(),
+            bounds: state.bounds,
+            apps: state.clients.len(),
+            titles: tabs
+                .iter()
+                .map(|tab| {
+                    tab.title.clone().unwrap_or_else(|| {
+                        self.panes.get(&tab.focused).map(|p| p.title()).unwrap_or_default()
+                    })
+                })
+                .collect(),
+        }
+    }
+
     fn app_client(&self) -> Option<ClientId> {
         self.frontmost()
-            .and_then(|w| self.windows.get(&w)?.client)
+            .and_then(|w| self.windows.get(&w)?.driver())
             .or_else(|| self.clients.keys().next().copied())
     }
 
@@ -2328,7 +2440,7 @@ impl Server {
                 }
                 self.focus_pane(id);
                 if let Some(window) = self.window_of(id)
-                    && let Some(client) = self.windows[&window].client
+                    && let Some(client) = self.windows[&window].driver()
                 {
                     self.send(client, ServerMessage::App(AppCommand::Activate { window }));
                 }
@@ -2376,9 +2488,9 @@ impl Server {
             Request::Activity => {
                 let window = self
                     .frontmost()
-                    .filter(|w| self.windows[w].client.is_some())
+                    .filter(|w| self.windows[w].shown())
                     .ok_or("the artty app isn't running")?;
-                let client = self.windows[&window].client.unwrap();
+                let client = self.windows[&window].driver().unwrap();
                 self.send(client, ServerMessage::App(AppCommand::ShowActivity { window }));
                 Response::Ok
             },
@@ -2412,7 +2524,7 @@ impl Server {
                     pid: std::process::id(),
                     uptime_secs: self.started.elapsed().as_secs(),
                     windows: self.windows.len(),
-                    attached_windows: self.windows.values().filter(|w| w.client.is_some()).count(),
+                    attached_windows: self.windows.values().filter(|w| w.shown()).count(),
                     workspaces: self.workspaces.len(),
                     panes: self.panes.len(),
                     clients: self.clients.len(),
@@ -2628,8 +2740,7 @@ impl Server {
                 .collect();
             let cpu_percent = rows.iter().map(|r| r.cpu_percent).fold(0., |a, b| a + b);
             let memory_bytes = rows.iter().map(|r| r.memory_bytes).sum();
-            let attached =
-                self.window_of(info.id).is_some_and(|w| self.windows[&w].client.is_some());
+            let attached = self.window_of(info.id).is_some_and(|w| self.windows[&w].shown());
             let history = self.history.entry(info.id).or_default();
             if history.len() == HISTORY {
                 history.pop_front();
@@ -2810,7 +2921,7 @@ impl Server {
             let windows: Vec<(WindowId, WindowLayout, Vec<PaneId>)> = self
                 .windows
                 .iter()
-                .filter(|(_, w)| w.client == Some(client_id))
+                .filter(|(_, w)| w.clients.contains(&client_id))
                 .map(|(&id, w)| (id, self.window_layout(w), self.window_visible(id)))
                 .collect();
             let window_panes: HashSet<PaneId> = windows

@@ -74,7 +74,12 @@ impl WindowView {
     }
 
     /// A tab on this Mac running `command`, in front.
-    pub fn open_command_tab(&mut self, command: Vec<String>, title: String, cx: &mut Context<Self>) {
+    pub fn open_command_tab(
+        &mut self,
+        command: Vec<String>,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(window) = self.window_on(LOCAL) {
             let spec = PaneSpec { command: Some(command), cwd: None, title: Some(title) };
             self.send(ClientMessage::NewTab { window, workspace: None, spec }, cx);
@@ -172,12 +177,12 @@ impl WindowView {
         match sheet {
             Sheet::Waits { server, pid, url, .. } => {
                 let (server, pid) = (*server, *pid);
-                buttons.push(button("login-cancel", "Cancel Login", false).on_click(
-                    cx.listener(move |this, _, _, cx| {
+                buttons.push(button("login-cancel", "Cancel Login", false).on_click(cx.listener(
+                    move |this, _, _, cx| {
                         this.hide_login(cx);
                         cx.defer(move |cx| app_state::cancel_login(server, pid, cx));
-                    }),
-                ));
+                    },
+                )));
                 buttons.push(
                     button("login-hide", "Hide", false)
                         .on_click(cx.listener(|this, _, _, cx| this.hide_login(cx))),
@@ -207,9 +212,9 @@ impl WindowView {
                         cx.defer(move |cx| app_state::reconnect_from_scratch(server, cx));
                     }),
                 ));
-                buttons.push(button("login-tab", "Log In in a Tab", false).on_click(cx.listener(
-                    move |this, _, _, cx| this.login_in_tab(server, None, cx),
-                )));
+                buttons.push(button("login-tab", "Log In in a Tab", false).on_click(
+                    cx.listener(move |this, _, _, cx| this.login_in_tab(server, None, cx)),
+                ));
                 buttons.push(
                     button("login-close", "Close", false)
                         .on_click(cx.listener(|this, _, _, cx| this.hide_login(cx))),
@@ -233,9 +238,7 @@ impl WindowView {
             .shadow_lg()
             .text_size(px(13.))
             .child(div().font_weight(FontWeight::SEMIBOLD).text_color(ui(0xffffffee)).child(title))
-            .when_some(error, |d, error| {
-                d.child(div().text_color(ui(0xf7768eff)).child(error))
-            })
+            .when_some(error, |d, error| d.child(div().text_color(ui(0xf7768eff)).child(error)))
             .child(div().text_size(px(12.)).text_color(ui(0xffffffa0)).child(note))
             .child(lines)
             .child(div().flex().flex_wrap().justify_end().gap_2().children(buttons));

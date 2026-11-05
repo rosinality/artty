@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -153,6 +153,7 @@ pub fn protocol_version() -> u32 {
                 maximized: true,
                 fullscreen: true,
             }),
+            share: true,
         }),
         postcard::to_stdvec(&ClientMessage::Appearance {
             theme: crate::Theme::default(),
@@ -276,11 +277,14 @@ pub enum CopyMotion {
 /// App → server.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ClientMessage {
-    /// Attach a window: `None` opens a new one with a tab from `spec`.
+    /// Attach a window: `None` opens a new one with a tab from `spec`. With
+    /// `share`, one another app shows is shown here too (else a new one is
+    /// opened): its panes take the size of the app that last used it.
     AttachWindow {
         window: Option<WindowId>,
         spec: PaneSpec,
         bounds: Option<SavedWindow>,
+        share: bool,
     },
     /// The window closed; its tabs keep running.
     DetachWindow {
@@ -523,6 +527,8 @@ pub enum ClientMessage {
 pub enum Query {
     /// Windows with no app attached.
     DetachedWindows,
+    /// Every window, shown or not.
+    AllWindows,
     LinkSpan {
         pane: PaneId,
         line: usize,
@@ -730,6 +736,10 @@ pub struct WindowSummary {
     pub window: WindowId,
     pub tabs: usize,
     pub bounds: Option<SavedWindow>,
+    /// How many apps show it.
+    pub apps: usize,
+    /// Its tabs' titles, for telling it apart.
+    pub titles: Vec<String>,
 }
 
 /// One tab of a workspace, as the app draws it.

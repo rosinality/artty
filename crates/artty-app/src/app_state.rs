@@ -138,7 +138,10 @@ pub enum Status {
     /// Logging in waits for someone (ssh said something, then went quiet):
     /// a sign-in in the browser (Tailscale SSH's check), a push to approve,
     /// a key to touch. What it said last, and the attempt's process.
-    WaitsForYou { said: String, pid: i32 },
+    WaitsForYou {
+        said: String,
+        pid: i32,
+    },
     /// Logging in in a tab (see [`login_in_tab`]): it connects once that's
     /// done.
     LoggingInTab,
@@ -1003,7 +1006,7 @@ fn attach(
         return;
     }
     connection.attaching.push_back(view.downgrade());
-    send_to(server, ClientMessage::AttachWindow { window, spec, bounds }, cx);
+    send_to(server, ClientMessage::AttachWindow { window, spec, bounds, share: false }, cx);
 }
 
 /// Show a new window of `server` in `view`: a workspace there, for the +
@@ -1386,9 +1389,10 @@ pub fn login_in_tab(
             cx.background_executor().timer(EVERY).await;
             let still = cx
                 .update(|cx| {
-                    cx.global::<Shared>().connections.get(server as usize).is_some_and(|c| {
-                        c.attempt == attempt && c.status == Status::LoggingInTab
-                    })
+                    cx.global::<Shared>()
+                        .connections
+                        .get(server as usize)
+                        .is_some_and(|c| c.attempt == attempt && c.status == Status::LoggingInTab)
                 })
                 .unwrap_or(false);
             if !still {
@@ -1873,8 +1877,12 @@ mod tests {
 
     /// Attach a new window; returns its first pane once laid out.
     fn attach_window(opened: &mut artty_core::remote::Opened) -> PaneId {
-        let attach =
-            ClientMessage::AttachWindow { window: None, spec: PaneSpec::default(), bounds: None };
+        let attach = ClientMessage::AttachWindow {
+            window: None,
+            spec: PaneSpec::default(),
+            bounds: None,
+            share: false,
+        };
         write_message(&mut opened.writer, &attach).unwrap();
         let mut attached = None;
         for _ in 0..200 {
@@ -1896,6 +1904,157 @@ mod tests {
         write_message(&mut opened.writer, &stop).unwrap();
         while read_message::<ServerMessage>(&mut opened.reader).is_ok() {}
         let _ = opened.child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An app on the scratch server in `dir`, its messages read on a thread.
+    struct TestApp {
+        writer: std::process::ChildStdin,
+        rx: std::sync::mpsc::Receiver<ServerMessage>,
+        child: std::process::Child,
+    }
+
+    impl TestApp {
+        fn on(opened: artty_core::remote::Opened) -> Self {
+            let artty_core::remote::Opened { child, mut reader, writer, .. } = opened;
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                while let Ok(message) = read_message::<ServerMessage>(&mut reader) {
+                    if tx.send(message).is_err() {
+                        break;
+                    }
+                }
+            });
+            Self { writer, rx, child }
+        }
+
+        fn send(&mut self, message: &ClientMessage) {
+            write_message(&mut self.writer, message).unwrap();
+        }
+
+        /// Messages until `want` takes one (acknowledging screens, as the app
+        /// does); panics after a while.
+        fn until<T>(&mut self, mut want: impl FnMut(&ServerMessage) -> Option<T>) -> T {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+                let Ok(message) = self.rx.recv_timeout(left) else { break };
+                if let ServerMessage::Sync { seq } = message {
+                    self.send(&ClientMessage::Ack { seq });
+                }
+                if let Some(found) = want(&message) {
+                    return found;
+                }
+            }
+            panic!("not in time");
+        }
+
+        /// Until `pane`'s screen is `columns` wide.
+        fn sees_width(&mut self, pane: PaneId, columns: usize) {
+            self.until(|message| match message {
+                ServerMessage::Frame { pane: p, update }
+                    if *p == pane && update.columns == columns =>
+                {
+                    Some(())
+                },
+                _ => None,
+            });
+        }
+    }
+
+    /// Two apps show one window: its pane takes the size of the one used
+    /// last — typed in, or focused — and both see its screen.
+    #[test]
+    fn a_window_shown_by_two_apps_follows_the_one_in_use() {
+        let Some((opened, dir)) = scratch_server("share") else { return };
+        let config = |dir: &Path| {
+            let d = dir.display();
+            let exe = std::env::current_exe().unwrap();
+            let artty = exe.parent().and_then(Path::parent).unwrap().join("artty");
+            ServerConfig {
+                name: "test".into(),
+                command: vec![
+                    "env".into(),
+                    format!("HOME={d}"),
+                    format!("XDG_STATE_HOME={d}/state"),
+                    format!("TMPDIR={d}/t/"),
+                    artty.display().to_string(),
+                    "server".into(),
+                    "--stdio".into(),
+                ],
+                ..Default::default()
+            }
+        };
+        let size = |columns| artty_core::TerminalSize {
+            columns,
+            lines: 20,
+            cell_width: 8,
+            cell_height: 16,
+        };
+        let mut mac = TestApp::on(opened);
+        mac.send(&ClientMessage::AttachWindow {
+            window: None,
+            spec: PaneSpec::default(),
+            bounds: None,
+            share: false,
+        });
+        let window = mac.until(|m| match m {
+            ServerMessage::Attached { window, .. } => Some(*window),
+            _ => None,
+        });
+        let pane = mac.until(|m| match m {
+            ServerMessage::Layout { window: w, layout } if *w == window => {
+                layout.active_tab().map(|t| t.focused)
+            },
+            _ => None,
+        });
+        mac.send(&ClientMessage::Resize { pane, size: size(100) });
+        mac.send(&ClientMessage::WindowFocused { window, focused: true });
+        mac.sees_width(pane, 100);
+
+        // The phone shows it too, in the Mac's size until it's used there.
+        let mut phone =
+            TestApp::on(artty_core::remote::open(&config(&dir), Prompts::Never).unwrap());
+        phone.send(&ClientMessage::AttachWindow {
+            window: Some(window),
+            spec: PaneSpec::default(),
+            bounds: None,
+            share: true,
+        });
+        let shared = phone.until(|m| match m {
+            ServerMessage::Attached { window, .. } => Some(*window),
+            _ => None,
+        });
+        assert_eq!(shared, window);
+        phone.send(&ClientMessage::Resize { pane, size: size(40) });
+        phone.sees_width(pane, 100);
+
+        // Typed on the phone: its size, on both.
+        phone.send(&ClientMessage::Input { pane, bytes: b" ".to_vec() });
+        phone.sees_width(pane, 40);
+        mac.sees_width(pane, 40);
+
+        // Back at the Mac.
+        mac.send(&ClientMessage::WindowFocused { window, focused: true });
+        mac.sees_width(pane, 100);
+        phone.sees_width(pane, 100);
+
+        // The phone lets it go; the Mac still shows it.
+        phone.send(&ClientMessage::DetachWindow { window });
+        drop(phone.writer);
+        let _ = phone.child.wait();
+        mac.send(&ClientMessage::Query { id: 9, query: Query::AllWindows });
+        let apps = mac.until(|m| match m {
+            ServerMessage::Reply { id: 9, reply: Reply::Windows(windows) } => {
+                windows.iter().find(|w| w.window == window).map(|w| w.apps)
+            },
+            _ => None,
+        });
+        assert_eq!(apps, 1);
+
+        let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
+        mac.send(&stop);
+        drop(mac.writer);
+        let _ = mac.child.wait();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1929,6 +2088,7 @@ mod tests {
             window: None,
             spec: PaneSpec::default(),
             bounds: None,
+            share: false,
         });
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

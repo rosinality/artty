@@ -276,7 +276,12 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
                         if let Some(watch) = &watch {
                             watch(Login::Stalled {
                                 said: talk.lines.clone(),
-                                url: talk.lines.iter().rev().find_map(|l| sign_in_url(l)).map(str::to_owned),
+                                url: talk
+                                    .lines
+                                    .iter()
+                                    .rev()
+                                    .find_map(|l| sign_in_url(l))
+                                    .map(str::to_owned),
                                 pid,
                             });
                         }
@@ -505,7 +510,6 @@ mod tests {
         assert_eq!(sign_in_url("Permission denied (publickey)."), None);
     }
 
-
     /// `open` of a "server" that's `script` (sh), told what it says.
     fn open_script(script: &str) -> (Result<Opened, String>, Vec<Login>) {
         let config = ServerConfig {
@@ -564,5 +568,4 @@ mod tests {
         assert_eq!(opened.err().as_deref(), Some("Permission denied (publickey)."));
         assert!(!heard.iter().any(|l| matches!(l, Login::Stalled { .. })));
     }
-
 }

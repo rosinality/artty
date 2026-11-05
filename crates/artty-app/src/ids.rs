@@ -202,8 +202,10 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
             | Query::Upload { pane, .. }
             | Query::ReadFile { pane, .. }
             | Query::ListDir { pane, .. } => untag(pane),
-            Query::DetachedWindows | Query::SearchOutput { .. } | Query::SearchSessions { .. } => {
-            },
+            Query::DetachedWindows
+            | Query::AllWindows
+            | Query::SearchOutput { .. }
+            | Query::SearchSessions { .. } => {},
         },
         ClientMessage::Control { .. }
         | ClientMessage::Ack { .. }
@@ -262,8 +264,12 @@ mod tests {
         let mut message = ClientMessage::MovePane { pane: tag(2, 6), workspace: tag(2, 7), tab: 0 };
         assert_eq!(outgoing(&mut message), Some(2));
         assert!(matches!(message, ClientMessage::MovePane { pane: 6, workspace: 7, tab: 0 }));
-        let mut message =
-            ClientMessage::AttachWindow { window: None, spec: PaneSpec::default(), bounds: None };
+        let mut message = ClientMessage::AttachWindow {
+            window: None,
+            spec: PaneSpec::default(),
+            bounds: None,
+            share: false,
+        };
         assert_eq!(outgoing(&mut message), None);
     }
 }
