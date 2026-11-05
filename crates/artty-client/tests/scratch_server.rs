@@ -7,8 +7,18 @@ use std::time::{Duration, Instant};
 use artty_client::{Client, Event, Key, Link};
 use artty_core::TerminalSize;
 
+/// A scratch server's home: the server stops (and it goes) when dropped,
+/// a failed test's too.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        stop(&self.0);
+    }
+}
+
 /// `artty server --stdio` with a home of its own; `None` without the binary.
-fn scratch() -> Option<(Link, PathBuf)> {
+fn scratch() -> Option<(Link, Scratch)> {
     let exe = std::env::current_exe().ok()?;
     let artty = exe.parent()?.parent()?.join("artty");
     if !artty.exists() {
@@ -26,7 +36,7 @@ fn scratch() -> Option<(Link, PathBuf)> {
         "server".to_owned(),
         "--stdio".to_owned(),
     ];
-    Some((Link::command(&command).unwrap(), dir))
+    Some((Link::command(&command).unwrap(), Scratch(dir)))
 }
 
 /// Events until `want` takes one; panics after a while.
@@ -49,7 +59,7 @@ fn until<T>(
 
 #[test]
 fn shows_a_window_and_types_in_it() {
-    let Some((link, dir)) = scratch() else { return };
+    let Some((link, _scratch)) = scratch() else { return };
     let (client, events) = Client::start(link, "test").unwrap();
     client.attach(None, false).unwrap();
     let window = until(&events, |e| match e {
@@ -90,8 +100,6 @@ fn shows_a_window_and_types_in_it() {
         _ => None,
     });
     assert_eq!(apps, 1);
-    drop(client);
-    stop(&dir);
 }
 
 fn stop(dir: &std::path::Path) {
