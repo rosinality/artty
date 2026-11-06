@@ -448,6 +448,7 @@ private fun TerminalScreen() {
     var finding by remember { mutableStateOf(false) }
     /** Search everything, open (with what to search for). */
     var searchingAll by remember { mutableStateOf<String?>(null) }
+    var browsing by remember { mutableStateOf(false) }
     ModalNavigationDrawer(
         drawerState = drawer,
         // Opened by its button: a swipe from the edge belongs to the terminal (and its programs).
@@ -456,6 +457,9 @@ private fun TerminalScreen() {
             TabsDrawer(shown?.server?.name ?: "", onSearch = {
                 scope.launch { drawer.close() }
                 searchingAll = ""
+            }, onFiles = {
+                scope.launch { drawer.close() }
+                browsing = true
             }) { scope.launch { drawer.close() } }
         },
     ) {
@@ -538,6 +542,10 @@ private fun TerminalScreen() {
         }
     }
     searchingAll?.let { SearchEverything(it) { searchingAll = null } }
+    val pane = Session.pane
+    if (browsing && pane != null) {
+        FilesScreen(pane, onTypePath = { view.type(shellQuoted(it) + " ") }) { browsing = false }
+    }
     pasting?.let { text ->
         AlertDialog(
             onDismissRequest = { pasting = null },
@@ -697,3 +705,7 @@ private fun QuestionDialog(question: Question) {
         }
     }
 }
+
+/** `path` as a shell takes it as one word: quoted, if it has anything a shell would read. */
+private fun shellQuoted(path: String): String =
+    if (path.all { it.isLetterOrDigit() || it in "/._-+,:@%~" }) path else "'" + path.replace("'", "'\\''") + "'"

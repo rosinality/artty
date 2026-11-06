@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -16,9 +17,9 @@ use artty_core::keys::Key;
 use artty_core::layout::PaneId;
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
-    ClientMessage, Hello, OutputHit, PaneSpec, PaneState, Query, Reply, SearchFound, SelectionOp,
-    ServerMessage, SessionHit, WindowId, WindowLayout, WindowSummary, WorkspaceId,
-    protocol_version, read_message, write_message,
+    ClientMessage, FileChunk, Hello, Listing, OutputHit, PaneSpec, PaneState, Query, Reply,
+    SearchFound, SelectionOp, ServerMessage, SessionHit, UploadError, UploadTo, Uploaded, WindowId,
+    WindowLayout, WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
 
@@ -48,6 +49,11 @@ pub enum Event {
     /// What every pane shown is doing (titles, agents, progress).
     Panes(Vec<PaneState>),
     Bell {
+        pane: PaneId,
+    },
+    /// The folder watched for `pane` ([`Client::list_dir`]) changed, or the
+    /// pane moved to another: list it again.
+    DirChanged {
         pane: PaneId,
     },
     Notify {
@@ -195,6 +201,7 @@ impl Client {
                             },
                             ServerMessage::Panes { panes } => Event::Panes(panes),
                             ServerMessage::Bell { pane } => Event::Bell { pane },
+                            ServerMessage::DirChanged { pane } => Event::DirChanged { pane },
                             ServerMessage::Notify { title, body, window, pane } => {
                                 Event::Notify { title, body, window, pane }
                             },
@@ -494,6 +501,61 @@ impl Client {
     /// Close a workspace, every tab in it.
     pub fn close_workspace(&self, workspace: WorkspaceId) -> Result<(), String> {
         self.send(&ClientMessage::CloseWorkspace { workspace })
+    }
+
+    /// What's in a folder on the pane's machine: `path`, else the pane's
+    /// current directory. With `watch`, [`Event::DirChanged`] tells when it
+    /// changes (or, without a path, when the pane moves to another folder),
+    /// until [`Client::unwatch`]. Blocks.
+    pub fn list_dir(
+        &self,
+        pane: PaneId,
+        path: Option<PathBuf>,
+        watch: bool,
+    ) -> Result<Listing, String> {
+        match self.query(Query::ListDir { pane, path, known: None, watch })? {
+            Reply::Dir(listing) => listing,
+            _ => Err("an unexpected answer".into()),
+        }
+    }
+
+    /// Stop telling about the folder watched for `pane`.
+    pub fn unwatch(&self, pane: PaneId) -> Result<(), String> {
+        self.send(&ClientMessage::Unwatch { pane })
+    }
+
+    /// Part of a file on the pane's machine, from `offset` (at most 256 KiB),
+    /// with its whole length. Blocks.
+    pub fn read_file(&self, pane: PaneId, path: PathBuf, offset: u64) -> Result<FileChunk, String> {
+        match self.ask(
+            |id| ClientMessage::Query { id, query: Query::ReadFile { pane, path, offset } },
+            Duration::from_secs(30),
+        )? {
+            Reply::File(chunk) => chunk,
+            _ => Err("an unexpected answer".into()),
+        }
+    }
+
+    /// Send part of a file to the pane's machine, `to` there: upload `upload`
+    /// (an id of the app's, the same for every part) named `name`. The last
+    /// part's answer says where it went; a refusal ([`UploadError::Exists`])
+    /// comes with the first. Blocks.
+    pub fn upload_part(
+        &self,
+        pane: PaneId,
+        upload: u64,
+        name: &str,
+        data: Vec<u8>,
+        last: bool,
+        to: UploadTo,
+    ) -> Result<Option<Uploaded>, UploadError> {
+        let name = name.to_owned();
+        let query = Query::Upload { pane, upload, name, data, last, to };
+        match self.ask(|id| ClientMessage::Query { id, query }, Duration::from_secs(60)) {
+            Ok(Reply::Upload(result)) => result,
+            Ok(_) => Err(UploadError::Failed("an unexpected answer".into())),
+            Err(err) => Err(UploadError::Failed(err)),
+        }
     }
 
     /// A pane's screen as last sent.

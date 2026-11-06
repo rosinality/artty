@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Files fetched from a server to hand to another app (Share): only this cache folder. -->
+<paths>
+    <cache-path name="shared" path="shared/" />
+</paths>

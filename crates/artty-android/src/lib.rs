@@ -181,6 +181,64 @@ pub struct FoundSession {
     pub modified: u64,
 }
 
+/// A folder on the server, listed.
+#[derive(uniffi::Record)]
+pub struct Folder {
+    /// Where it is (resolved).
+    pub path: String,
+    pub entries: Vec<FolderEntry>,
+    /// Changes to it are told (`ClientEvent::DirChanged`); not on some filesystems.
+    pub watched: bool,
+}
+
+#[derive(uniffi::Record)]
+pub struct FolderEntry {
+    pub name: String,
+    /// A folder (or a link to one).
+    pub dir: bool,
+    pub link: bool,
+    pub size: u64,
+    /// Seconds since the epoch.
+    pub modified: u64,
+}
+
+/// Part of a file on the server.
+#[derive(uniffi::Record)]
+pub struct FilePart {
+    pub data: Vec<u8>,
+    /// The whole file's.
+    pub length: u64,
+}
+
+/// What to do when a file of the name is there already.
+#[derive(uniffi::Enum)]
+pub enum IfExists {
+    /// Fail with `UploadError::Exists` (before anything is written).
+    Ask,
+    Replace,
+    /// Beside it, as `name (1)`.
+    KeepBoth,
+}
+
+/// Why sending a file failed.
+#[derive(Debug, uniffi::Error)]
+pub enum UploadError {
+    /// A file of the name is there.
+    Exists,
+    Failed {
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for UploadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UploadError::Exists => f.write_str("a file of that name is there"),
+            UploadError::Failed { reason } => f.write_str(reason),
+        }
+    }
+}
+
 /// A window of the server's, as listed to choose from.
 #[derive(uniffi::Record)]
 pub struct WindowItem {
@@ -204,6 +262,11 @@ pub enum ClientEvent {
     },
     WindowClosed {
         window: u64,
+    },
+    /// The folder watched for `pane` (`Connection::list_dir`) changed, or the
+    /// pane moved to another: list it again.
+    DirChanged {
+        pane: u64,
     },
     /// What the shown window's panes are doing (all of them, each time).
     Panes {
@@ -527,6 +590,7 @@ pub fn connect(
                             .collect(),
                     },
                     Event::Bell { pane } => ClientEvent::Bell { pane },
+                    Event::DirChanged { pane } => ClientEvent::DirChanged { pane },
                     Event::Clipboard { text } => ClientEvent::Clipboard { text },
                     Event::Notify { title, body, window, pane } => {
                         ClientEvent::Notify { title, body, window, pane }
@@ -688,6 +752,80 @@ impl Connection {
                 modified: hit.modified,
             })
             .collect())
+    }
+
+    /// What's in a folder on the pane's machine: `path`, else the pane's
+    /// current directory. With `watch`, `ClientEvent::DirChanged` tells when
+    /// it changes (or, without a path, when the pane moves), until `unwatch`.
+    /// Blocks: call it off the main thread.
+    pub fn list_dir(
+        &self,
+        pane: u64,
+        path: Option<String>,
+        watch: bool,
+    ) -> Result<Folder, ConnectError> {
+        let listing = self.client.list_dir(pane, path.map(PathBuf::from), watch)?;
+        Ok(Folder {
+            path: listing.path.display().to_string(),
+            entries: listing
+                .entries
+                .unwrap_or_default()
+                .into_iter()
+                .map(|e| FolderEntry {
+                    name: e.name,
+                    dir: e.dir,
+                    link: e.link,
+                    size: e.size,
+                    modified: e.modified,
+                })
+                .collect(),
+            watched: listing.watched,
+        })
+    }
+
+    pub fn unwatch(&self, pane: u64) -> Result<(), ConnectError> {
+        Ok(self.client.unwatch(pane)?)
+    }
+
+    /// Part of a file on the pane's machine, from `offset` (at most 256 KiB).
+    /// Blocks: call it off the main thread.
+    pub fn read_file(
+        &self,
+        pane: u64,
+        path: String,
+        offset: u64,
+    ) -> Result<FilePart, ConnectError> {
+        let chunk = self.client.read_file(pane, PathBuf::from(path), offset)?;
+        Ok(FilePart { data: chunk.data, length: chunk.length })
+    }
+
+    /// Send part of a file into folder `dir` on the pane's machine, as
+    /// `name`: every part of one file with the same `upload` (an id of the
+    /// app's), the last one saying so; its answer is where the file went.
+    /// Blocks: call it off the main thread.
+    #[allow(clippy::too_many_arguments)]
+    pub fn upload_part(
+        &self,
+        pane: u64,
+        upload: u64,
+        name: String,
+        data: Vec<u8>,
+        last: bool,
+        dir: String,
+        existing: IfExists,
+    ) -> Result<Option<String>, UploadError> {
+        use artty_core::protocol::{Existing, UploadError as Refused, UploadTo};
+        let existing = match existing {
+            IfExists::Ask => Existing::Refuse,
+            IfExists::Replace => Existing::Replace,
+            IfExists::KeepBoth => Existing::Rename,
+        };
+        let to = UploadTo::Folder { dir: PathBuf::from(dir), existing };
+        match self.client.upload_part(pane, upload, &name, data, last, to) {
+            Ok(uploaded) => Ok(uploaded.map(|u| u.path.display().to_string())),
+            Err(Refused::Exists) => Err(UploadError::Exists),
+            Err(err) => Err(UploadError::Failed { reason: err.to_string() }),
+        }
     }
 
     /// Show a line found: its tab brought forward, the match selected.

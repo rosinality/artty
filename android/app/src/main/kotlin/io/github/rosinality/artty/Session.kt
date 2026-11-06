@@ -95,6 +95,8 @@ object Session : LoginAsker {
         private set
     /** Told when a pane's screen changes (on the main thread). */
     var onScreen: ((ULong) -> Unit)? = null
+    /** Told when the folder watched for a pane changed (on the main thread). */
+    var onDirChanged: ((ULong) -> Unit)? = null
     /** Told when a window is shown again after reconnecting: sizes are sent again. */
     var onReattached: (() -> Unit)? = null
 
@@ -386,6 +388,18 @@ object Session : LoginAsker {
         runCatching { connection?.endFind(pane) }
     }
 
+    /**
+     * `work` with the connection, on a thread of its own (it waits for the server); `done` with
+     * what came of it on the main thread. Nothing without a connection.
+     */
+    fun <T> io(work: (Connection) -> T, done: (Result<T>) -> Unit) {
+        val connection = connection ?: return done(Result.failure(IllegalStateException("not connected")))
+        Thread {
+            val result = runCatching { work(connection) }
+            main.post { done(result) }
+        }.start()
+    }
+
     /** What every pane printed, and agents' conversations, mentioning `text`. */
     class Found(val lines: List<FoundLine>, val sessions: List<FoundSession>)
 
@@ -513,6 +527,7 @@ object Session : LoginAsker {
             }
             is ClientEvent.Panes -> panes = event.panes.associateBy { it.pane }
             is ClientEvent.Screen -> onScreen?.invoke(event.pane)
+            is ClientEvent.DirChanged -> onDirChanged?.invoke(event.pane)
             is ClientEvent.Clipboard -> copied?.invoke(event.text)
             is ClientEvent.Closed -> lost(event.reason)
             is ClientEvent.Notify ->
