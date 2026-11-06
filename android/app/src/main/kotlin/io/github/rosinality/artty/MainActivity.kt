@@ -72,7 +72,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import uniffi.artty_android.LinkSpan
 import uniffi.artty_android.checkConfig
 import uniffi.artty_android.resolve
@@ -574,7 +576,12 @@ private fun TerminalScreen(store: Store) {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text("Drag to select more", color = Faint, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            KeyButton("Line") { view.selectLine() }
                             KeyButton("Copy") { copy() }
+                            KeyButton("Paste") {
+                                view.clearSelection()
+                                paste()
+                            }
                             KeyButton("Clear") { view.clearSelection() }
                         }
                     }
@@ -650,6 +657,8 @@ private fun TerminalScreen(store: Store) {
                     view.alt = alt
                     modifier(ctrl || alt, lock = locked && ctrl)
                 }
+                // Pressed and slid: arrows the way it goes.
+                ArrowsKey { view.key(it) }
                 KeyButton("←") { view.key("left") }
                 KeyButton("↓") { view.key("down") }
                 KeyButton("↑") { view.key("up") }
@@ -735,6 +744,52 @@ private fun KeyButton(label: String, on: Boolean = false, locked: Boolean = fals
             fontSize = 14.sp,
             textDecoration = if (locked) androidx.compose.ui.text.style.TextDecoration.Underline else null,
         )
+    }
+}
+
+/**
+ * A key for the arrows: pressed and slid, an arrow the way it goes for each step of the
+ * finger (so a long slide is many), as a phone keyboard's space bar moves the cursor.
+ */
+@Composable
+private fun ArrowsKey(onArrow: (String) -> Unit) {
+    val step = with(androidx.compose.ui.platform.LocalDensity.current) { 18.dp.toPx() }
+    var active by remember { mutableStateOf(false) }
+    val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(if (active) Accent.copy(alpha = 0.45f) else Color(0x22ffffff))
+            .pointerInput(Unit) {
+                var x = 0f
+                var y = 0f
+                detectDragGestures(
+                    onDragStart = {
+                        active = true
+                        x = 0f
+                        y = 0f
+                    },
+                    onDragEnd = { active = false },
+                    onDragCancel = { active = false },
+                ) { change, drag ->
+                    change.consume()
+                    x += drag.x
+                    y += drag.y
+                    while (kotlin.math.abs(x) >= step || kotlin.math.abs(y) >= step) {
+                        if (kotlin.math.abs(x) >= kotlin.math.abs(y)) {
+                            onArrow(if (x > 0) "right" else "left")
+                            x -= if (x > 0) step else -step
+                        } else {
+                            onArrow(if (y > 0) "down" else "up")
+                            y -= if (y > 0) step else -step
+                        }
+                        haptic.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
+                    }
+                }
+            }
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Text("✥", fontFamily = FontFamily.Monospace, fontSize = 14.sp)
     }
 }
 

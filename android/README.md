@@ -102,7 +102,11 @@ mouse on, so swiping scrolls its history), which keeps running when the
 connection drops; connecting again takes up each of them in a tab, and
 closing a tab ends its session.
 
-The keys row's Ctrl and Alt hold for the next key; a long press keeps them on
+Two fingers swiped sideways go to the next tab (to the left) or the one
+before. The keys row's ✥, pressed and slid, sends arrows the way it goes (a
+step each few millimetres), as a keyboard's space bar moves the cursor. A long
+press selects the word there; the bar then takes the whole line, copies, or
+pastes. The keys row's Ctrl and Alt hold for the next key; a long press keeps them on
 until tapped again. The volume keys, held, add what a phone keyboard lacks:
 volume down is Ctrl, and volume up with W A S D gives the arrows, E Esc, T Tab,
 P N pages up and down, H L Home and End, and 1–0 F1–F10 (Termux's keys);

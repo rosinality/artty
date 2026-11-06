@@ -319,7 +319,8 @@ class TerminalView(context: Context) : View(context) {
         }
     }
 
-    // Touch. A pinch sizes the text. Where the program takes the mouse (htop, vim with
+    // Touch. A pinch sizes the text; two fingers swiped sideways go to the next tab (to the
+    // left) or the one before. Where the program takes the mouse (htop, vim with
     // `mouse=a`, tmux), a tap clicks, a swipe turns the wheel, and a long press then a drag
     // drags; elsewhere a tap brings the keyboard and a swipe scrolls the history (or, in a
     // full-screen program, sends arrows).
@@ -366,6 +367,16 @@ class TerminalView(context: Context) : View(context) {
 
     /** In the right half of its cell (a selection ends after it). */
     private fun rightHalf(x: Float) = (x / cellWidth) % 1f >= 0.5f
+
+    /** Where the selection began (a long press): for taking the whole line. */
+    private var anchor: Pair<UInt, UInt>? = null
+
+    /** The selection grown to the whole line it began on. */
+    fun selectLine() {
+        val pane = pane ?: return
+        val (line, column) = anchor ?: return
+        runCatching { Session.connection?.selectStart(pane, SelectionKind.LINES, line, column, false) }
+    }
 
     fun clearSelection() {
         if (!hasSelection) return
@@ -429,6 +440,7 @@ class TerminalView(context: Context) : View(context) {
             if (selects()) {
                 val pane = pane ?: return
                 val (line, column) = cellAt(e.x, e.y)
+                anchor = line to column
                 runCatching { Session.connection?.selectStart(pane, SelectionKind.WORDS, line, column, rightHalf(e.x)) }
                 selecting = true
                 hasSelection = true
@@ -457,7 +469,51 @@ class TerminalView(context: Context) : View(context) {
         }
     })
 
+    // Two fingers: where they began, and how far apart (a pinch changes that; a swipe doesn't).
+    private var twoFrom: Pair<Float, Float>? = null
+    private var twoSpan = 0f
+    /** The two fingers swiped: the rest of their touch is done with. */
+    private var swiped = false
+
+    private fun centre(event: MotionEvent): Pair<Float, Float> =
+        ((event.getX(0) + event.getX(1)) / 2) to ((event.getY(0) + event.getY(1)) / 2)
+
+    private fun span(event: MotionEvent) = kotlin.math.hypot(event.getX(0) - event.getX(1), event.getY(0) - event.getY(1))
+
+    /** A two-finger swipe sideways: another tab. Whether the touch is taken by it. */
+    private fun swipe(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_POINTER_DOWN -> if (event.pointerCount == 2) {
+                twoFrom = centre(event)
+                twoSpan = span(event)
+                swiped = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val from = twoFrom
+                if (event.pointerCount == 2 && from != null && !swiped) {
+                    val (x, y) = centre(event)
+                    val (dx, dy) = (x - from.first) to (y - from.second)
+                    val pinched = kotlin.math.abs(span(event) - twoSpan)
+                    val far = SWIPE_DP * resources.displayMetrics.density
+                    if (kotlin.math.abs(dx) > far && kotlin.math.abs(dx) > 2 * kotlin.math.abs(dy) && pinched < kotlin.math.abs(dx) / 2) {
+                        swiped = true
+                        performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        onShortcut?.invoke(if (dx < 0) Shortcut.NextTab else Shortcut.PreviousTab)
+                    }
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val done = swiped
+                twoFrom = null
+                swiped = false
+                return done
+            }
+        }
+        return swiped
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (swipe(event)) return true
         // Selecting: the moves take it along.
         if (selecting) {
             when (event.actionMasked) {
@@ -765,6 +821,8 @@ class TerminalView(context: Context) : View(context) {
         /** How long a tap waits to hear of a link before bringing the keyboard. */
         const val LINK_WAIT_MS = 250L
         const val WHEEL_LINES = 3f
+        /** How far two fingers go sideways to be a swipe to another tab. */
+        const val SWIPE_DP = 72f
         val VOLUME_KEYS = setOf(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_UP)
     }
 }
