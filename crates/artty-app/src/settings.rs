@@ -934,6 +934,28 @@ impl Render for Settings {
                     self.sidebar_picker(cx),
                 ),
                 Self::row(
+                    "Status icons in the sidebar",
+                    Some("Working, needs you, done; off for a narrower line"),
+                    self.toggle("sidebar-icons", c.sidebar_icons, "sidebar-icons", cx),
+                ),
+                Self::row(
+                    "Sidebar width",
+                    Some("Or drag its edge; a double click there resets it"),
+                    self.stepper(
+                        Number {
+                            key: "sidebar-width",
+                            value: c.sidebar_width.into(),
+                            step: 8.,
+                            min: 160.,
+                            max: 480.,
+                            format: |v| format!("{v:.0} pt"),
+                            integer: true,
+                            scale: 1.,
+                        },
+                        cx,
+                    ),
+                ),
+                Self::row(
                     "List a split tab's panes",
                     Some("Off: one line, for the focused pane"),
                     self.toggle("list-panes", c.list_panes, "list-panes", cx),

@@ -46,6 +46,14 @@ list-panes = true
 # listing the others).
 sidebar-style = "list"
 
+# The sidebar's width in points, 160 to 480; dragging its edge sets it (a
+# double click there goes back to this default).
+sidebar-width = 232
+
+# Tabs' status icons in the sidebar (working, needs you, done, failed); false
+# leaves them out for a narrower line (a tab that needs you is still bold).
+sidebar-icons = true
+
 # Ask before pasting several lines into a program that would run them one by
 # one: one that hasn't turned on bracketed paste (shells and editors usually
 # have, so they get the paste whole).

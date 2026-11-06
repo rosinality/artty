@@ -105,7 +105,9 @@ actions!(
     ]
 );
 
-pub const SIDEBAR_WIDTH: f32 = 232.;
+/// How narrow and wide dragging the sidebar's edge makes it.
+const SIDEBAR_MIN: f32 = 160.;
+const SIDEBAR_MAX: f32 = 480.;
 /// The last column of a tab row: its ⌘N label, or the close button.
 const TAB_LABEL_WIDTH: f32 = 22.;
 const TITLEBAR_HEIGHT: f32 = 32.;
@@ -423,6 +425,10 @@ pub struct WindowView {
     files: Option<files_drawer::Files>,
     /// The sidebar folded away (⌘B): the terminal takes its width.
     sidebar_hidden: bool,
+    /// The sidebar's width as dragged, until the config has it.
+    sidebar_drag: Option<f32>,
+    /// Its edge is being dragged (saved on release).
+    sidebar_resizing: bool,
     /// The palette (⌘P, ⌘⇧P), when open.
     palette: Option<palette::Palette>,
     /// Search everything (⌘⇧F), when open.
@@ -501,6 +507,7 @@ impl WindowView {
         focus.focus(window);
         let font_size = config.font_size;
         let metrics = Metrics::measure(window, &config, font_size);
+        let sidebar = (config.sidebar_width as f32).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         Self {
             focus,
             theme: Arc::new(config.theme()),
@@ -521,7 +528,7 @@ impl WindowView {
             tabs: Vec::new(),
             places: Vec::new(),
             active: 0,
-            area: Self::area_rect(window, SIDEBAR_WIDTH),
+            area: Self::area_rect(window, sidebar),
             pane_rects: Vec::new(),
             dividers: Vec::new(),
             drag: None,
@@ -558,6 +565,8 @@ impl WindowView {
             login: None,
             files: None,
             sidebar_hidden: false,
+            sidebar_drag: None,
+            sidebar_resizing: false,
             palette: None,
             search_all: None,
             switcher_open: false,
@@ -764,7 +773,68 @@ impl WindowView {
 
     /// The sidebar's width: none while folded away.
     fn sidebar_width(&self) -> f32 {
-        if self.sidebar_hidden { 0. } else { SIDEBAR_WIDTH }
+        if self.sidebar_hidden { 0. } else { self.sidebar_open_width() }
+    }
+
+    /// Its width while shown: as dragged, else as configured.
+    fn sidebar_open_width(&self) -> f32 {
+        self.sidebar_drag
+            .unwrap_or(self.config.sidebar_width as f32)
+            .clamp(SIDEBAR_MIN, SIDEBAR_MAX)
+    }
+
+    /// Save the dragged width, for every window (they reload the config);
+    /// `None` goes back to the default.
+    fn save_sidebar_width(&mut self, width: Option<f32>, cx: &mut Context<Self>) {
+        let result = artty_core::config_file::ConfigFile::open().and_then(|mut file| {
+            match width {
+                Some(width) => file.set_int("sidebar-width", width.round() as i64),
+                None => file.remove("sidebar-width"),
+            }
+            file.save()
+        });
+        if let Err(err) = result {
+            self.show_toast(format!("Couldn't save the sidebar's width: {err}"), cx);
+        }
+    }
+
+    /// Done dragging its edge: the width saved.
+    fn finish_sidebar_resize(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_resizing = false;
+        let Some(width) = self.sidebar_drag else { return };
+        // Shown until the config reloads with it, so it doesn't jump back.
+        if width.round() as u32 == self.config.sidebar_width {
+            self.sidebar_drag = None;
+        } else {
+            self.save_sidebar_width(Some(width), cx);
+        }
+    }
+
+    /// Its right edge, dragged to resize it; a double click goes back to the
+    /// default width.
+    fn sidebar_edge(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("sidebar-edge")
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .w(px(5.))
+            .cursor_col_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if event.click_count == 2 {
+                        this.sidebar_drag = None;
+                        this.save_sidebar_width(None, cx);
+                    } else {
+                        this.sidebar_drag = Some(this.sidebar_open_width());
+                        this.sidebar_resizing = true;
+                    }
+                    cx.notify();
+                }),
+            )
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -1531,6 +1601,7 @@ impl WindowView {
         self.metrics = Metrics::measure(window, &config, self.font_size);
         window.set_background_appearance(background_appearance(&config));
         self.config = Arc::new(config);
+        self.sidebar_drag = None;
         // The active window follows the setting (inactive ones leave it be).
         if self.window_active {
             crate::secure_input::set(self.config.secure_keyboard_entry);
@@ -1793,6 +1864,16 @@ impl WindowView {
     fn mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.mouse_position = Some(event.position);
         self.update_hover_link(event.modifiers.platform, cx);
+        if self.sidebar_resizing {
+            // Released outside the window: done.
+            if event.pressed_button != Some(MouseButton::Left) {
+                return self.finish_sidebar_resize(cx);
+            }
+            let width = f32::from(event.position.x).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+            self.sidebar_drag = Some(width);
+            cx.notify();
+            return;
+        }
         if let Some(divider) = &self.drag {
             let ratio = layout::drag_ratio(
                 divider,
@@ -1906,6 +1987,9 @@ impl WindowView {
         if self.drag.take().is_some() {
             cx.notify();
             return;
+        }
+        if self.sidebar_resizing {
+            return self.finish_sidebar_resize(cx);
         }
         let id = self.mouse_pane.take();
         if let (Some(button), Some(id)) = (self.reporting_button.take(), id) {
@@ -2092,7 +2176,7 @@ impl WindowView {
                 .items_center()
                 .gap(px(4.))
                 .h(px(22.))
-                .child(self.icon_cell(summary))
+                .when(self.config.sidebar_icons, |d| d.child(self.icon_cell(summary)))
                 .child(match renaming {
                     Some(renaming) => {
                         let marked = self.marked_text.as_deref().unwrap_or_default();
@@ -2145,14 +2229,14 @@ impl WindowView {
                         .hover(|d| d.bg(ui(0xffffff0c)))
                         // Under the tab's own line, indented and smaller;
                         // otherwise lines as tall as a tab's.
-                        .map(|d| if own_line { d.pl(px(14.)).text_size(px(11.5)) } else { d.h(px(22.)) })
+                        .map(|d| if own_line { d.pl(px(if self.config.sidebar_icons { 14. } else { 8. })).text_size(px(11.5)) } else { d.h(px(22.)) })
                         .on_click(cx.listener(move |this, _, _, cx| this.focus_pane(id, cx)))
                         // Dragged onto another tab, it moves there.
                         .on_drag(
                             DraggedPane { pane: id, title: title.clone().into() },
                             |dragged, _, _, cx| cx.new(|_| dragged.clone()),
                         )
-                        .child(self.icon_cell(*state))
+                        .when(self.config.sidebar_icons, |d| d.child(self.icon_cell(*state)))
                         .child(
                             Self::one_line(title)
                                 .flex_1()
@@ -2232,7 +2316,7 @@ impl WindowView {
                 .flex()
                 .flex_wrap()
                 .gap(px(4.))
-                .pl(px(20.))
+                .pl(px(if self.config.sidebar_icons { 20. } else { 6. }))
                 .pb(px(2.))
                 .children(ports.into_iter().map(|port| self.port_chip(server, port, cx)))
         })
@@ -2431,7 +2515,7 @@ impl WindowView {
             .flex_none()
             .flex()
             .flex_col()
-            .mt(px(if server == LOCAL { 0. } else { 4. }))
+            .mt(px(if server == LOCAL { 0. } else { 2. }))
             // Its line: a box as a tab row's.
             .child(
                 div()
@@ -2660,7 +2744,7 @@ impl WindowView {
             // As a tab row's, after its icon.
             .gap(px(4.))
             // Apart from the section above, but not from its server's header.
-            .mt(px(if self.first_on_server(position) { 0. } else { 8. }))
+            .mt(px(if self.first_on_server(position) { 0. } else { 4. }))
             // A box as a tab row's.
             .h(px(28.))
             // As a tab's row: the arrow where its icon is, the name where its
@@ -3059,7 +3143,7 @@ impl WindowView {
             .absolute()
             .top(px(102.))
             .left(px(8.))
-            .w(px(SIDEBAR_WIDTH + 40.))
+            .w(px(self.sidebar_open_width() + 40.))
             .max_h(px(440.))
             .occlude()
             .flex()
@@ -3139,7 +3223,7 @@ impl WindowView {
             .gap(px(2.))
             .items_center()
             .px_2()
-            .pb_2()
+            .pb_1()
             .text_size(px(10.5))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(ui(0xffffff70))
@@ -3243,7 +3327,7 @@ impl WindowView {
             rows.push(
                 div()
                     .id("hidden-workspaces")
-                    .mt(px(8.))
+                    .mt(px(4.))
                     .px_2()
                     .py(px(4.))
                     .rounded(px(6.))
@@ -3263,7 +3347,7 @@ impl WindowView {
         div()
             .flex()
             .flex_col()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(self.sidebar_open_width()))
             .h_full()
             .flex_none()
             .relative()
@@ -3282,6 +3366,7 @@ impl WindowView {
             )
             // The titlebar goes on above the sidebar, behind the window buttons.
             .child(Self::titlebar("sidebar-titlebar").absolute().top_0().left_0().right_0().h(px(TITLEBAR_HEIGHT)))
+            .child(self.sidebar_edge(cx))
             .child(
                 div()
                     .id("hide-sidebar")
@@ -3296,8 +3381,8 @@ impl WindowView {
                     .child("⇤")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
-            .px(px(8.))
-            .pb(px(10.))
+            .px(px(4.))
+            .pb(px(6.))
             .text_size(px(12.5))
             .child(
                 div()
@@ -3307,7 +3392,7 @@ impl WindowView {
                     .gap(px(4.))
                     // A box as a tab row's.
                     .h(px(28.))
-                    .mb(px(8.))
+                    .mb(px(4.))
                     .px_1()
                     .rounded(px(7.))
                     .text_color(if self.showing_activity() { ui(0xffffffee) } else { ui(0xffffffb0) })
@@ -3319,7 +3404,7 @@ impl WindowView {
                     .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
             )
             .when(!app_state::several_servers(cx), |d| d.child(self.sidebar_heading(cx)))
-            .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(3.)).overflow_y_scroll().children(rows))
+            .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(1.)).overflow_y_scroll().children(rows))
             .when_some(self.status_row(cx), |d, row| d.child(row))
             .when_some(self.config_error.clone(), |d, error| {
                 d.child(

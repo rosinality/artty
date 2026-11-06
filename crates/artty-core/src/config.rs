@@ -50,6 +50,11 @@ pub struct Config {
     /// How the sidebar shows workspaces: all of them, only the current one
     /// open (accordion), or only the current one with a switcher.
     pub sidebar_style: SidebarStyle,
+    /// The sidebar's width in points (dragging its edge sets it).
+    pub sidebar_width: u32,
+    /// Tabs' status icons (working, needs you, done) in the sidebar; off,
+    /// their titles start at the edge (a tab that needs you is still bold).
+    pub sidebar_icons: bool,
     /// Ask before pasting several lines into a program that would run them
     /// one by one (one that hasn't turned on bracketed paste).
     pub confirm_multiline_paste: bool,
@@ -375,6 +380,8 @@ impl Default for Config {
             copy_on_select: false,
             list_panes: true,
             sidebar_style: SidebarStyle::List,
+            sidebar_width: 232,
+            sidebar_icons: true,
             confirm_multiline_paste: true,
             secure_keyboard_entry: false,
             local_echo: true,

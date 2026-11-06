@@ -49,6 +49,11 @@ impl ConfigFile {
         self.doc[key] = value(v);
     }
 
+    /// Take `key` out, back to its default.
+    pub fn remove(&mut self, key: &str) {
+        self.doc.remove(key);
+    }
+
     pub fn set_strings(&mut self, key: &str, v: &[String]) {
         self.doc[key] = value(v.iter().collect::<Array>());
     }
