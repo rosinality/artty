@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 artty-core = { path = "../artty-core" }
+# `artty attach`: the protocol and a terminal's view, without ssh built in.
+artty-client = { path = "../artty-client", default-features = false }
 artty-server = { path = "../artty-server" }
 libc = "0.2"
 log = "0.4"

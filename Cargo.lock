@@ -175,6 +175,7 @@ dependencies = [
 name = "artty"
 version = "0.1.0"
 dependencies = [
+ "artty-client",
  "artty-core",
  "artty-server",
  "block2",

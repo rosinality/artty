@@ -14,13 +14,13 @@ use std::time::{Duration, Instant};
 use artty_core::Frame;
 use artty_core::TerminalSize;
 use artty_core::keys::Key;
-use artty_core::layout::PaneId;
+use artty_core::layout::{Axis, PaneId};
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
-    ClientMessage, FileChunk, Hello, ImageData, Listing, OutputHit, PaneSpec, PaneState, Query,
-    Reply, SearchFound, SelectionOp, ServerMessage, SessionHit, UploadError, UploadTo, Uploaded,
-    WindowId, WindowLayout, WindowSummary, WorkspaceId, protocol_version, read_message,
-    write_message,
+    ClientMessage, CopyModeOp, FileChunk, Hello, ImageData, Listing, OutputHit, PaneSpec,
+    PaneState, Query, Reply, SearchFound, SelectionOp, ServerMessage, SessionHit, UploadError,
+    UploadTo, Uploaded, WindowId, WindowLayout, WindowSummary, WorkspaceId, protocol_version,
+    read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
 
@@ -512,6 +512,41 @@ impl Client {
     /// Close a tab: its programs stop.
     pub fn close_tab(&self, workspace: WorkspaceId, tab: usize) -> Result<(), String> {
         self.send(&ClientMessage::CloseTab { workspace, tab })
+    }
+
+    /// A shell beside `pane` (`Horizontal`: to its right; `Vertical`: below).
+    pub fn split(&self, pane: PaneId, axis: Axis) -> Result<(), String> {
+        self.send(&ClientMessage::Split { pane, axis, spec: PaneSpec::default() })
+    }
+
+    /// Close a pane: its programs stop (its tab goes with its last).
+    pub fn close_pane(&self, pane: PaneId) -> Result<(), String> {
+        self.send(&ClientMessage::ClosePane { pane })
+    }
+
+    /// Focus a pane, its tab shown.
+    pub fn focus_pane(&self, pane: PaneId) -> Result<(), String> {
+        self.send(&ClientMessage::FocusPane { pane })
+    }
+
+    /// The active tab's focused pane fills it, or no longer.
+    pub fn toggle_zoom(&self, window: WindowId) -> Result<(), String> {
+        self.send(&ClientMessage::ToggleZoom { window })
+    }
+
+    /// The active tab's panes, evenly sized.
+    pub fn equalize(&self, window: WindowId) -> Result<(), String> {
+        self.send(&ClientMessage::EqualizePanes { window })
+    }
+
+    /// A pane out of its tab, into a tab of its own after it.
+    pub fn pane_to_new_tab(&self, pane: PaneId) -> Result<(), String> {
+        self.send(&ClientMessage::PaneToNewTab { pane })
+    }
+
+    /// Copy mode in a pane: entered, moved through, selected from, left.
+    pub fn copy_mode(&self, pane: PaneId, op: CopyModeOp) -> Result<(), String> {
+        self.send(&ClientMessage::CopyMode { pane, op })
     }
 
     /// Name a tab (`None`: back to what its programs say).

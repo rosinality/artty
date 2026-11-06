@@ -14,6 +14,7 @@ use artty_core::control::{
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
+    "attach",
     "list",
     "read",
     "send",
@@ -44,6 +45,17 @@ artty — a terminal for working with AI agents
 
 usage:
   artty [-e command [args...]]           open the app (optionally running a command)
+
+a window of the server in this terminal (as tmux attach), here or over ssh:
+  artty attach [WINDOW] [--share | --new] [--prefix KEY]
+               [--ssh DESTINATION [--artty PATH] | --remote NAME]
+                                         show WINDOW, else the newest window no
+                                         app shows, else a new one (--new: a new
+                                         one anyway; --share: one an app shows,
+                                         too). ctrl-b (or --prefix, or
+                                         $ARTTY_PREFIX) then d detaches, ? lists
+                                         the keys; sessions keep running
+  artty attach --list [...]              the server's windows
 
 control a running artty. Ids name panes (a tab has one or more); inside
 artty, your own pane is found automatically:
@@ -181,6 +193,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             return Ok(0);
         },
         (Some("remote"), _, _) => return remote(&args[1..]),
+        (Some("attach"), _, _) => return attach(&args[1..]),
         (Some("server"), Some("--stdio"), _) => {
             let exe = std::env::current_exe().map_err(|err| err.to_string())?;
             return artty_server::stdio_relay(&exe)
@@ -798,6 +811,89 @@ fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String
 
 /// `artty hooks` subcommands: show, status, install, uninstall.
 /// `artty remote`: other machines' servers, in the config file.
+/// `artty attach`: a window of this machine's server (or another's, over
+/// ssh) in this terminal, until detached.
+fn attach(args: &[String]) -> Result<i32, String> {
+    use artty_client::attach::{self, Ended, KeyPress, Options};
+    let mut window = None;
+    let (mut share, mut new, mut list) = (false, false, false);
+    let mut prefix = std::env::var("ARTTY_PREFIX").ok().filter(|p| !p.is_empty());
+    let mut server = artty_core::ServerConfig::default();
+    let mut remote_name = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        let mut value = || rest.next().cloned().ok_or(format!("attach: {arg} needs a value"));
+        match arg.as_str() {
+            "--share" => share = true,
+            "--new" => new = true,
+            "--list" | "-l" => list = true,
+            "--prefix" => prefix = Some(value()?),
+            "--ssh" => server.ssh = Some(value()?),
+            "--artty" => server.artty = Some(value()?),
+            "--remote" => remote_name = Some(value()?),
+            "-h" | "--help" => {
+                print!("{HELP}");
+                return Ok(0);
+            },
+            flag if flag.starts_with('-') => return Err(format!("attach: unknown option {flag}")),
+            number => {
+                let number = number.parse().map_err(|_| format!("attach: not a window: {arg}"))?;
+                window = Some(number);
+            },
+        }
+    }
+    let prefix = prefix.as_deref().unwrap_or("ctrl-b");
+    let prefix = KeyPress::parse(prefix).ok_or(format!("attach: not a key: {prefix}"))?;
+    if let Some(name) = remote_name {
+        server = artty_core::Config::load()
+            .0
+            .servers
+            .into_iter()
+            .find(|s| s.name == name)
+            .ok_or_else(|| format!("no server named {name} (see `artty remote list`)"))?;
+    }
+    let local = server.ssh.is_none() && server.command.is_empty();
+    let link = if local {
+        // Inside one of its panes, it would show itself.
+        if own_tab().is_some() && !list {
+            return Err(format!(
+                "attach: inside artty already (to attach anyway, unset {SESSION_ENV})"
+            ));
+        }
+        let exe = std::env::current_exe().map_err(|err| err.to_string())?;
+        if !artty_server::running() {
+            artty_server::spawn(&exe, &[]).map_err(|err| format!("server: {err}"))?;
+        }
+        let stream = UnixStream::connect(artty_core::control::server_socket_path())
+            .map_err(|err| format!("server: {err}"))?;
+        artty_client::Link::socket(stream)?
+    } else {
+        let mut command = server.connect_command().ok_or("attach: no ssh or command")?;
+        // ssh may ask for a password here, before the terminal is taken over.
+        if let Some(at) = command.windows(2).position(|w| w[0] == "-o" && w[1] == "BatchMode=yes") {
+            command.drain(at..at + 2);
+        }
+        artty_client::Link::command(&command)?
+    };
+    if list {
+        for w in attach::windows(link)? {
+            let shown = match w.apps {
+                0 => "not shown".to_owned(),
+                1 => "shown in 1 app".to_owned(),
+                n => format!("shown in {n} apps"),
+            };
+            let tabs = if w.tabs == 1 { "1 tab".to_owned() } else { format!("{} tabs", w.tabs) };
+            println!("{:>4}  {tabs}, {shown}: {}", w.window, w.titles.join(", "));
+        }
+        return Ok(0);
+    }
+    match attach::run(link, Options { window, share, new, prefix })? {
+        Ended::Detached(window) => println!("[detached from window {window}]"),
+        Ended::Closed(window) => println!("[window {window} closed]"),
+    }
+    Ok(0)
+}
+
 fn remote(args: &[String]) -> Result<i32, String> {
     use artty_core::config_file::ConfigFile;
     use artty_core::{Config, ServerConfig};

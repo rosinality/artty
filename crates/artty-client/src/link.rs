@@ -1,10 +1,12 @@
 //! What carries a connection to a server: two ends, read and written as
-//! plain blocking streams (whatever is underneath — ssh built in, or a
-//! command whose stdin and stdout reach `artty server --stdio`), and what
-//! keeps it open.
+//! plain blocking streams (whatever is underneath — ssh built in, a command
+//! whose stdin and stdout reach `artty server --stdio`, or the server's
+//! socket), and what keeps it open.
 
 use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
+#[cfg(feature = "ssh")]
 use std::sync::mpsc;
 
 /// A connection's two ends. Dropping it closes the connection.
@@ -38,6 +40,27 @@ impl Link {
     }
 }
 
+impl Link {
+    /// The server's socket, connected (on this machine).
+    pub fn socket(stream: UnixStream) -> Result<Link, String> {
+        let writer = stream.try_clone().map_err(|err| err.to_string())?;
+        Ok(Link {
+            reader: Box::new(stream.try_clone().map_err(|err| err.to_string())?),
+            writer: Box::new(writer),
+            keep: Box::new(Shut(stream)),
+        })
+    }
+}
+
+/// A socket, shut with its link (the reader's clone wakes up).
+struct Shut(UnixStream);
+
+impl Drop for Shut {
+    fn drop(&mut self) {
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 /// A child process, ended with its link.
 struct Ended(Child);
 
@@ -49,18 +72,21 @@ impl Drop for Ended {
 }
 
 /// Bytes arriving in chunks (from an async task), read as a stream.
+#[cfg(feature = "ssh")]
 pub(crate) struct ChunkReader {
     chunks: mpsc::Receiver<Vec<u8>>,
     chunk: Vec<u8>,
     at: usize,
 }
 
+#[cfg(feature = "ssh")]
 impl ChunkReader {
     pub(crate) fn new(chunks: mpsc::Receiver<Vec<u8>>) -> Self {
         Self { chunks, chunk: Vec::new(), at: 0 }
     }
 }
 
+#[cfg(feature = "ssh")]
 impl Read for ChunkReader {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         while self.at == self.chunk.len() {
@@ -78,8 +104,10 @@ impl Read for ChunkReader {
 }
 
 /// Bytes written as a stream, passed on in chunks (to an async task).
+#[cfg(feature = "ssh")]
 pub(crate) struct ChunkWriter(pub(crate) tokio::sync::mpsc::UnboundedSender<Vec<u8>>);
 
+#[cfg(feature = "ssh")]
 impl Write for ChunkWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.send(buf.to_vec()).map_err(|_| {
@@ -93,7 +121,7 @@ impl Write for ChunkWriter {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ssh"))]
 mod tests {
     use super::*;
 

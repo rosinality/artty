@@ -207,6 +207,8 @@ fn stop(dir: &std::path::Path) {
         .env("HOME", dir)
         .env("XDG_STATE_HOME", format!("{d}/state"))
         .env("TMPDIR", format!("{d}/t/"))
+        // Run in artty, `artty` would reach its server, not this one.
+        .env_remove("ARTTY_SOCKET")
         .output();
     let _ = std::fs::remove_dir_all(dir);
 }

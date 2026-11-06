@@ -6,23 +6,37 @@ license = "Apache-2.0"
 edition = "2024"
 publish = false
 
+[features]
+default = ["ssh"]
+# ssh built in (and plain ssh machines): what a phone needs, and not the
+# `artty` command, which reaches servers through a socket or a command.
+ssh = ["dep:russh", "dep:russh-sftp", "dep:tokio", "dep:tokio-rustls", "dep:tokio-tungstenite", "dep:webpki-roots", "dep:base64", "dep:futures-util"]
+
+[[bin]]
+name = "artty-client"
+required-features = ["ssh"]
+
+[[test]]
+name = "plain"
+required-features = ["ssh"]
+
 [dependencies]
 artty-core = { path = "../artty-core" }
 log = "0.4"
 serde_json = "1"
 libc = "0.2"
-russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"], optional = true }
 # Files on a plain ssh machine (the files browser), as SFTP.
-russh-sftp = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+russh-sftp = { version = "3", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"], optional = true }
 # Reaching hosts behind a Cloudflare Tunnel (`ProxyCommand cloudflared access ssh`): ssh in a
 # WebSocket over TLS. rustls on ring (as russh), with Mozilla's roots.
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-webpki-roots = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"], optional = true }
+webpki-roots = { version = "1", optional = true }
 # HTTP proxies' logins (a ProxyCommand's).
-base64 = "0.22"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+base64 = { version = "0.22", optional = true }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"], optional = true }
 
 [dev-dependencies]
 p256 = { version = "0.14", features = ["ecdsa", "pkcs8"] }
