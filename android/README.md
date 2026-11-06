@@ -68,8 +68,11 @@ KexAlgorithms, HostKeyAlgorithms and MACs (with `+`, `-`, `^`),
 PreferredAuthentications and the *Authentication switches,
 StrictHostKeyChecking, HostKeyAlias, SetEnv, and, for plain ssh, RemoteCommand
 and RequestTTY. Adding a server shows what its destination resolves to, and
-the options not done here; ProxyCommand can't run on a phone (ProxyJump does
-the same). The drawer lists the connection's forwards, and adds more.
+the options not done here. A ProxyCommand can't run on a phone (ProxyJump does
+the same), but cloudflared's (`cloudflared access ssh --hostname %h`, for a
+host behind a Cloudflare Tunnel) is done by the app itself, with no cloudflared:
+ssh in a WebSocket to the hostname, with an Access service token if the command
+gives one (`--service-token-id`, `--service-token-secret`). The drawer lists the connection's forwards, and adds more.
 
 Settings also has the machines' keys (to forget one that changed for a good
 reason), the terminal's (text size, the volume keys, the keys row's

@@ -8,6 +8,7 @@
 //! [`Login`].
 
 mod agent;
+mod cloudflare;
 mod forward;
 mod held;
 mod login;
@@ -20,6 +21,7 @@ use std::time::Duration;
 use russh::ChannelMsg;
 use russh::keys::{PublicKey, ssh_key};
 
+pub use cloudflare::{Tunnel, tunnel};
 pub use forward::{ForwardState, Forwards, Kind as ForwardKind};
 pub use held::held_public_key;
 pub use login::{Plan, plan};

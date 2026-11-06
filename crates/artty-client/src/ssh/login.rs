@@ -69,7 +69,10 @@ fn hops(
         return Err(format!("{}: jump hosts go round in a loop", resolved.alias));
     }
     if resolved.proxy_jump.is_empty() {
-        if let Some(command) = &resolved.proxy_command {
+        // Only cloudflared's (a Cloudflare Tunnel), which is done here.
+        if let Some(command) = &resolved.proxy_command
+            && super::cloudflare::tunnel(resolved).is_none()
+        {
             return Err(format!(
                 "{}: ProxyCommand ({command}) can't run here; a ProxyJump can do the same",
                 resolved.alias
@@ -141,9 +144,18 @@ impl Connection {
                 let connecting = async {
                     // Through the one before (the last logged in to), if any.
                     match last.as_ref() {
-                        None => {
-                            let address = (resolved.host_name.as_str(), resolved.port);
-                            client::connect(config, address, handler).await
+                        // Through a Cloudflare Tunnel (ProxyCommand cloudflared…), or direct.
+                        None => match super::cloudflare::tunnel(resolved) {
+                            Some(tunnel) => {
+                                let stream = super::cloudflare::open(&tunnel)
+                                    .await
+                                    .map_err(|err| russh::Error::IO(std::io::Error::other(err)))?;
+                                client::connect_stream(config, stream, handler).await
+                            },
+                            None => {
+                                let address = (resolved.host_name.as_str(), resolved.port);
+                                client::connect(config, address, handler).await
+                            },
                         },
                         Some(through) => {
                             let channel = through
