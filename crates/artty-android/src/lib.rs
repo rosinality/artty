@@ -14,6 +14,9 @@ use artty_core::protocol::WindowLayout;
 
 uniffi::setup_scaffolding!();
 
+mod trail;
+pub use trail::{LogLine, clear_connection_log, connection_log};
+
 /// Where to connect, as the app keeps it.
 #[derive(uniffi::Record, Clone)]
 pub struct ServerAddress {
@@ -544,6 +547,7 @@ impl Login for Asking {
     }
 
     fn said(&self, text: &str) {
+        log::info!("the server says: {}", text.trim());
         self.1.lock().unwrap().push(text.to_owned());
         self.0.said(text.to_owned());
     }
@@ -678,6 +682,8 @@ pub fn install(
     login: Arc<dyn LoginAsker>,
     builds: Arc<dyn LinuxBuilds>,
 ) -> Result<Installed, ConnectError> {
+    trail::init();
+    log::info!("installing this app's artty on {}", server.destination);
     let installed = ssh::install(
         &plan(&server.destination, &setup.home)?,
         &credentials(keystore, &setup)?,
@@ -709,7 +715,8 @@ pub fn connect(
     login: Arc<dyn LoginAsker>,
     events: Arc<dyn Events>,
 ) -> Result<Arc<Connection>, ConnectError> {
-    let plan = plan(&server.destination, &setup.home)?;
+    trail::init();
+    let plan = plan(&server.destination, &setup.home).inspect_err(|err| log::warn!("{err}"))?;
     let credentials = credentials(keystore, &setup)?;
     let known = KnownHosts(PathBuf::from(&setup.known_hosts));
     let asking = Asking::new(login);
@@ -729,10 +736,16 @@ pub fn connect(
         Err(artty_client::StartError::Failed(reason)) => {
             std::thread::sleep(std::time::Duration::from_millis(100));
             let said = asking.1.lock().unwrap().clone();
-            return Err(artty_core::remote::not_installed(&said).unwrap_or(reason).into());
+            let reason = artty_core::remote::not_installed(&said).unwrap_or(reason);
+            log::warn!("artty there: {reason}");
+            return Err(reason.into());
         },
-        Err(err) => return Err(err.into()),
+        Err(err) => {
+            log::warn!("artty there: {err}");
+            return Err(err.into());
+        },
     };
+    log::info!("artty there: {}", client.server_version);
     std::thread::Builder::new()
         .name("artty-events".into())
         .spawn(move || {

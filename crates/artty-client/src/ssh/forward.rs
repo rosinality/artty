@@ -135,6 +135,7 @@ impl Forwards {
                 Kind::Remote => listen_there(&inner, id, &forward).await,
             };
             if let Err(error) = result {
+                log::warn!("forward {}: {error}", describe(kind, &forward));
                 inner.update(id, |s| s.error = Some(error));
             }
         });
@@ -223,6 +224,21 @@ impl Inner {
     }
 }
 
+/// A forward, as the log says it.
+fn describe(kind: Kind, forward: &Forward) -> String {
+    let state = ForwardState {
+        id: 0,
+        kind,
+        forward: forward.clone(),
+        configured: false,
+        listening: None,
+        error: None,
+        open: 0,
+        total: 0,
+    };
+    state.describe()
+}
+
 /// Where a forward listens here: its bind address (`*`: every one), else
 /// the loopback, as OpenSSH without `GatewayPorts`.
 fn local_bind(forward: &Forward) -> String {
@@ -257,6 +273,7 @@ async fn listen_here(
         .map_err(|err| format!("can't listen on {bind}:{}: {err}", forward.port))?;
     let port = listener.local_addr().map(|a| a.port()).unwrap_or(forward.port);
     inner.update(id, |s| s.listening = Some(port));
+    log::info!("forward {}: listening on {bind}:{port}", describe(kind, forward));
     loop {
         let (mut tcp, from) = listener.accept().await.map_err(|err| err.to_string())?;
         let inner = inner.clone();
@@ -317,6 +334,10 @@ async fn listen_there(inner: &Arc<Inner>, id: u64, forward: &Forward) -> Result<
     let remote = Remote { id, host, port: to, forwards: Arc::downgrade(inner) };
     inner.remote.lock().unwrap().insert(port, remote);
     inner.update(id, |s| s.listening = u16::try_from(port).ok());
+    log::info!(
+        "forward {}: the server listens on {address}:{port}",
+        describe(Kind::Remote, forward)
+    );
     Ok(())
 }
 

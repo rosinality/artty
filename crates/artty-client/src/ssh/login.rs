@@ -129,6 +129,18 @@ impl Connection {
         let known = Arc::new(known);
         let passphrases = Arc::new(Mutex::new(HashMap::new()));
         let remote = RemoteTargets::default();
+        let way: Vec<&str> = plan.hops.iter().map(|h| h.alias.as_str()).collect();
+        log::info!(
+            "{}: {}@{}:{}{}",
+            plan.target.alias,
+            plan.target.user.as_deref().unwrap_or_default(),
+            plan.target.host_name,
+            plan.target.port,
+            if way.is_empty() { String::new() } else { format!(", through {}", way.join(", ")) },
+        );
+        for ignored in &plan.ignored {
+            log::info!("not done here: {ignored}");
+        }
         let (handle, jumps) = runtime.block_on(async {
             let mut jumps: Vec<Handle<Handler>> = Vec::new();
             let stages = plan.hops.iter().chain([&plan.target]);
@@ -149,6 +161,12 @@ impl Connection {
                     .connect_timeout
                     .map_or(CONNECT_TIMEOUT, |s| Duration::from_secs(s.into()));
                 let name = &resolved.alias;
+                let how = match (last.is_some(), proxy(resolved)) {
+                    (true, _) => "through the jump host before it".to_owned(),
+                    (false, Ok(Some(proxy))) => proxy.describe(),
+                    (false, _) => format!("straight to {}:{}", resolved.host_name, resolved.port),
+                };
+                log::info!("{name}: connecting, {how}");
                 let connecting = async {
                     // Through the one before (the last logged in to), if any.
                     match last.as_ref() {
@@ -196,19 +214,22 @@ impl Connection {
                 };
                 let mut handle = tokio::time::timeout(timeout, connecting)
                     .await
-                    .map_err(|_| format!("{name}: no answer in time"))?
+                    .map_err(|_| format!("{name}: no answer in {}s", timeout.as_secs()))?
                     .map_err(|err| match err {
                         russh::Error::UnknownKey => format!("{name}: its key isn't trusted"),
                         russh::Error::ChannelOpenFailure(_) => {
                             format!("{name}: the jump host couldn't reach it")
                         },
                         err => format!("{name}: {err}"),
-                    })?;
+                    })
+                    .inspect_err(|err| log::warn!("{err}"))?;
                 authenticate(&mut handle, resolved, credentials, &*login, &passphrases)
                     .await
                     .map_err(
                         |err| if plan.hops.is_empty() { err } else { format!("{name}: {err}") },
-                    )?;
+                    )
+                    .inspect_err(|err| log::warn!("{err}"))?;
+                log::info!("{name}: logged in as {}", resolved.user.as_deref().unwrap_or_default());
                 if let Some(previous) = last.replace(handle) {
                     jumps.push(previous);
                 }
@@ -477,6 +498,12 @@ impl client::Handler for Handler {
         let (name, port) = (&self.key_name.0, self.key_name.1);
         let known = self.known.check(name, port, &key);
         let fingerprint = key.fingerprint(ssh_key::HashAlg::Sha256).to_string();
+        let what = match known {
+            HostKey::Known => "known",
+            HostKey::New => "new",
+            HostKey::Changed => "NOT the one recorded",
+        };
+        log::info!("{name}: its key is {} {fingerprint}: {what}", key.algorithm());
         let trusted = match (known, self.strict) {
             (HostKey::Known, _) => true,
             // Only what's recorded.
@@ -502,6 +529,9 @@ impl client::Handler for Handler {
         };
         if trusted && known == HostKey::New {
             self.known.learn(name, port, &key);
+        }
+        if !trusted {
+            log::warn!("{name}: its key wasn't trusted");
         }
         Ok(trusted)
     }
@@ -561,9 +591,11 @@ async fn authenticate(
     let user = resolved.user.clone().unwrap_or_default();
     let failed = |err: russh::Error| format!("logging in: {err}");
     if handle.authenticate_none(&user).await.map_err(failed)?.success() {
+        log::info!("{}: let in without a key or password", resolved.alias);
         return Ok(());
     }
     for method in &resolved.preferred_authentications {
+        log::info!("{}: trying {method}", resolved.alias);
         let done = match method.as_str() {
             "publickey" if resolved.pubkey_authentication => {
                 by_key(handle, &user, resolved, credentials, login, passphrases).await?
@@ -641,7 +673,14 @@ async fn by_key(
     }
     order.retain(|(named, _, _)| named.is_some() || !only);
     order.sort_by_key(|(named, i, _)| (named.unwrap_or(usize::MAX), *i));
+    if order.is_empty() {
+        log::info!("{}: no keys to try", resolved.alias);
+    }
     for (_, _, key) in order {
+        let name = match &key {
+            Try::Held(held) => held.name.clone(),
+            Try::Key(key) => key.name.clone(),
+        };
         let accepted = match key {
             Try::Held(held) => handle
                 .authenticate_publickey_with(user, held.public.clone(), None, &mut HeldSigner(held))
@@ -653,6 +692,11 @@ async fn by_key(
                 handle.authenticate_publickey(user, private).await.map_err(failed)?.success()
             },
         };
+        log::info!(
+            "{}: the key {name}: {}",
+            resolved.alias,
+            if accepted { "accepted" } else { "refused" }
+        );
         if accepted {
             return Ok(true);
         }

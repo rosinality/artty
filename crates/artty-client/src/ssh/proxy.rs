@@ -175,10 +175,7 @@ type Flags = Vec<(char, Option<String>)>;
 
 /// Options and what's left, as getopt reads them: `valued` letters take a
 /// value (attached, or the next word).
-fn getopt(
-    args: &[String],
-    valued: &str,
-) -> Result<(Flags, Vec<String>), String> {
+fn getopt(args: &[String], valued: &str) -> Result<(Flags, Vec<String>), String> {
     let (mut flags, mut rest) = (Vec::new(), Vec::new());
     let mut i = 0;
     while i < args.len() {

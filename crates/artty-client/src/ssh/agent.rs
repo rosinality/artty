@@ -112,7 +112,13 @@ impl Agent {
                 })?;
                 // Asked of the user: off the runtime's threads (they wait).
                 let signature = tokio::task::spawn_blocking(move || {
-                    if !self.login.agent_sign(&name, &self.host) {
+                    let allowed = self.login.agent_sign(&name, &self.host);
+                    log::info!(
+                        "{} asked to sign with {name} (agent forwarding): {}",
+                        self.host,
+                        if allowed { "allowed" } else { "refused" }
+                    );
+                    if !allowed {
                         return None;
                     }
                     self.sign(&which, &data, flags)

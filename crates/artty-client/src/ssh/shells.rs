@@ -62,7 +62,10 @@ impl crate::plain::Shells for Shells {
             };
             let mut channel = match opened.await {
                 Ok(channel) => channel,
-                Err(err) => return crate::plain::refuse(ends, &format!("No shell there: {err}")),
+                Err(err) => {
+                    log::warn!("a shell couldn't start: {err}");
+                    return crate::plain::refuse(ends, &format!("No shell there: {err}"));
+                },
             };
             let RemoteEnds { stream, mut ended } = ends;
             let stream = stream

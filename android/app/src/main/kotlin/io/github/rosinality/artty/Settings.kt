@@ -53,7 +53,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import uniffi.artty_android.LogLine
 import uniffi.artty_android.checkConfig
+import uniffi.artty_android.clearConnectionLog
+import uniffi.artty_android.connectionLog
 import uniffi.artty_android.keyInfo
 
 private val Warn = Color(0xfff7768e)
@@ -64,6 +67,7 @@ private enum class Page(val title: String, val about: String) {
     KnownHosts("Known hosts", "The machines' keys this phone trusts"),
     Terminal("Terminal", "Text size, the volume keys, the keys row, the bell"),
     Updates("Updates", "Installing new builds from where they're published"),
+    Log("Connection log", "What connecting did, step by step: for when it doesn't"),
     Backup("Back up and restore", "Servers, the ssh config, machines' keys and settings, to a file"),
 }
 
@@ -95,6 +99,7 @@ fun SettingsScreen(store: Store, onClose: () -> Unit) {
             Page.KnownHosts -> KnownHostsPage(store)
             Page.Terminal -> TerminalPage(store)
             Page.Updates -> UpdatesPage(store)
+            Page.Log -> ConnectionLog()
             Page.Backup -> BackupPage(store)
         }
     }
@@ -397,6 +402,51 @@ private fun Toggle(title: String, about: String, on: Boolean, change: (Boolean) 
             Text(about, color = Faint, fontSize = 12.sp)
         }
         Switch(on, change)
+    }
+}
+
+// The connection log.
+
+/** What connecting did (the Rust side's log), newest at the bottom; refreshed while shown. */
+@Composable
+fun ConnectionLog(modifier: Modifier = Modifier.fillMaxSize()) {
+    val context = LocalContext.current
+    var lines by remember { mutableStateOf(connectionLog()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            lines = connectionLog()
+        }
+    }
+    val time = remember { java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.ROOT) }
+    fun text(line: LogLine) = "${time.format(java.util.Date(line.time.toLong()))} ${line.text}"
+    Column(modifier.padding(horizontal = 12.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(onClick = { copy(context, lines.joinToString("\n") { text(it) }) }) { Text("Copy all") }
+            TextButton(onClick = {
+                clearConnectionLog()
+                lines = emptyList()
+            }) { Text("Clear") }
+        }
+        if (lines.isEmpty()) Text("Nothing yet: connect to a server.", color = Faint, modifier = Modifier.padding(8.dp))
+        val state = androidx.compose.foundation.lazy.rememberLazyListState()
+        LaunchedEffect(lines.size) { if (lines.isNotEmpty()) state.scrollToItem(lines.size - 1) }
+        LazyColumn(state = state) {
+            items(lines) { line ->
+                SelectionContainer {
+                    Text(
+                        text(line),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        color = when (line.level) {
+                            "error", "warn" -> Warn
+                            else -> Ink
+                        },
+                        modifier = Modifier.padding(vertical = 1.dp),
+                    )
+                }
+            }
+        }
     }
 }
 

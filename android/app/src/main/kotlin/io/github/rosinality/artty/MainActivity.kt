@@ -378,7 +378,12 @@ private fun ConnectingScreen(phase: Phase.Connecting) {
             Text("It waits for you to sign in; then it goes on.", color = Faint)
             Button(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }) { Text("Open in the browser") }
         }
-        TextButton(onClick = { Session.disconnect() }) { Text("Cancel") }
+        var log by remember { mutableStateOf(false) }
+        Row {
+            TextButton(onClick = { Session.disconnect() }) { Text("Cancel") }
+            TextButton(onClick = { log = !log }) { Text(if (log) "Hide the log" else "Show the log") }
+        }
+        if (log) ConnectionLog(Modifier.fillMaxWidth().weight(1f))
     }
 }
 
@@ -741,6 +746,8 @@ private fun FailedScreen(phase: Phase.Failed, store: Store) {
             }
             TextButton(onClick = { Session.disconnect() }) { Text("Back") }
         }
+        // What connecting did, step by step: why it failed.
+        ConnectionLog(Modifier.fillMaxWidth().weight(1f))
     }
 }
 
