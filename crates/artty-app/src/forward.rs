@@ -53,8 +53,8 @@ fn shared(command: Option<Vec<String>>) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    let said = String::from_utf8_lossy(&output.stderr);
-    Err(said.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("ssh failed").trim().to_owned())
+    Err(artty_core::remote::last_said(&String::from_utf8_lossy(&output.stderr))
+        .unwrap_or("ssh failed".into()))
 }
 
 /// Forward `server`'s `port` here (if it isn't): where it's reached.

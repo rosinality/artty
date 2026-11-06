@@ -364,56 +364,75 @@ impl Installed {
     }
 }
 
+/// Installing artty on a machine, step by step, for whatever runs commands
+/// there (`ssh` here; a phone's own ssh): run [`PROBE`], read it with
+/// [`linux_cpu`], send the build for that CPU to [`UPLOAD`]'s stdin, run
+/// [`MOVE_IN`], then [`FIND`], read with [`installed`]. Linux with glibc
+/// 2.28 or later only.
+pub mod installing {
+    use super::Installed;
+
+    /// What it runs: Linux on which CPU, with which C library.
+    pub const PROBE: &str = "uname -sm; ldd --version 2>&1 | head -n 1";
+    /// Takes the build on stdin.
+    pub const UPLOAD: &str =
+        "sh -c 'mkdir -p \"$HOME/.local/bin\" && cat > \"$HOME/.local/bin/artty.new\"'";
+    /// Puts it in place, moving a running server onto it (its programs keep running).
+    pub const MOVE_IN: &str = "sh -c 'set -e; b=\"$HOME/.local/bin\"; chmod 755 \"$b/artty.new\"; \
+         mv \"$b/artty.new\" \"$b/artty\"; \
+         if \"$b/artty\" server status >/dev/null 2>&1; then \"$b/artty\" server restart; fi'";
+    /// Found as `artty` the way a connection looks for it?
+    pub const FIND: &str = "exec \"$SHELL\" -lc 'command -v artty; echo \"$HOME\"'";
+
+    /// From what [`PROBE`] printed: the CPU to send a build for (`x86_64`
+    /// or `aarch64`), or why it can't take one.
+    pub fn linux_cpu(probe: &str) -> Result<&'static str, String> {
+        let mut lines = probe.lines();
+        let system = lines.next().unwrap_or_default();
+        let libc = lines.next().unwrap_or_default();
+        let cpu = match system.split_whitespace().collect::<Vec<_>>().as_slice() {
+            ["Linux", "x86_64"] => "x86_64",
+            ["Linux", "aarch64"] => "aarch64",
+            _ => return Err(format!("it runs {system}: only Linux on x86_64 or aarch64")),
+        };
+        let glibc = ["GLIBC", "GNU libc", "GNU C Library"].iter().any(|name| libc.contains(name));
+        let version = libc
+            .split(|c: char| !c.is_ascii_digit() && c != '.')
+            .filter_map(|word| {
+                let (major, minor) = word.split_once('.')?;
+                Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
+            })
+            .next_back();
+        if !glibc || version.is_none_or(|version| version < (2, 28)) {
+            return Err(format!("its C library isn't glibc 2.28 or later ({libc})"));
+        }
+        Ok(cpu)
+    }
+
+    /// From what [`FIND`] printed.
+    pub fn installed(found: &str) -> Installed {
+        let mut lines = found.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>();
+        let home = lines.pop().unwrap_or_default();
+        let on_path = lines.first().is_some_and(|path| *path == format!("{home}/.local/bin/artty"));
+        Installed { on_path }
+    }
+}
+
 /// Install this build of artty on the machine `config` reaches by ssh: the
 /// build for its CPU (from `build`, given `x86_64` or `aarch64`), into
-/// `~/.local/bin`, moving a running server onto it (its programs keep
-/// running). Linux with glibc 2.28 or later only.
+/// `~/.local/bin` (see [`installing`]).
 pub fn install(
     config: &ServerConfig,
     prompts: Prompts,
     build: impl Fn(&str) -> Option<std::path::PathBuf>,
 ) -> Result<Installed, String> {
-    // What it runs: Linux on which CPU, with which C library. (Only this
-    // may need a login: the rest shares its connection.)
-    let probe = run_asking(config, "uname -sm; ldd --version 2>&1 | head -n 1", None, &prompts)?;
-    let mut lines = probe.lines();
-    let system = lines.next().unwrap_or_default();
-    let libc = lines.next().unwrap_or_default();
-    let cpu = match system.split_whitespace().collect::<Vec<_>>().as_slice() {
-        ["Linux", cpu @ ("x86_64" | "aarch64")] => *cpu,
-        _ => return Err(format!("it runs {system}: only Linux on x86_64 or aarch64")),
-    };
-    let glibc = ["GLIBC", "GNU libc", "GNU C Library"].iter().any(|name| libc.contains(name));
-    let version = libc
-        .split(|c: char| !c.is_ascii_digit() && c != '.')
-        .filter_map(|word| {
-            let (major, minor) = word.split_once('.')?;
-            Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
-        })
-        .next_back();
-    if !glibc || version.is_none_or(|version| version < (2, 28)) {
-        return Err(format!("its C library isn't glibc 2.28 or later ({libc})"));
-    }
+    // (Only this may need a login: the rest shares its connection.)
+    let cpu = installing::linux_cpu(&run_asking(config, installing::PROBE, None, &prompts)?)?;
     let build = build(cpu).ok_or_else(|| format!("this app has no build for Linux on {cpu}"))?;
     let file = std::fs::File::open(&build).map_err(|err| format!("{}: {err}", build.display()))?;
-    run(
-        config,
-        "sh -c 'mkdir -p \"$HOME/.local/bin\" && cat > \"$HOME/.local/bin/artty.new\"'",
-        Some(file),
-    )?;
-    run(
-        config,
-        "sh -c 'set -e; b=\"$HOME/.local/bin\"; chmod 755 \"$b/artty.new\"; \
-         mv \"$b/artty.new\" \"$b/artty\"; \
-         if \"$b/artty\" server status >/dev/null 2>&1; then \"$b/artty\" server restart; fi'",
-        None,
-    )?;
-    // Found as `artty` the way the connection looks for it?
-    let found = run(config, "exec \"$SHELL\" -lc 'command -v artty; echo \"$HOME\"'", None)?;
-    let mut lines = found.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>();
-    let home = lines.pop().unwrap_or_default();
-    let on_path = lines.first().is_some_and(|path| *path == format!("{home}/.local/bin/artty"));
-    Ok(Installed { on_path })
+    run(config, installing::UPLOAD, Some(file))?;
+    run(config, installing::MOVE_IN, None)?;
+    Ok(installing::installed(&run(config, installing::FIND, None)?))
 }
 
 /// Run `remote` there by ssh (with `stdin`); what it printed, or why it
@@ -439,16 +458,40 @@ fn run_asking(
         .output()
         .map_err(|err| format!("ssh: {err}"))?;
     if !output.status.success() {
-        let said = String::from_utf8_lossy(&output.stderr);
-        let said = said.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("failed");
-        return Err(said.trim().to_owned());
+        return Err(last_said(&String::from_utf8_lossy(&output.stderr)).unwrap_or("failed".into()));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The last thing a failed command said on stderr: its last line with words
+/// — not the source line a shell quotes under its error, with `^~~^`
+/// pointing into it (as fish does), nor an empty `fish:`.
+pub fn last_said(stderr: &str) -> Option<String> {
+    let mut lines: Vec<&str> =
+        stderr.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+    if lines.last().is_some_and(|line| line.chars().all(|c| matches!(c, '^' | '~' | ' '))) {
+        lines.pop();
+        lines.pop();
+    }
+    lines
+        .into_iter()
+        .rfind(|line| line.chars().any(char::is_alphanumeric) && !line.ends_with(':'))
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_a_failed_command_said() {
+        let fish = "fish: Unknown command: ldd\nfish: \nuname -sm; ldd --version 2>&1\n           ^~^\n";
+        assert_eq!(last_said(fish).as_deref(), Some("fish: Unknown command: ldd"));
+        let bash = "bash: line 1: ldd: command not found\n";
+        assert_eq!(last_said(bash).as_deref(), Some("bash: line 1: ldd: command not found"));
+        assert_eq!(last_said("one\ntwo\n\n").as_deref(), Some("two"));
+        assert_eq!(last_said("  \n"), None);
+    }
 
     #[test]
     fn ssh_asks_only_when_it_may() {

@@ -172,22 +172,20 @@ impl client::Handler for Handler {
     }
 }
 
-/// Log in to `target` and run `command` there (`artty server --stdio`,
-/// through the login shell); its stdin and stdout are the link.
-pub fn connect(
+/// Log in to `target`: the runtime the session runs on, and its handle.
+fn log_in(
     target: &Target,
-    command: &str,
     credentials: &Credentials,
     known: KnownHosts,
     login: Arc<dyn Login>,
-) -> Result<Link, String> {
+) -> Result<(tokio::runtime::Runtime, Handle<Handler>), String> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .thread_name("artty-ssh")
         .build()
         .map_err(|err| err.to_string())?;
-    let (handle, channel) = runtime.block_on(async {
+    let handle = runtime.block_on(async {
         let config = Arc::new(client::Config {
             // Silence is noticed: the app's pings get answers every few
             // seconds, and keepalives find a link gone dead.
@@ -208,9 +206,25 @@ pub fn connect(
                 err => format!("{}: {err}", target.host),
             })?;
         authenticate(&mut handle, &target.user, credentials, &*login).await?;
+        Ok::<_, String>(handle)
+    })?;
+    Ok((runtime, handle))
+}
+
+/// Log in to `target` and run `command` there (`artty server --stdio`,
+/// through the login shell); its stdin and stdout are the link.
+pub fn connect(
+    target: &Target,
+    command: &str,
+    credentials: &Credentials,
+    known: KnownHosts,
+    login: Arc<dyn Login>,
+) -> Result<Link, String> {
+    let (runtime, handle) = log_in(target, credentials, known, login.clone())?;
+    let channel = runtime.block_on(async {
         let channel = handle.channel_open_session().await.map_err(|err| err.to_string())?;
         channel.exec(true, command).await.map_err(|err| err.to_string())?;
-        Ok::<_, String>((handle, channel))
+        Ok::<_, String>(channel)
     })?;
 
     // Its output, read as a stream; what's written, sent.
@@ -256,6 +270,27 @@ pub fn connect(
         writer: Box::new(ChunkWriter(writer)),
         keep: Box::new(Session { handle: Some(handle), runtime: Some(runtime) }),
     })
+}
+
+/// Install artty on `target`, as the Mac app does
+/// ([`artty_core::remote::installing`]): `build` gives the build for Linux on
+/// a CPU (`x86_64` or `aarch64`), if there's one.
+pub fn install(
+    target: &Target,
+    credentials: &Credentials,
+    known: KnownHosts,
+    login: Arc<dyn Login>,
+    build: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<artty_core::remote::Installed, String> {
+    use artty_core::remote::installing;
+    let (runtime, handle) = log_in(target, credentials, known, login)?;
+    let session = Session { handle: Some(handle), runtime: Some(runtime) };
+    let run = |command: &str, stdin: Option<Vec<u8>>| session.run(command, stdin);
+    let cpu = installing::linux_cpu(&run(installing::PROBE, None)?)?;
+    let build = build(cpu).ok_or_else(|| format!("this app has no build for Linux on {cpu}"))?;
+    run(installing::UPLOAD, Some(build))?;
+    run(installing::MOVE_IN, None)?;
+    Ok(installing::installed(&run(installing::FIND, None)?))
 }
 
 /// Try none, then the agent's keys, then the keys given, then the server's
@@ -427,6 +462,39 @@ pub fn held_public_key(spki: &[u8], comment: &str) -> Result<PublicKey, String> 
 struct Session {
     handle: Option<Handle<Handler>>,
     runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl Session {
+    /// Run `command` there, with `stdin`: what it printed, or why it failed
+    /// (the last thing it said on stderr).
+    fn run(&self, command: &str, stdin: Option<Vec<u8>>) -> Result<String, String> {
+        let (Some(handle), Some(runtime)) = (&self.handle, &self.runtime) else {
+            return Err("not logged in".into());
+        };
+        runtime.block_on(async {
+            let failed = |err: russh::Error| err.to_string();
+            let mut channel = handle.channel_open_session().await.map_err(failed)?;
+            channel.exec(true, command).await.map_err(failed)?;
+            if let Some(stdin) = stdin {
+                channel.data(&stdin[..]).await.map_err(failed)?;
+            }
+            channel.eof().await.map_err(failed)?;
+            let (mut stdout, mut stderr, mut status) = (Vec::new(), Vec::new(), None);
+            while let Some(message) = channel.wait().await {
+                match message {
+                    ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
+                    ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(&data),
+                    ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
+                    _ => {},
+                }
+            }
+            if status != Some(0) {
+                let said = artty_core::remote::last_said(&String::from_utf8_lossy(&stderr));
+                return Err(said.unwrap_or("failed".into()));
+            }
+            Ok(String::from_utf8_lossy(&stdout).into_owned())
+        })
+    }
 }
 
 impl Drop for Session {

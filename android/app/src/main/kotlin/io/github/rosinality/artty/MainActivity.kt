@@ -141,6 +141,7 @@ private fun App(store: Store) {
         is Phase.Choosing -> WindowsScreen(phase)
         is Phase.Shown -> TerminalScreen()
         is Phase.Failed -> FailedScreen(phase, store)
+        is Phase.AnotherBuild -> AnotherBuildScreen(phase)
     }
     Session.question?.let { QuestionDialog(it) }
 }
@@ -526,6 +527,50 @@ private fun FailedScreen(phase: Phase.Failed, store: Store) {
             TextButton(onClick = { Session.disconnect() }) { Text("Back") }
         }
     }
+}
+
+@Composable
+private fun AnotherBuildScreen(phase: Phase.AnotherBuild) {
+    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("${phase.server.name} runs another artty build", fontWeight = FontWeight.SemiBold)
+        Text(
+            "Its server is ${describeBuild(phase.serverVersion)}. It and this app have to be the same build " +
+                "to understand each other.",
+            color = Faint,
+        )
+        Text(
+            "Installing this app's build there puts it in ~/.local/bin/artty and moves the running server " +
+                "onto it: its programs keep running. Apps of another build using it (the Mac app, say) will " +
+                "then need this build too.",
+            color = Faint,
+        )
+        phase.error?.let {
+            Text("Couldn't install: $it", color = Color(0xfff7768e), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        }
+        if (phase.installing) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                Spacer(Modifier.width(12.dp))
+                Text("Installing…")
+            }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = { Session.installHere() }) { Text("Install this app's build") }
+                TextButton(onClick = { Session.disconnect() }) { Text("Back") }
+            }
+        }
+    }
+}
+
+/** A build id (`0.1.0+<nanoseconds since 1970>`, when it was built or installed), said. */
+private fun describeBuild(id: String): String {
+    val (version, stamp) = id.split('+', limit = 2).let { it[0] to it.getOrNull(1) }
+    val nanos = stamp?.toBigIntegerOrNull() ?: return "artty $id"
+    val time = java.time.Instant.ofEpochMilli(nanos.divide(java.math.BigInteger.valueOf(1_000_000)).toLong())
+    val shown = java.time.format.DateTimeFormatter.ofPattern("MMM d, HH:mm")
+        .withZone(java.time.ZoneId.systemDefault())
+        .format(time)
+    return "artty $version from $shown"
 }
 
 @Composable

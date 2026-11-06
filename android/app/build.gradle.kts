@@ -32,6 +32,8 @@ android {
         getByName("main") {
             // UniFFI's Kotlin for the Rust side (build-rust.sh).
             kotlin.directories.add("build/generated/uniffi")
+            // This app's build of artty for Linux (build-rust.sh), to install on servers.
+            assets.directories.add("build/generated/linux-assets")
         }
     }
 }

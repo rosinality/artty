@@ -27,12 +27,18 @@ pub struct ServerAddress {
 #[derive(Debug, uniffi::Error)]
 pub enum ConnectError {
     Failed { reason: String },
+    /// It runs another artty build (`server_version`), whose messages this
+    /// app can't read: [`install`] puts this app's there.
+    AnotherBuild { server_version: String },
 }
 
 impl std::fmt::Display for ConnectError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ConnectError::Failed { reason } => f.write_str(reason),
+            ConnectError::AnotherBuild { server_version } => {
+                write!(f, "it runs another artty build ({server_version})")
+            },
         }
     }
 }
@@ -40,6 +46,17 @@ impl std::fmt::Display for ConnectError {
 impl From<String> for ConnectError {
     fn from(reason: String) -> Self {
         ConnectError::Failed { reason }
+    }
+}
+
+impl From<artty_client::StartError> for ConnectError {
+    fn from(error: artty_client::StartError) -> Self {
+        match error {
+            artty_client::StartError::AnotherBuild { server_version } => {
+                ConnectError::AnotherBuild { server_version }
+            },
+            artty_client::StartError::Failed(reason) => ConnectError::Failed { reason },
+        }
     }
 }
 
@@ -324,6 +341,64 @@ impl ssh::HeldKey for Keystore {
     }
 }
 
+/// The keys to log in with: the Keystore one, then `private_key`.
+fn credentials(
+    keystore: Option<Arc<dyn KeystoreKey>>,
+    public_key: Option<Vec<u8>>,
+    private_key: Option<String>,
+) -> Result<Credentials, ConnectError> {
+    let held = match (keystore, public_key) {
+        (Some(key), Some(public)) => vec![ssh::Held {
+            public: ssh::held_public_key(&public, "")?,
+            key: Arc::new(Keystore(key)),
+        }],
+        _ => Vec::new(),
+    };
+    Ok(Credentials { agent: false, held, keys: private_key.into_iter().map(|k| (k, None)).collect() })
+}
+
+/// The builds of artty for Linux the app carries (its own build).
+#[uniffi::export(foreign)]
+pub trait LinuxBuilds: Send + Sync {
+    /// The executable for `cpu` (`x86_64` or `aarch64`), if carried.
+    fn build(&self, cpu: String) -> Option<Vec<u8>>;
+}
+
+/// After [`install`]: what the server's "artty there" setting should become
+/// so connecting runs what was installed (`None`: found as `artty`), if it
+/// should change.
+#[derive(uniffi::Record)]
+pub struct Installed {
+    pub change_artty: bool,
+    pub artty: Option<String>,
+}
+
+/// Install this app's build of artty on `server`, as the Mac app does: into
+/// `~/.local/bin`, moving a running server onto it (its programs keep
+/// running). Logs in as [`connect`] does. Blocks: call it off the main thread.
+#[uniffi::export]
+#[allow(clippy::too_many_arguments)]
+pub fn install(
+    server: ServerAddress,
+    keystore: Option<Arc<dyn KeystoreKey>>,
+    public_key: Option<Vec<u8>>,
+    private_key: Option<String>,
+    known_hosts: String,
+    login: Arc<dyn LoginAsker>,
+    builds: Arc<dyn LinuxBuilds>,
+) -> Result<Installed, ConnectError> {
+    let target = Target { user: server.user, host: server.host, port: server.port };
+    let installed = ssh::install(
+        &target,
+        &credentials(keystore, public_key, private_key)?,
+        KnownHosts(PathBuf::from(known_hosts)),
+        Arc::new(Asking(login)),
+        |cpu| builds.build(cpu.to_owned()),
+    )?;
+    let change = installed.artty_setting(server.artty.as_deref());
+    Ok(Installed { change_artty: change.is_some(), artty: change.flatten() })
+}
+
 /// A connection to a server.
 #[derive(uniffi::Object)]
 pub struct Connection {
@@ -346,18 +421,7 @@ pub fn connect(
     events: Arc<dyn Events>,
 ) -> Result<Arc<Connection>, ConnectError> {
     let target = Target { user: server.user, host: server.host, port: server.port };
-    let held = match (keystore, public_key) {
-        (Some(key), Some(public)) => vec![ssh::Held {
-            public: ssh::held_public_key(&public, "")?,
-            key: Arc::new(Keystore(key)),
-        }],
-        _ => Vec::new(),
-    };
-    let credentials = Credentials {
-        agent: false,
-        held,
-        keys: private_key.into_iter().map(|k| (k, None)).collect(),
-    };
+    let credentials = credentials(keystore, public_key, private_key)?;
     let link = ssh::connect(
         &target,
         &ssh::server_command(server.artty.as_deref()),

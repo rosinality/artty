@@ -18,8 +18,10 @@ import uniffi.artty_android.LoginAsker
 import uniffi.artty_android.Prompt
 import uniffi.artty_android.ServerAddress
 import uniffi.artty_android.TabItem
+import uniffi.artty_android.LinuxBuilds
 import uniffi.artty_android.WindowItem
 import uniffi.artty_android.connect
+import uniffi.artty_android.install
 
 /** Where the app is. */
 sealed interface Phase {
@@ -31,6 +33,16 @@ sealed interface Phase {
     /** A window shown; `reconnecting` says why it's being reached again, meanwhile. */
     data class Shown(val server: Server, val window: ULong, val reconnecting: String? = null) : Phase
     data class Failed(val server: Server, val reason: String) : Phase
+    /**
+     * It runs another artty build (`serverVersion`), which this app can't talk to: offering
+     * to install this app's there. `installing` while it does; `error` if that failed.
+     */
+    data class AnotherBuild(
+        val server: Server,
+        val serverVersion: String,
+        val installing: Boolean = false,
+        val error: String? = null,
+    ) : Phase
 }
 
 /** What logging in asks, waiting for the user's answer. */
@@ -181,6 +193,8 @@ object Session : LoginAsker {
                     updateService()
                     runCatching { connection.listWindows() }
                 }
+            } catch (e: ConnectException.AnotherBuild) {
+                main.post { if (generation == this.generation) anotherBuild(e.serverVersion) }
             } catch (e: ConnectException) {
                 // Its own words (the message adds the field's name).
                 val reason = (e as? ConnectException.Failed)?.reason ?: "couldn't connect"
@@ -189,13 +203,63 @@ object Session : LoginAsker {
         }.start()
     }
 
+    /** It runs another build: trying again won't help (installing this one there will). */
+    private fun anotherBuild(serverVersion: String) {
+        val server = server ?: return
+        generation++
+        drop()
+        tabs = emptyList()
+        phase = Phase.AnotherBuild(server, serverVersion)
+        this.server = null
+        updateService()
+    }
+
+    /**
+     * Install this app's build of artty on the server shown as running another (into
+     * `~/.local/bin`, its running server moved onto it), then connect again.
+     */
+    fun installHere() {
+        val shown = phase as? Phase.AnotherBuild ?: return
+        if (shown.installing) return
+        phase = shown.copy(installing = true, error = null)
+        val server = shown.server
+        val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty)
+        val oldKey = store.oldKey()
+        val knownHosts = store.knownHosts
+        val builds = AppBuilds(context)
+        Thread {
+            try {
+                val phoneKey = store.phoneKey
+                val installed = install(address, phoneKey, phoneKey.publicKey, oldKey, knownHosts, this, builds)
+                main.post {
+                    // Connecting runs what was installed.
+                    val updated = if (installed.changeArtty) server.copy(artty = installed.artty) else server
+                    if (updated != server) store.saveServers(store.servers().map { if (it == server) updated else it })
+                    if (phase is Phase.AnotherBuild) connect(updated)
+                }
+            } catch (e: ConnectException) {
+                val reason = (e as? ConnectException.Failed)?.reason ?: e.toString()
+                main.post {
+                    val now = phase as? Phase.AnotherBuild ?: return@post
+                    phase = now.copy(installing = false, error = reason)
+                }
+            }
+        }.start()
+    }
+
+    /** The builds of artty for Linux in the app's assets (build-rust.sh). */
+    private class AppBuilds(private val context: Context) : LinuxBuilds {
+        override fun build(cpu: String): ByteArray? =
+            runCatching { context.assets.open("linux/artty-$cpu").use { it.readBytes() } }.getOrNull()
+    }
+
     /** The connection is gone (or never came): reach the server again, unless that can't help. */
     private fun lost(reason: String) {
         val server = server ?: return
         generation++
         drop()
         // Not a matter of trying again: the user is asked, or must change something.
-        val final = listOf("not let in", "login cancelled", "isn't trusted", "another artty build", "not as an artty server", "artty isn't")
+        val final = listOf("not let in", "login cancelled", "isn't trusted", "not as an artty server", "artty isn't")
             .any { it in reason }
         val connectedBefore = phase is Phase.Shown || phase is Phase.Choosing
         if (final || !connectedBefore && failures == 0 && phase is Phase.Connecting) {

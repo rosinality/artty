@@ -99,11 +99,46 @@ pub struct Client {
     _keep: Mutex<Box<dyn Send>>,
 }
 
+/// Why greeting a server failed.
+#[derive(Debug)]
+pub enum StartError {
+    /// It runs another artty build, whose messages this one can't read: the
+    /// fix is the same build on both ends.
+    AnotherBuild { server_version: String },
+    Failed(String),
+}
+
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StartError::AnotherBuild { server_version } => {
+                write!(f, "it runs another artty build ({server_version})")
+            },
+            StartError::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl From<String> for StartError {
+    fn from(reason: String) -> Self {
+        StartError::Failed(reason)
+    }
+}
+
+impl From<StartError> for String {
+    fn from(error: StartError) -> Self {
+        error.to_string()
+    }
+}
+
 impl Client {
     /// Greet the server over `link`; then what happens arrives on the
     /// returned channel. Fails if it isn't an artty server, or runs
     /// another build (`app_version`, this app's, is told it).
-    pub fn start(link: Link, app_version: &str) -> Result<(Client, mpsc::Receiver<Event>), String> {
+    pub fn start(
+        link: Link,
+        app_version: &str,
+    ) -> Result<(Client, mpsc::Receiver<Event>), StartError> {
         let Link { mut reader, mut writer, keep } = link;
         let hello =
             Hello::Attach { version: protocol_version(), app_version: app_version.to_owned() };
@@ -115,12 +150,12 @@ impl Client {
         let server_version = match read_message::<ServerMessage>(&mut reader) {
             Ok(ServerMessage::Welcome { version, server_version }) => {
                 if version != protocol_version() {
-                    return Err(format!("it runs another artty build ({server_version})"));
+                    return Err(StartError::AnotherBuild { server_version });
                 }
                 server_version
             },
-            Ok(_) => return Err("it answered, but not as an artty server".to_owned()),
-            Err(err) => return Err(format!("no answer: {err}")),
+            Ok(_) => return Err("it answered, but not as an artty server".to_owned().into()),
+            Err(err) => return Err(format!("no answer: {err}").into()),
         };
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
