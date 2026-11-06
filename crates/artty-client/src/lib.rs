@@ -7,6 +7,7 @@ mod client;
 mod link;
 pub mod plain;
 pub mod ssh;
+pub mod ssh_config;
 
 pub use artty_core::keys::Key;
 pub use artty_core::mouse::{Action as MouseAction, Button as MouseButton};
