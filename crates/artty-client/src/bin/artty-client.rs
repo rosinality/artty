@@ -1,7 +1,7 @@
 //! A small artty client in a terminal, for trying [`artty_client`] against
 //! a server: list its windows, or show one here.
 //!
-//!     artty-client --ssh user@host[:port] windows
+//!     artty-client --ssh [user@]host[:port] windows    (as ~/.ssh/config says)
 //!     artty-client --ssh user@host attach [WINDOW] [--share]
 //!     artty-client --command artty server --stdio -- attach
 //!
@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use artty_client::ssh::{self, Credentials, HostKey, KnownHosts, Login, Target};
+use artty_client::ssh_config::{Config, Local};
 use artty_client::{Client, Event, Link};
 use artty_core::TerminalSize;
 use artty_core::layout::PaneId;
@@ -29,14 +30,28 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (link, rest) = match args.first().map(String::as_str) {
         Some("--ssh") => {
-            let target = Target::parse(args.get(1).ok_or("--ssh needs user@host")?)?;
+            let destination = args.get(1).ok_or("--ssh needs a destination")?;
+            let local = Local::here();
+            let config =
+                Config::read(&std::path::Path::new(&local.home).join(".ssh/config"), &local.home)
+                    .unwrap_or_default();
+            let plan = ssh::plan(&config, &local, destination)?;
+            for ignored in &plan.ignored {
+                eprintln!("(not done here: {ignored})");
+            }
             let (artty, rest) = match args.get(2).map(String::as_str) {
                 Some("--artty") => (args.get(3).cloned(), &args[4.min(args.len())..]),
                 _ => (None, &args[2..]),
             };
-            eprintln!("Logging in to {}@{}:{}…", target.user, target.host, target.port);
+            let target = &plan.target;
+            let through: Vec<&str> = plan.hops.iter().map(|h| h.alias.as_str()).collect();
+            let user = target.user.as_deref().unwrap_or_default();
+            eprintln!(
+                "Logging in to {user}@{}:{} (through {through:?})…",
+                target.host_name, target.port
+            );
             let link = ssh::connect(
-                &target,
+                &plan,
                 &ssh::server_command(artty.as_deref()),
                 &Credentials::usual(),
                 KnownHosts::usual(),
@@ -65,7 +80,7 @@ fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "usage: artty-client (--ssh user@host[:port] [--artty PATH] | --command CMD... --) \
+    "usage: artty-client (--ssh [user@]host[:port] [--artty PATH] | --command CMD... --) \
      (windows | attach [WINDOW] [--share])"
         .to_owned()
 }

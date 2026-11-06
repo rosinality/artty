@@ -4,6 +4,8 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import uniffi.artty_android.SshKey
+import uniffi.artty_android.SshSetup
 import uniffi.artty_android.keystorePublicKey
 
 /**
@@ -70,6 +72,15 @@ class Store(private val context: Context) {
             )
         }
         prefs.edit().putString("servers", list.toString()).apply()
+    }
+
+    /** The app's home for ssh: its `.ssh/config` is the ssh config. */
+    val sshHome: File get() = File(context.filesDir, "home").also { File(it, ".ssh").mkdirs() }
+
+    /** What logging in goes by: this phone's key, the keys added, the config, machines' keys. */
+    fun sshSetup(): SshSetup {
+        val keys = listOfNotNull(oldKey()?.let { SshKey("id_ed25519", it, null) })
+        return SshSetup(phoneKey.publicKey, keys, sshHome.path, knownHosts)
     }
 
     /** Machines' keys, recorded as OpenSSH does. */

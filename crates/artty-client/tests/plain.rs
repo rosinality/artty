@@ -198,13 +198,15 @@ fn tabs_of_shells() {
     until(&events, |e| matches!(e, Event::Closed(_)).then_some(()));
 }
 
-/// Against a real machine: `ARTTY_PLAIN_TARGET=user@host[:port]`, logging
+/// Against a real machine: `ARTTY_PLAIN_TARGET=[user@]host[:port]` (as
+/// `ARTTY_PLAIN_CONFIG`, an ssh config, says, if given), logging
 /// in with the key in `ARTTY_PLAIN_KEY` (else the agent and `~/.ssh`'s), its
 /// key known in `ARTTY_PLAIN_KNOWN_HOSTS`.
 #[test]
 #[ignore]
 fn over_ssh() {
-    use artty_client::ssh::{self, Credentials, HostKey, KnownHosts, Login, Target};
+    use artty_client::ssh::{self, Credentials, HostKey, Key, KnownHosts, Login, Target};
+    use artty_client::ssh_config::{Config, Local};
     struct Known;
     impl Login for Known {
         fn host_key(&self, _: &Target, _: &str, _: HostKey) -> bool {
@@ -217,16 +219,25 @@ fn over_ssh() {
             None
         }
     }
-    let target = Target::parse(&std::env::var("ARTTY_PLAIN_TARGET").unwrap()).unwrap();
+    let destination = std::env::var("ARTTY_PLAIN_TARGET").unwrap();
+    // A config, if given (`ARTTY_PLAIN_CONFIG`): its jump hosts and the rest.
+    let config = std::env::var("ARTTY_PLAIN_CONFIG")
+        .map(|path| Config::read(path.as_ref(), "/nowhere").unwrap())
+        .unwrap_or_default();
+    let plan = ssh::plan(&config, &Local::here(), &destination).unwrap();
     let known = KnownHosts(std::env::var("ARTTY_PLAIN_KNOWN_HOSTS").unwrap().into());
     let credentials = match std::env::var("ARTTY_PLAIN_KEY") {
         Ok(path) => Credentials {
-            keys: vec![(ssh::read_key(path.as_ref()).unwrap(), None)],
+            keys: vec![Key {
+                name: "user".into(),
+                text: ssh::read_key(path.as_ref()).unwrap(),
+                passphrase: None,
+            }],
             ..Default::default()
         },
         Err(_) => Credentials::usual(),
     };
-    let link = ssh::shells(&target, &credentials, known, Arc::new(Known)).unwrap();
+    let link = ssh::shells(&plan, &credentials, known, Arc::new(Known)).unwrap();
     let (client, events) = Client::start(link, "test").unwrap();
     client.attach(Some(plain::WINDOW), true).unwrap();
     let pane = until(&events, |e| match e {
@@ -235,15 +246,26 @@ fn over_ssh() {
     });
     let size = TerminalSize { columns: 70, lines: 12, cell_width: 9, cell_height: 18 };
     client.resize(pane, size).unwrap();
-    client.input(pane, b"echo $TERM; stty size; echo d''one\r".to_vec()).unwrap();
+    client
+        .input(pane, b"echo $TERM; stty size; echo v=$ARTTY_TEST_VAR; echo d''one\r".to_vec())
+        .unwrap();
     wait_for(&client, &events, pane, "done");
     let shown = text(&client, pane);
     eprintln!("{shown}");
     assert!(shown.contains("xterm-256color") && shown.contains("12 70"));
+    // The config's SetEnv, if the server takes it.
+    if let Ok(value) = std::env::var("ARTTY_PLAIN_EXPECT_VAR") {
+        assert!(shown.contains(&format!("v={value}")), "SetEnv");
+    }
     // Pings are answered by the machine.
     std::thread::sleep(Duration::from_millis(500));
     client.ping().unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    assert!(client.silent_for() < Duration::from_millis(200), "no answer");
+    let pinged = std::time::Instant::now();
+    let deadline = pinged + Duration::from_secs(3);
+    while client.silent_for() >= pinged.elapsed() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(client.silent_for() < pinged.elapsed(), "no answer");
+    eprintln!("answered in {:?}", pinged.elapsed() - client.silent_for());
     client.input(pane, b"exit\r".to_vec()).unwrap();
 }

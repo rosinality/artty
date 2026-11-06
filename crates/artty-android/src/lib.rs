@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use artty_client::ssh::{self, Credentials, HostKey, KnownHosts, Login, Target};
+use artty_client::ssh_config::{Config, Local};
 use artty_client::{Client, Event, Key};
 use artty_core::TerminalSize;
 use artty_core::protocol::WindowLayout;
@@ -16,9 +17,9 @@ uniffi::setup_scaffolding!();
 /// Where to connect, as the app keeps it.
 #[derive(uniffi::Record, Clone)]
 pub struct ServerAddress {
-    pub user: String,
-    pub host: String,
-    pub port: u16,
+    /// As `ssh` takes it: an alias of the ssh config, `host`, `user@host`,
+    /// `user@host:port`.
+    pub destination: String,
     /// `artty` there, if not on its PATH.
     pub artty: Option<String>,
     /// No artty there: its shells, reached with plain ssh (tabs of shells
@@ -563,24 +564,73 @@ impl ssh::HeldKey for Keystore {
     }
 }
 
-/// The keys to log in with: the Keystore one, then `private_key`.
+/// A private key added to the app: what `IdentityFile` names it by (its
+/// file name, `id_ed25519`), its text (OpenSSH's format, or PEM), and its
+/// passphrase if one is kept.
+#[derive(uniffi::Record, Clone)]
+pub struct SshKey {
+    pub name: String,
+    pub text: String,
+    pub passphrase: Option<String>,
+}
+
+/// What logging in goes by.
+#[derive(uniffi::Record, Clone)]
+pub struct SshSetup {
+    /// The Keystore key's public half (X.509 `SubjectPublicKeyInfo`, as
+    /// Keystore gives it); `IdentityFile` names it [`PHONE_KEY`].
+    pub phone_key: Option<Vec<u8>>,
+    pub keys: Vec<SshKey>,
+    /// The app's home for ssh: its `.ssh/config` is the ssh config (and
+    /// `Include`s are read from `.ssh`).
+    pub home: String,
+    /// Machines' keys, as OpenSSH records them.
+    pub known_hosts: String,
+}
+
+/// What `IdentityFile` names this phone's key by (`IdentityFile ~/.ssh/phone`).
+pub const PHONE_KEY: &str = "phone";
+
+/// The keys to log in with: the Keystore one, and those added.
 fn credentials(
     keystore: Option<Arc<dyn KeystoreKey>>,
-    public_key: Option<Vec<u8>>,
-    private_key: Option<String>,
+    setup: &SshSetup,
 ) -> Result<Credentials, ConnectError> {
-    let held = match (keystore, public_key) {
+    let held = match (keystore, &setup.phone_key) {
         (Some(key), Some(public)) => vec![ssh::Held {
-            public: ssh::held_public_key(&public, "")?,
+            name: PHONE_KEY.to_owned(),
+            public: ssh::held_public_key(public, "")?,
             key: Arc::new(Keystore(key)),
         }],
         _ => Vec::new(),
     };
-    Ok(Credentials {
-        agent: false,
-        held,
-        keys: private_key.into_iter().map(|k| (k, None)).collect(),
-    })
+    let keys = setup
+        .keys
+        .iter()
+        .map(|k| ssh::Key {
+            name: k.name.clone(),
+            text: k.text.clone(),
+            passphrase: k.passphrase.clone(),
+        })
+        .collect();
+    Ok(Credentials { agent: false, held, keys })
+}
+
+/// The app's ssh config (none: an empty one), and who's connecting.
+fn read_config(home: &str) -> (Config, Local) {
+    let path = std::path::Path::new(home).join(".ssh/config");
+    let config = if path.exists() {
+        Config::read(&path, home).unwrap_or_default()
+    } else {
+        Config::default()
+    };
+    (config, Local { home: home.to_owned(), user: String::new(), host: String::new() })
+}
+
+/// How to reach `destination`, as the app's ssh config says.
+fn plan(destination: &str, home: &str) -> Result<ssh::Plan, ConnectError> {
+    let (config, local) = read_config(home);
+    Ok(ssh::plan(&config, &local, destination)?)
 }
 
 /// The builds of artty for Linux the app carries (its own build).
@@ -603,21 +653,17 @@ pub struct Installed {
 /// `~/.local/bin`, moving a running server onto it (its programs keep
 /// running). Logs in as [`connect`] does. Blocks: call it off the main thread.
 #[uniffi::export]
-#[allow(clippy::too_many_arguments)]
 pub fn install(
     server: ServerAddress,
+    setup: SshSetup,
     keystore: Option<Arc<dyn KeystoreKey>>,
-    public_key: Option<Vec<u8>>,
-    private_key: Option<String>,
-    known_hosts: String,
     login: Arc<dyn LoginAsker>,
     builds: Arc<dyn LinuxBuilds>,
 ) -> Result<Installed, ConnectError> {
-    let target = Target { user: server.user, host: server.host, port: server.port };
     let installed = ssh::install(
-        &target,
-        &credentials(keystore, public_key, private_key)?,
-        KnownHosts(PathBuf::from(known_hosts)),
+        &plan(&server.destination, &setup.home)?,
+        &credentials(keystore, &setup)?,
+        KnownHosts(PathBuf::from(&setup.known_hosts)),
         Asking::new(login),
         |cpu| builds.build(cpu.to_owned()),
     )?;
@@ -631,30 +677,28 @@ pub struct Connection {
     client: Client,
 }
 
-/// Log in to `server` with the Keystore key (`public_key` is its X.509
-/// `SubjectPublicKeyInfo`, as Keystore gives it), then `private_key`
-/// (OpenSSH format) — the server's own questions are asked too — and greet
-/// the artty server there (or, `plain`, serve its shells from here).
-/// Machines' keys are recorded in `known_hosts` (a file of the app's). Blocks: call it off the main thread.
+/// Log in to `server` as the app's ssh config says (`setup`: through its
+/// jump hosts, with the keys it names: the Keystore one and those added;
+/// the server's own questions are asked too), and greet the artty server
+/// there (or, `plain`, serve its shells from here). Blocks: call it off the
+/// main thread.
 #[uniffi::export]
 pub fn connect(
     server: ServerAddress,
+    setup: SshSetup,
     keystore: Option<Arc<dyn KeystoreKey>>,
-    public_key: Option<Vec<u8>>,
-    private_key: Option<String>,
-    known_hosts: String,
     login: Arc<dyn LoginAsker>,
     events: Arc<dyn Events>,
 ) -> Result<Arc<Connection>, ConnectError> {
-    let target = Target { user: server.user, host: server.host, port: server.port };
-    let credentials = credentials(keystore, public_key, private_key)?;
-    let known = KnownHosts(PathBuf::from(known_hosts));
+    let plan = plan(&server.destination, &setup.home)?;
+    let credentials = credentials(keystore, &setup)?;
+    let known = KnownHosts(PathBuf::from(&setup.known_hosts));
     let asking = Asking::new(login);
     let link = if server.plain {
-        ssh::shells(&target, &credentials, known, asking.clone())?
+        ssh::shells(&plan, &credentials, known, asking.clone())?
     } else {
         let command = ssh::server_command(server.artty.as_deref());
-        ssh::connect(&target, &command, &credentials, known, asking.clone())?
+        ssh::connect(&plan, &command, &credentials, known, asking.clone())?
     };
     let (client, received) = match Client::start(link, env!("CARGO_PKG_VERSION")) {
         Ok(started) => started,

@@ -187,15 +187,12 @@ object Session : LoginAsker {
     private fun open() {
         val server = server ?: return
         val generation = ++generation
-        val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty, server.plain)
-        val oldKey = store.oldKey()
-        val knownHosts = store.knownHosts
+        val address = ServerAddress(server.address, server.artty, server.plain)
+        val setup = store.sshSetup()
         Thread {
             try {
                 val phoneKey = store.phoneKey
-                val connection = connect(
-                    address, phoneKey, phoneKey.publicKey, oldKey, knownHosts, this, ConnectionEvents(generation),
-                )
+                val connection = connect(address, setup, phoneKey, this, ConnectionEvents(generation))
                 main.post {
                     if (generation != this.generation) {
                         Thread { connection.destroy() }.start()
@@ -238,14 +235,13 @@ object Session : LoginAsker {
         if (shown.installing) return
         phase = shown.copy(installing = true, error = null)
         val server = shown.server
-        val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty, false)
-        val oldKey = store.oldKey()
-        val knownHosts = store.knownHosts
+        val address = ServerAddress(server.address, server.artty, false)
+        val setup = store.sshSetup()
         val builds = AppBuilds(context)
         Thread {
             try {
                 val phoneKey = store.phoneKey
-                val installed = install(address, phoneKey, phoneKey.publicKey, oldKey, knownHosts, this, builds)
+                val installed = install(address, setup, phoneKey, this, builds)
                 main.post {
                     // Connecting runs what was installed.
                     val updated = if (installed.changeArtty) server.copy(artty = installed.artty) else server

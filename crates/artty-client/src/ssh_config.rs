@@ -55,6 +55,18 @@ pub struct Local {
     pub host: String,
 }
 
+impl Local {
+    /// This machine's: `$HOME`, `$USER`, its host name.
+    pub fn here() -> Local {
+        let var = |name| std::env::var(name).unwrap_or_default();
+        let host = std::process::Command::new("hostname")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+            .unwrap_or_default();
+        Local { home: var("HOME"), user: var("USER"), host }
+    }
+}
+
 /// What a destination resolves to.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Resolved {
@@ -207,6 +219,34 @@ const DONE: [&str; 30] = [
 ];
 
 impl Config {
+    /// Read the file at `path`, its `Include`s from disk: relative names
+    /// in `home`'s `.ssh`, `~` being `home`, `*` and `?` in file names.
+    pub fn read(path: &std::path::Path, home: &str) -> Result<Config, String> {
+        let text =
+            std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        let ssh = std::path::Path::new(home).join(".ssh");
+        let include = |pattern: &str| -> Vec<String> {
+            let pattern = match pattern.strip_prefix("~/") {
+                Some(rest) => std::path::Path::new(home).join(rest),
+                None => ssh.join(pattern),
+            };
+            let (Some(dir), Some(name)) = (pattern.parent(), pattern.file_name()) else {
+                return Vec::new();
+            };
+            let name = name.to_string_lossy();
+            let mut files: Vec<_> = std::fs::read_dir(dir)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| wildcard(&name, &entry.file_name().to_string_lossy()))
+                .map(|entry| entry.path())
+                .collect();
+            files.sort();
+            files.iter().filter_map(|file| std::fs::read_to_string(file).ok()).collect()
+        };
+        Ok(Config::parse(&text, &include))
+    }
+
     /// Read `text`; `include` gives the texts of the files an `Include`'s
     /// pattern names (relative names are `~/.ssh`'s, as OpenSSH reads them).
     pub fn parse(text: &str, include: &dyn Fn(&str) -> Vec<String>) -> Config {
@@ -267,6 +307,11 @@ impl Config {
             match entry {
                 Entry::Host(patterns) => *active = host_matches(patterns, alias),
                 Entry::Match(criteria) => {
+                    for criterion in criteria {
+                        if let Criterion::Unknown(what) = criterion {
+                            found.unknown_match(what);
+                        }
+                    }
                     *active = criteria.iter().all(|c| criterion_matches(c, alias, local, found))
                 },
                 Entry::Option { keyword, args } if *active => found.set(keyword, args.clone()),
@@ -480,7 +525,7 @@ fn criterion_matches(criterion: &Criterion, alias: &str, local: &Local, found: &
 
 /// `*` and `?`. Case counts, as in OpenSSH's `Host` (the host name is
 /// lowercased only after).
-fn wildcard(pattern: &str, text: &str) -> bool {
+pub(crate) fn wildcard(pattern: &str, text: &str) -> bool {
     fn go(p: &[char], t: &[char]) -> bool {
         match p.split_first() {
             None => t.is_empty(),
@@ -503,9 +548,18 @@ fn expand_host(name: &str, alias: &str) -> String {
 #[derive(Default)]
 struct Found {
     values: HashMap<String, Vec<Vec<String>>>,
+    /// `Match` criteria that can't be told here (taken as not matching).
+    unknown: Vec<String>,
 }
 
 impl Found {
+    fn unknown_match(&mut self, what: &str) {
+        let what = format!("match {what}");
+        if !self.unknown.contains(&what) {
+            self.unknown.push(what);
+        }
+    }
+
     fn set(&mut self, keyword: &str, args: Vec<String>) {
         let keyword = match keyword {
             // The old name of the same thing.
@@ -578,6 +632,7 @@ impl Found {
             .cloned()
             .collect();
         ignored.sort();
+        ignored.extend(self.unknown.iter().cloned());
         let preferred = self
             .first("preferredauthentications")
             .map(|list| list.split(',').map(str::to_owned).collect())
@@ -772,6 +827,8 @@ mod tests {
         let r = c.resolve("short", &local());
         assert_eq!((r.user.as_deref(), r.port, r.compression), (Some("ex"), 7, true));
         assert_eq!(c.resolve("other", &local()).port, 22);
+        // Told: `exec` can't run here.
+        assert_eq!(c.resolve("short", &local()).ignored, ["match exec"]);
     }
 
     #[test]
