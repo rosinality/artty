@@ -63,6 +63,9 @@ class TerminalView(context: Context) : View(context) {
     init {
         isFocusable = true
         isFocusableInTouchMode = true
+        // Focused from a hardware keyboard, Android would gray it all over: the cursor says
+        // enough.
+        defaultFocusHighlightEnabled = false
         measureFont()
     }
 

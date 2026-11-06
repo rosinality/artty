@@ -80,10 +80,14 @@ private sealed interface Asking {
  * `onChosen` after a tab is chosen (the drawer closes).
  */
 @Composable
-fun TabsDrawer(server: String, onChosen: () -> Unit) {
+fun TabsDrawer(server: String, onSearch: () -> Unit, onChosen: () -> Unit) {
     var asking by remember { mutableStateOf<Asking?>(null) }
     ModalDrawerSheet(drawerContainerColor = Background, drawerContentColor = Ink) {
-        Text(server, fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 8.dp))
+        Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(server, fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+            // The Mac's ⌘⇧F: every pane's output, and agents' conversations.
+            TextButton(onClick = onSearch) { Text("Search everything") }
+        }
         val workspaces = Session.tabs.groupBy { it.workspace }.values.toList()
         LazyColumn(Modifier.weight(1f)) {
             for (tabs in workspaces) {

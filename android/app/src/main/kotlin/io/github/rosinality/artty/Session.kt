@@ -14,6 +14,9 @@ import uniffi.artty_android.ClientEvent
 import uniffi.artty_android.ConnectException
 import uniffi.artty_android.Connection
 import uniffi.artty_android.Events
+import uniffi.artty_android.FindResult
+import uniffi.artty_android.FoundLine
+import uniffi.artty_android.FoundSession
 import uniffi.artty_android.LoginAsker
 import uniffi.artty_android.PaneItem
 import uniffi.artty_android.Prompt
@@ -366,6 +369,52 @@ object Session : LoginAsker {
 
     fun closeWorkspace(workspace: ULong) {
         runCatching { connection?.closeWorkspace(workspace) }
+    }
+
+    // Searching (on its own thread: the server's answer is waited for).
+
+    /** Find `text` in `pane`'s output: `done` with the result, or why not, on the main thread. */
+    fun find(pane: ULong, text: String, older: Boolean, restart: Boolean, done: (Result<FindResult>) -> Unit) {
+        val connection = connection ?: return
+        Thread {
+            val result = runCatching { connection.find(pane, text, older, restart) }
+            main.post { done(result) }
+        }.start()
+    }
+
+    fun endFind(pane: ULong) {
+        runCatching { connection?.endFind(pane) }
+    }
+
+    /** What every pane printed, and agents' conversations, mentioning `text`. */
+    class Found(val lines: List<FoundLine>, val sessions: List<FoundSession>)
+
+    fun searchEverything(text: String, done: (Result<Found>) -> Unit) {
+        val connection = connection ?: return
+        Thread {
+            val result = runCatching {
+                // Both at once: conversations take longer.
+                var sessions: List<FoundSession> = emptyList()
+                val other = Thread { sessions = runCatching { connection.searchSessions(text) }.getOrDefault(emptyList()) }
+                other.start()
+                val lines = connection.searchOutput(text)
+                other.join()
+                Found(lines, sessions)
+            }
+            main.post { done(result) }
+        }.start()
+    }
+
+    /** Show a line found: the server brings its tab forward, its pane focused. */
+    fun reveal(line: FoundLine) {
+        chosenPane = null
+        runCatching { connection?.reveal(line) }
+    }
+
+    /** Carry on a conversation found, in a new tab. */
+    fun resume(session: FoundSession) {
+        val window = window ?: return
+        runCatching { connection?.resumeSession(window, session) }
     }
 
     /** Show `pane` of `window` (a notification about it tapped): its tab, its window first. */

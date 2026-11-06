@@ -142,6 +142,45 @@ pub struct PaneItem {
     pub detail: Option<String>,
 }
 
+/// Finding in a pane: whether a match is shown, which of how many.
+#[derive(uniffi::Record)]
+pub struct FindResult {
+    pub found: bool,
+    /// 1-based, counted from the top of the history; 0 with no match.
+    pub index: u32,
+    pub total: u32,
+    /// There are more than `total` (counting stopped).
+    pub more: bool,
+    /// The pane has history to search (a full-screen program's isn't the terminal's).
+    pub history: bool,
+}
+
+/// A line of a pane's output with what was searched for.
+#[derive(uniffi::Record, Clone)]
+pub struct FoundLine {
+    pub pane: u64,
+    pub line: u64,
+    /// Where the match is in `text` (characters).
+    pub column: u32,
+    pub length: u32,
+    pub text: String,
+}
+
+/// A coding agent's conversation mentioning what was searched for.
+#[derive(uniffi::Record, Clone)]
+pub struct FoundSession {
+    /// `claude` or `codex`.
+    pub agent: String,
+    pub session: String,
+    pub cwd: Option<String>,
+    /// Its first request, shortened.
+    pub title: String,
+    /// The text around the match.
+    pub snippet: String,
+    /// Last written, seconds since the epoch.
+    pub modified: u64,
+}
+
 /// A window of the server's, as listed to choose from.
 #[derive(uniffi::Record)]
 pub struct WindowItem {
@@ -591,6 +630,90 @@ impl Connection {
 
     pub fn close_workspace(&self, workspace: u64) -> Result<(), ConnectError> {
         Ok(self.client.close_workspace(workspace)?)
+    }
+
+    /// Find `text` in a pane's output, history too: the next match back
+    /// (`older`) or forward, or (`restart`) the newest; selected and
+    /// scrolled to. Blocks: call it off the main thread.
+    pub fn find(
+        &self,
+        pane: u64,
+        text: String,
+        older: bool,
+        restart: bool,
+    ) -> Result<FindResult, ConnectError> {
+        let found = self.client.find(pane, &text, older, restart)?;
+        Ok(FindResult {
+            found: found.found,
+            index: found.index as u32,
+            total: found.total as u32,
+            more: found.more,
+            history: found.history,
+        })
+    }
+
+    /// Done finding: the pane scrolls back down.
+    pub fn end_find(&self, pane: u64) -> Result<(), ConnectError> {
+        Ok(self.client.end_find(pane)?)
+    }
+
+    /// Lines with `text` in every pane's output, history too, newest first.
+    /// Blocks: call it off the main thread.
+    pub fn search_output(&self, text: String) -> Result<Vec<FoundLine>, ConnectError> {
+        let hits = self.client.search_output(&text)?;
+        Ok(hits
+            .into_iter()
+            .map(|hit| FoundLine {
+                pane: hit.pane,
+                line: hit.line,
+                column: hit.column as u32,
+                length: hit.length as u32,
+                text: hit.text,
+            })
+            .collect())
+    }
+
+    /// Coding agents' conversations mentioning `text`, newest first. Blocks:
+    /// call it off the main thread.
+    pub fn search_sessions(&self, text: String) -> Result<Vec<FoundSession>, ConnectError> {
+        let hits = self.client.search_sessions(&text)?;
+        Ok(hits
+            .into_iter()
+            .map(|hit| FoundSession {
+                agent: hit.agent,
+                session: hit.session,
+                cwd: hit.cwd.map(|cwd| cwd.display().to_string()),
+                title: hit.title,
+                snippet: hit.snippet,
+                modified: hit.modified,
+            })
+            .collect())
+    }
+
+    /// Show a line found: its tab brought forward, the match selected.
+    pub fn reveal(&self, found: FoundLine) -> Result<(), ConnectError> {
+        Ok(self.client.reveal(&artty_core::protocol::OutputHit {
+            pane: found.pane,
+            line: found.line,
+            column: found.column as usize,
+            length: found.length as usize,
+            text: found.text,
+        })?)
+    }
+
+    /// Carry on a conversation found, in a new tab of `window`, in its directory.
+    pub fn resume_session(&self, window: u64, found: FoundSession) -> Result<(), ConnectError> {
+        Ok(self.client.resume_session(
+            window,
+            &artty_core::protocol::SessionHit {
+                agent: found.agent,
+                session: found.session,
+                cwd: found.cwd.map(PathBuf::from),
+                title: found.title,
+                snippet: found.snippet,
+                modified: found.modified,
+            },
+        )?)
     }
 
     pub fn screen(&self, pane: u64) -> Option<Screen> {

@@ -445,20 +445,36 @@ private fun TerminalScreen() {
     val reconnecting = shown?.reconnecting
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
+    var finding by remember { mutableStateOf(false) }
+    /** Search everything, open (with what to search for). */
+    var searchingAll by remember { mutableStateOf<String?>(null) }
     ModalNavigationDrawer(
         drawerState = drawer,
         // Opened by its button: a swipe from the edge belongs to the terminal (and its programs).
         gesturesEnabled = drawer.isOpen,
-        drawerContent = { TabsDrawer(shown?.server?.name ?: "") { scope.launch { drawer.close() } } },
+        drawerContent = {
+            TabsDrawer(shown?.server?.name ?: "", onSearch = {
+                scope.launch { drawer.close() }
+                searchingAll = ""
+            }) { scope.launch { drawer.close() } }
+        },
     ) {
         Column(Modifier.fillMaxSize()) {
-            TabBar(tab, onTabs = { scope.launch { drawer.open() } }, onPaste = paste)
+            TabBar(tab, onTabs = { scope.launch { drawer.open() } }, onFind = { finding = true }, onPaste = paste)
             // Over the terminal (not above it): showing them mustn't resize the pane.
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 AndroidView(factory = { view.also { it.post { it.showKeyboard() } } }, modifier = Modifier.fillMaxSize()) {
                     it.pane = Session.pane
                 }
                 Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+                    val pane = Session.pane
+                    if (finding && pane != null) {
+                        FindBar(pane, onConversations = {
+                            finding = false
+                            Session.endFind(pane)
+                            searchingAll = it
+                        }) { finding = false }
+                    }
                     // The last screen stays meanwhile; typing waits for the connection.
                     if (reconnecting != null) {
                         Row(
@@ -521,6 +537,7 @@ private fun TerminalScreen() {
             }
         }
     }
+    searchingAll?.let { SearchEverything(it) { searchingAll = null } }
     pasting?.let { text ->
         AlertDialog(
             onDismissRequest = { pasting = null },
@@ -538,7 +555,7 @@ private fun TerminalScreen() {
 }
 
 @Composable
-private fun TabBar(tab: TabItem?, onTabs: () -> Unit, onPaste: () -> Unit) {
+private fun TabBar(tab: TabItem?, onTabs: () -> Unit, onFind: () -> Unit, onPaste: () -> Unit) {
     Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { Session.disconnect() }) { Text("‹", fontSize = 20.sp) }
         // The workspaces and tabs; a dot when another tab wants you.
@@ -560,6 +577,8 @@ private fun TabBar(tab: TabItem?, onTabs: () -> Unit, onPaste: () -> Unit) {
                 KeyButton("${i + 1}", on = pane == Session.pane) { Session.chosenPane = pane }
             }
         }
+        // Finding in the pane (the Mac's ⌘F).
+        TextButton(onClick = onFind) { Text("⌕", fontSize = 20.sp) }
         // Here, not in the keys row: just after copying, Android's clipboard preview covers that.
         TextButton(onClick = onPaste) { Text("Paste") }
     }

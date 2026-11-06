@@ -16,8 +16,9 @@ use artty_core::keys::Key;
 use artty_core::layout::PaneId;
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
-    ClientMessage, Hello, PaneSpec, PaneState, Query, Reply, SelectionOp, ServerMessage, WindowId,
-    WindowLayout, WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
+    ClientMessage, Hello, OutputHit, PaneSpec, PaneState, Query, Reply, SearchFound, SelectionOp,
+    ServerMessage, SessionHit, WindowId, WindowLayout, WindowSummary, WorkspaceId,
+    protocol_version, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
 
@@ -280,15 +281,87 @@ impl Client {
 
     /// Ask the server something, and wait (a while) for its answer.
     fn query(&self, query: Query) -> Result<Reply, String> {
+        self.ask(|id| ClientMessage::Query { id, query }, Duration::from_secs(10))
+    }
+
+    /// Send what `message` makes of a new id, and wait for the reply to it.
+    fn ask(
+        &self,
+        message: impl FnOnce(u64) -> ClientMessage,
+        wait: Duration,
+    ) -> Result<Reply, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, tx);
-        let sent = self.send(&ClientMessage::Query { id, query });
-        let answer = sent.and_then(|()| {
-            rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "no answer".to_owned())
-        });
+        let sent = self.send(&message(id));
+        let answer = sent.and_then(|()| rx.recv_timeout(wait).map_err(|_| "no answer".to_owned()));
         self.pending.lock().unwrap().remove(&id);
         answer
+    }
+
+    /// Find `text` in a pane's output, history too: the match after the one
+    /// shown (`older`: before it; `restart`: from the newest), selected and
+    /// scrolled to. Blocks for the answer.
+    pub fn find(
+        &self,
+        pane: PaneId,
+        text: &str,
+        older: bool,
+        restart: bool,
+    ) -> Result<SearchFound, String> {
+        let query = text.to_owned();
+        let message = |id| ClientMessage::Search { id, pane, query, older, restart };
+        match self.ask(message, Duration::from_secs(10))? {
+            Reply::Search(found) => found,
+            _ => Err("an unexpected answer".into()),
+        }
+    }
+
+    /// Done finding: the match is let go, the pane scrolls back down.
+    pub fn end_find(&self, pane: PaneId) -> Result<(), String> {
+        self.send(&ClientMessage::EndSearch { pane })
+    }
+
+    /// Lines with `text` in every pane's output on the server, history too
+    /// (case ignored unless it has capitals), newest first. Blocks.
+    pub fn search_output(&self, text: &str) -> Result<Vec<OutputHit>, String> {
+        let query = Query::SearchOutput { text: text.to_owned() };
+        match self.ask(|id| ClientMessage::Query { id, query }, Duration::from_secs(30))? {
+            Reply::Found(hits) => Ok(hits),
+            _ => Err("an unexpected answer".into()),
+        }
+    }
+
+    /// Coding agents' conversations on the server mentioning `text`, newest
+    /// first. Blocks.
+    pub fn search_sessions(&self, text: &str) -> Result<Vec<SessionHit>, String> {
+        let query = Query::SearchSessions { text: text.to_owned() };
+        match self.ask(|id| ClientMessage::Query { id, query }, Duration::from_secs(30))? {
+            Reply::Sessions(hits) => Ok(hits),
+            _ => Err("an unexpected answer".into()),
+        }
+    }
+
+    /// Show a line [`Client::search_output`] found: its tab brought forward,
+    /// the match selected and scrolled to.
+    pub fn reveal(&self, hit: &OutputHit) -> Result<(), String> {
+        self.send(&ClientMessage::Reveal {
+            pane: hit.pane,
+            line: hit.line,
+            column: hit.column,
+            length: hit.length,
+        })
+    }
+
+    /// Carry on a conversation [`Client::search_sessions`] found, in a new
+    /// tab of `window`, in its directory.
+    pub fn resume_session(&self, window: WindowId, hit: &SessionHit) -> Result<(), String> {
+        self.send(&ClientMessage::ResumeSession {
+            window,
+            agent: hit.agent.clone(),
+            session: hit.session.clone(),
+            cwd: hit.cwd.clone(),
+        })
     }
 
     /// Start selecting at viewport cell (`line`, `column`) (`right`: in its
