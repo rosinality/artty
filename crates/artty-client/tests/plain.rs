@@ -218,6 +218,10 @@ fn over_ssh() {
         fn answer(&self, _: &str, _: &[(String, bool)]) -> Option<Vec<String>> {
             None
         }
+        fn agent_sign(&self, name: &str, host: &str) -> bool {
+            eprintln!("agent: sign with {name} for {host}?");
+            std::env::var_os("ARTTY_PLAIN_AGENT_YES").is_some()
+        }
     }
     let destination = std::env::var("ARTTY_PLAIN_TARGET").unwrap();
     // A config, if given (`ARTTY_PLAIN_CONFIG`): its jump hosts and the rest.
@@ -267,6 +271,17 @@ fn over_ssh() {
     }
     assert!(client.silent_for() < pinged.elapsed(), "no answer");
     eprintln!("answered in {:?}", pinged.elapsed() - client.silent_for());
+    // Agent forwarding: a command of `ARTTY_PLAIN_AGENT` (using the agent)
+    // says `ARTTY_PLAIN_AGENT_SAYS`.
+    if let (Ok(command), Ok(says)) =
+        (std::env::var("ARTTY_PLAIN_AGENT"), std::env::var("ARTTY_PLAIN_AGENT_SAYS"))
+    {
+        client.input(pane, format!("{command}; echo a''gent-done\r").into_bytes()).unwrap();
+        wait_for(&client, &events, pane, "agent-done");
+        let shown = text(&client, pane);
+        eprintln!("{shown}");
+        assert!(shown.contains(&says), "the agent's answer");
+    }
     if std::env::var_os("ARTTY_PLAIN_FORWARDS").is_some() {
         forwarding(&forwards);
     }

@@ -46,6 +46,9 @@ impl crate::plain::Shells for Shells {
                         .request_pty(true, "xterm-256color", columns, lines, width, height, &[])
                         .await?;
                 }
+                if target.forward_agent {
+                    channel.agent_forward(false).await?;
+                }
                 // Most servers take only LANG and LC_*: asked, not insisted on.
                 channel.set_env(false, "COLORTERM", "truecolor").await?;
                 for (name, value) in &target.set_env {

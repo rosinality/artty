@@ -12,6 +12,7 @@ use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key};
 use russh::{ChannelMsg, Disconnect, Preferred};
 
+use super::agent::Agent;
 use super::forward::{Forwards, Kind, RemoteTargets};
 use super::held::HeldSigner;
 use super::{CONNECT_TIMEOUT, Credentials, HostKey, KnownHosts, Login, Target};
@@ -122,7 +123,16 @@ impl Connection {
             let stages = plan.hops.iter().chain([&plan.target]);
             let mut last = None;
             for resolved in stages {
-                let handler = Handler::new(resolved, login.clone(), known.clone(), remote.clone());
+                let mut handler =
+                    Handler::new(resolved, login.clone(), known.clone(), remote.clone());
+                // The machine's programs may use the keys here, if the config says.
+                if std::ptr::eq(resolved, &plan.target) && resolved.forward_agent {
+                    let user = resolved.user.clone().unwrap_or_default();
+                    let host = format!("{user}@{}", resolved.alias);
+                    let agent =
+                        Agent::new(credentials.clone(), login.clone(), host, passphrases.clone());
+                    handler.agent = Some(Arc::new(agent));
+                }
                 let config = Arc::new(client_config(resolved)?);
                 let timeout = resolved
                     .connect_timeout
@@ -373,6 +383,8 @@ pub(super) struct Handler {
     known: Arc<KnownHosts>,
     /// Where remote forwards' connections go.
     remote: RemoteTargets,
+    /// The keys lent the machine (`ForwardAgent`).
+    agent: Option<Arc<Agent>>,
 }
 
 impl Handler {
@@ -395,6 +407,7 @@ impl Handler {
             login,
             known,
             remote,
+            agent: None,
         }
     }
 }
@@ -457,6 +470,22 @@ impl client::Handler for Handler {
     ) -> Result<(), Self::Error> {
         // Not one of ours: refused (`reply` dropped).
         Forwards::arrived(&self.remote, channel, connected_port, reply);
+        Ok(())
+    }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        // Not lent: refused (`reply` dropped).
+        if let Some(agent) = self.agent.clone() {
+            tokio::spawn(async move {
+                reply.accept().await;
+                agent.serve(channel.into_stream()).await;
+            });
+        }
         Ok(())
     }
 
@@ -584,7 +613,7 @@ async fn by_key(
 }
 
 /// A key's private half: with its passphrase, asked for once if it needs one.
-fn decode(
+pub(super) fn decode(
     key: &super::Key,
     login: &dyn Login,
     passphrases: &Mutex<HashMap<String, String>>,

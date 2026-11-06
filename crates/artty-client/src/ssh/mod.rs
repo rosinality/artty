@@ -7,6 +7,7 @@
 //! says meanwhile (a banner, Tailscale's sign-in address) — goes through
 //! [`Login`].
 
+mod agent;
 mod forward;
 mod held;
 mod login;
@@ -56,6 +57,12 @@ pub trait Login: Send + Sync {
     /// Answers to the server's questions (a password, a code): `echo` says
     /// whether what's typed may show. `None` gives up.
     fn answer(&self, instructions: &str, prompts: &[(String, bool)]) -> Option<Vec<String>>;
+    /// May the machine (`host`, `user@alias`) sign with key `name`, through
+    /// agent forwarding? Only what's agreed to is signed.
+    fn agent_sign(&self, name: &str, host: &str) -> bool {
+        let _ = (name, host);
+        false
+    }
     /// The passphrase of key `name`, if the user gives it.
     fn passphrase(&self, name: &str) -> Option<String> {
         let prompt = format!("Passphrase for the key {name}:");
@@ -158,6 +165,9 @@ pub fn connect(
     let channel = connection.block_on(async {
         let channel =
             connection.handle.channel_open_session().await.map_err(|err| err.to_string())?;
+        if plan.target.forward_agent {
+            channel.agent_forward(false).await.map_err(|err| err.to_string())?;
+        }
         for (name, value) in &plan.target.set_env {
             channel
                 .set_env(false, name.as_str(), value.as_str())
