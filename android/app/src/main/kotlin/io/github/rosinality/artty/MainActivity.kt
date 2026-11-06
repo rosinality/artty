@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -161,24 +162,63 @@ private fun Heading(title: String, action: @Composable () -> Unit = {}) {
 @Composable
 private fun ServersScreen(store: Store) {
     val servers = remember { mutableStateListOf<Server>().apply { addAll(store.servers()) } }
-    var adding by remember { mutableStateOf(false) }
+    /** The dialog open: adding (`null` server) or editing one. */
+    var editing by remember { mutableStateOf<Pair<Boolean, Server?>?>(null) }
     var showingKey by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<Server?>(null) }
+    fun save() = store.saveServers(servers)
+    fun move(server: Server, by: Int) {
+        val from = servers.indexOf(server)
+        val to = from + by
+        if (from < 0 || to !in servers.indices) return
+        servers.removeAt(from)
+        servers.add(to, server)
+        save()
+    }
     Column(Modifier.fillMaxSize()) {
         Heading("artty") { TextButton(onClick = { showingKey = true }) { Text("This phone's key") } }
         LazyColumn(Modifier.weight(1f)) {
-            items(servers) { server ->
-                Column(
+            itemsIndexed(servers) { index, server ->
+                var menu by remember { mutableStateOf(false) }
+                Row(
                     Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 12.dp, vertical = 4.dp)
                         .clip(RoundedCornerShape(10.dp))
                         .background(Panel)
-                        .combinedClickable(onClick = { Session.connect(server) }, onLongClick = { removing = server })
-                        .padding(14.dp),
+                        .combinedClickable(onClick = { Session.connect(server) }, onLongClick = { menu = true })
+                        .padding(start = 14.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(server.name, fontWeight = FontWeight.Medium)
-                    Text(server.address, color = Faint, fontSize = 13.sp)
+                    Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+                        Text(server.name, fontWeight = FontWeight.Medium)
+                        Text(server.address, color = Faint, fontSize = 13.sp)
+                    }
+                    Box {
+                        TextButton(onClick = { menu = true }) { Text("⋯", fontSize = 20.sp, color = Faint) }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(text = { Text("Edit") }, onClick = {
+                                menu = false
+                                editing = true to server
+                            })
+                            if (index > 0) {
+                                DropdownMenuItem(text = { Text("Move up") }, onClick = {
+                                    menu = false
+                                    move(server, -1)
+                                })
+                            }
+                            if (index < servers.lastIndex) {
+                                DropdownMenuItem(text = { Text("Move down") }, onClick = {
+                                    menu = false
+                                    move(server, 1)
+                                })
+                            }
+                            DropdownMenuItem(text = { Text("Remove") }, onClick = {
+                                menu = false
+                                removing = server
+                            })
+                        }
+                    }
                 }
             }
             if (servers.isEmpty()) {
@@ -191,14 +231,15 @@ private fun ServersScreen(store: Store) {
                 }
             }
         }
-        Button(onClick = { adding = true }, modifier = Modifier.fillMaxWidth().padding(12.dp)) { Text("Add a server") }
+        Button(onClick = { editing = true to null }, modifier = Modifier.fillMaxWidth().padding(12.dp)) { Text("Add a server") }
     }
-    if (adding) {
-        AddServerDialog(onDone = { server ->
-            adding = false
+    editing?.let { (_, old) ->
+        ServerDialog(old, onDone = { server ->
+            editing = null
             if (server != null) {
-                servers.add(server)
-                store.saveServers(servers)
+                val at = old?.let { servers.indexOf(it) } ?: -1
+                if (at >= 0) servers[at] = server else servers.add(server)
+                save()
             }
         })
     }
@@ -210,7 +251,7 @@ private fun ServersScreen(store: Store) {
             confirmButton = {
                 TextButton(onClick = {
                     servers.remove(server)
-                    store.saveServers(servers)
+                    save()
                     removing = null
                 }) { Text("Remove") }
             },
@@ -219,23 +260,37 @@ private fun ServersScreen(store: Store) {
     }
 }
 
+/** Adding a server (`old` null), or changing one. */
 @Composable
-private fun AddServerDialog(onDone: (Server?) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    var address by remember { mutableStateOf("") }
-    var artty by remember { mutableStateOf("") }
+private fun ServerDialog(old: Server?, onDone: (Server?) -> Unit) {
+    var name by remember { mutableStateOf(old?.name ?: "") }
+    var address by remember { mutableStateOf(old?.address ?: "") }
+    var artty by remember { mutableStateOf(old?.artty ?: "") }
     val parsed = Server.parse(name, address.trim(), artty.trim())
+    val badAddress = address.isNotBlank() && parsed == null
     AlertDialog(
         onDismissRequest = { onDone(null) },
-        title = { Text("Add a server") },
+        title = { Text(if (old == null) "Add a server" else "Edit ${old.name}") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
-                OutlinedTextField(address, { address = it }, label = { Text("user@host or user@host:port") }, singleLine = true)
+                OutlinedTextField(
+                    address, { address = it },
+                    label = { Text("user@host or user@host:port") },
+                    singleLine = true,
+                    isError = badAddress,
+                    supportingText = if (badAddress) {
+                        { Text("Like me@devbox, or me@devbox:2222") }
+                    } else {
+                        null
+                    },
+                )
                 OutlinedTextField(artty, { artty = it }, label = { Text("artty there (if not on its PATH)") }, singleLine = true)
             }
         },
-        confirmButton = { TextButton(onClick = { onDone(parsed) }, enabled = parsed != null) { Text("Add") } },
+        confirmButton = {
+            TextButton(onClick = { onDone(parsed) }, enabled = parsed != null) { Text(if (old == null) "Add" else "Save") }
+        },
         dismissButton = { TextButton(onClick = { onDone(null) }) { Text("Cancel") } },
     )
 }
