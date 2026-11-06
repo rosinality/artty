@@ -18,9 +18,9 @@ use artty_core::layout::{Axis, PaneId};
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
     ClientMessage, CopyModeOp, FileChunk, Hello, ImageData, Listing, OutputHit, PaneSpec,
-    PaneState, Query, Reply, SearchFound, SelectionOp, ServerMessage, SessionHit, StatusLine,
-    UploadError, UploadTo, Uploaded, WindowId, WindowLayout, WindowSummary, WorkspaceId,
-    protocol_version, read_message, write_message,
+    PaneState, Query, Reply, SearchFound, SelectionOp, ServerExtension, ServerMessage, SessionHit,
+    StatusLine, StatusUpdate, UploadError, UploadTo, Uploaded, WindowId, WindowLayout,
+    WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
 
@@ -110,6 +110,8 @@ pub struct Client {
     images: Arc<Mutex<HashMap<u64, Arc<ImageData>>>>,
     /// The server's build, from its greeting.
     pub server_version: String,
+    /// The extension kinds it sends and reads (see [`Client::supports`]).
+    server_extensions: Vec<String>,
     /// When it last sent anything.
     heard: Arc<Mutex<Instant>>,
     /// Queries waiting for their answers, by id.
@@ -160,9 +162,22 @@ impl Client {
         link: Link,
         app_version: &str,
     ) -> Result<(Client, mpsc::Receiver<Event>), StartError> {
+        Self::start_with(link, app_version, ServerExtension::KINDS)
+    }
+
+    /// [`Client::start`], asking for these extension kinds only (of
+    /// [`ServerExtension::KINDS`]: those it makes events of).
+    pub fn start_with(
+        link: Link,
+        app_version: &str,
+        extensions: &[&str],
+    ) -> Result<(Client, mpsc::Receiver<Event>), StartError> {
         let Link { mut reader, mut writer, keep } = link;
-        let hello =
-            Hello::Attach { version: protocol_version(), app_version: app_version.to_owned() };
+        let hello = Hello::Attach {
+            version: protocol_version(),
+            app_version: app_version.to_owned(),
+            extensions: extensions.iter().map(|&k| k.to_owned()).collect(),
+        };
         let hello = serde_json::to_string(&hello).map_err(|err| err.to_string())?;
         writer
             .write_all(format!("{hello}\n").as_bytes())
@@ -176,6 +191,11 @@ impl Client {
                 server_version
             },
             Ok(_) => return Err("it answered, but not as an artty server".to_owned().into()),
+            Err(err) => return Err(format!("no answer: {err}").into()),
+        };
+        let server_extensions = match read_message::<ServerMessage>(&mut reader) {
+            Ok(ServerMessage::Extensions { kinds }) => kinds,
+            Ok(_) => return Err("it didn't say what it supports".to_owned().into()),
             Err(err) => return Err(format!("no answer: {err}").into()),
         };
 
@@ -218,8 +238,15 @@ impl Client {
                                 Event::Image { id }
                             },
                             ServerMessage::Panes { panes } => Event::Panes(panes),
-                            ServerMessage::Status { window, line } => {
-                                Event::Status { window, line }
+                            // Kinds this build doesn't know are skipped.
+                            ServerMessage::Extension { kind, data } => {
+                                match ServerExtension::decode(&kind, &data) {
+                                    Some(ServerExtension::Status(StatusUpdate {
+                                        window,
+                                        line,
+                                    })) => Event::Status { window, line },
+                                    None => continue,
+                                }
                             },
                             ServerMessage::Bell { pane } => Event::Bell { pane },
                             ServerMessage::DirChanged { pane } => Event::DirChanged { pane },
@@ -289,12 +316,19 @@ impl Client {
             screens,
             images,
             server_version,
+            server_extensions,
             heard,
             pending,
             next_id: AtomicU64::new(1),
             _keep: Mutex::new(keep),
         };
         Ok((client, received))
+    }
+
+    /// The server sends (or reads) extension `kind`: a feature on it can be
+    /// offered.
+    pub fn supports(&self, kind: &str) -> bool {
+        self.server_extensions.iter().any(|k| k == kind)
     }
 
     fn send(&self, message: &ClientMessage) -> Result<(), String> {
@@ -745,4 +779,50 @@ fn forget_unshown(
         images.remove(id);
     }
     gone
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader};
+    use std::os::unix::net::UnixStream;
+
+    use artty_core::protocol::{StatusLine, extension};
+
+    use super::*;
+
+    /// A server of a later build: extensions of kinds this one doesn't know,
+    /// or can't read, are skipped; the rest arrive as ever.
+    #[test]
+    fn unknown_extensions_are_skipped() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut reader = BufReader::new(theirs.try_clone().unwrap());
+            let mut hello = String::new();
+            reader.read_line(&mut hello).unwrap();
+            let Hello::Attach { extensions, .. } = serde_json::from_str(&hello).unwrap();
+            let mut out = theirs;
+            let version = protocol_version();
+            let welcome = ServerMessage::Welcome { version, server_version: "later".into() };
+            let kinds = vec!["status".into(), "later.thing".into()];
+            let status = StatusUpdate { window: 1, line: StatusLine::default() };
+            for message in [
+                welcome,
+                ServerMessage::Extensions { kinds },
+                ServerMessage::Extension { kind: "later.thing".into(), data: vec![1, 2, 3] },
+                ServerMessage::Extension { kind: extension::STATUS.into(), data: vec![0xff] },
+                ServerExtension::Status(status).message(),
+                ServerMessage::Bell { pane: 7 },
+            ] {
+                write_message(&mut out, &message).unwrap();
+            }
+            (extensions, out)
+        });
+        let (client, events) = Client::start(Link::socket(ours).unwrap(), "test").unwrap();
+        let (asked, _out) = server.join().unwrap();
+        assert_eq!(asked, ["status"]);
+        assert!(client.supports("later.thing") && !client.supports("other"));
+        let wait = Duration::from_secs(5);
+        assert!(matches!(events.recv_timeout(wait), Ok(Event::Status { window: 1, .. })));
+        assert!(matches!(events.recv_timeout(wait), Ok(Event::Bell { pane: 7 })));
+    }
 }

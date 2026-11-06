@@ -5,6 +5,28 @@
 //! app connection that then exchanges length-prefixed postcard messages
 //! ([`ClientMessage`] / [`ServerMessage`]); any other [`Request`] is a one-off
 //! control request answered with one JSON line (the `artty` command).
+//!
+//! The messages are the core: both ends must read them alike, so
+//! [`protocol_version`] guards them, and changing one is a breaking release
+//! (every app, server and phone upgraded together). [`ServerMessage::Welcome`]
+//! never changes at all: it's how builds tell each other apart.
+//!
+//! A feature the other end can do without (an older or newer build's) is an
+//! extension instead: a [`ServerMessage::Extension`] or
+//! [`ClientMessage::Extension`] of a kind (a name, see [`extension`]) whose
+//! `data` is that kind's own postcard-encoded payload. A receiver skips
+//! kinds it doesn't know. The app's [`Hello`] lists the kinds it reads; the
+//! server answers its `Welcome` with [`ServerMessage::Extensions`], the
+//! kinds it sends and reads. Neither sends a kind the other didn't list (nor
+//! works one out for it).
+//!
+//! Adding a kind: its name in [`extension`], its payload type, a variant of
+//! [`ServerExtension`] (or a client one) decoding it, the receivers handling
+//! it, and a frozen sample in this file's tests (`extensions_are_frozen`).
+//! Once released a kind's payload never changes, not even by a field added:
+//! builds of every age read it. A change is a new kind (`status.2`), sent
+//! beside the old one for as long as older builds matter. Payload types stay
+//! out of [`protocol_version`], so adding a kind breaks nothing.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -19,8 +41,8 @@ use crate::vt::ansi::Rgb;
 use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
-/// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 21;
+/// core messages); app and server must agree on `protocol_version()`.
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -134,25 +156,9 @@ pub fn protocol_version() -> u32 {
             columns: 66.,
             rows: 67.,
         })),
-        postcard::to_stdvec(&ServerMessage::Status {
-            window: 79,
-            line: StatusLine {
-                left: vec![StatusSegment {
-                    text: "l".into(),
-                    fg: Some(Rgb { r: 80, g: 81, b: 82 }),
-                    bg: None,
-                    bold: true,
-                    dim: true,
-                }],
-                right: vec![StatusSegment {
-                    text: "r".into(),
-                    fg: None,
-                    bg: Some(Rgb { r: 83, g: 84, b: 85 }),
-                    bold: false,
-                    dim: false,
-                }],
-            },
-        }),
+        // The envelopes only: their payloads are frozen on their own.
+        postcard::to_stdvec(&ServerMessage::Extensions { kinds: vec!["e".into()] }),
+        postcard::to_stdvec(&ServerMessage::Extension { kind: "k".into(), data: vec![79] }),
         postcard::to_stdvec(&ClientMessage::Resize {
             pane: 68,
             size: TerminalSize { columns: 69, lines: 70, cell_width: 71, cell_height: 72 },
@@ -182,6 +188,7 @@ pub fn protocol_version() -> u32 {
             pane: 78,
             op: CopyModeOp::Move(CopyMotion::PromptDown),
         }),
+        postcard::to_stdvec(&ClientMessage::Extension { kind: "k".into(), data: vec![80] }),
     ];
     // FNV-1a: the same in every build.
     let mut hash: u32 = 0x811c_9dc5;
@@ -539,6 +546,11 @@ pub enum ClientMessage {
     Control {
         id: u64,
         request: String,
+    },
+    /// An extension (see the module docs); skipped if its kind is unknown.
+    Extension {
+        kind: String,
+        data: Vec<u8>,
     },
 }
 
@@ -942,6 +954,7 @@ pub enum AppCommand {
 /// Server → app.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ServerMessage {
+    /// The first message, in every build alike (never changed).
     Welcome {
         version: u32,
         server_version: String,
@@ -1011,11 +1024,69 @@ pub enum ServerMessage {
     DirChanged {
         pane: PaneId,
     },
-    /// The window's status line changed (see [`crate::status`]).
-    Status {
-        window: WindowId,
-        line: StatusLine,
+    /// Right after `Welcome`: the extension kinds this server sends and
+    /// reads.
+    Extensions {
+        kinds: Vec<String>,
     },
+    /// An extension (see the module docs); skipped if its kind is unknown.
+    Extension {
+        kind: String,
+        data: Vec<u8>,
+    },
+}
+
+/// Extension kinds, each with its payload (frozen once released; see the
+/// module docs).
+pub mod extension {
+    /// Server → app: [`super::StatusUpdate`].
+    pub const STATUS: &str = "status";
+}
+
+/// The server's extensions this build reads, decoded.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerExtension {
+    Status(StatusUpdate),
+}
+
+impl ServerExtension {
+    /// Every kind there is a variant for: what an app handling them all
+    /// lists in its [`Hello`], and what a server sends.
+    pub const KINDS: &[&str] = &[extension::STATUS];
+
+    /// `None` for a kind this build doesn't know, or can't read: skipped.
+    pub fn decode(kind: &str, data: &[u8]) -> Option<Self> {
+        let decoded = match kind {
+            extension::STATUS => postcard::from_bytes(data).map(Self::Status),
+            _ => {
+                log::debug!("skipped an extension of unknown kind {kind:?}");
+                return None;
+            },
+        };
+        decoded.inspect_err(|err| log::debug!("skipped extension {kind:?}: {err}")).ok()
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Status(_) => extension::STATUS,
+        }
+    }
+
+    /// Wrapped for sending.
+    pub fn message(&self) -> ServerMessage {
+        let data = match self {
+            Self::Status(update) => postcard::to_stdvec(update),
+        };
+        ServerMessage::Extension { kind: self.kind().to_owned(), data: data.unwrap_or_default() }
+    }
+}
+
+/// [`extension::STATUS`]: the window's status line changed (see
+/// [`crate::status`]). Frozen, with [`StatusLine`] and [`StatusSegment`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StatusUpdate {
+    pub window: WindowId,
+    pub line: StatusLine,
 }
 
 /// A window's status line, worked out by the server from the `[status]`
@@ -1093,7 +1164,13 @@ pub fn read_message<T: for<'de> Deserialize<'de>>(reader: &mut impl Read) -> io:
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Hello {
-    Attach { version: u32, app_version: String },
+    Attach {
+        version: u32,
+        app_version: String,
+        /// The extension kinds the app reads (none, from older apps).
+        #[serde(default)]
+        extensions: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -1224,5 +1301,75 @@ mod tests {
         };
         assert_eq!(update.mode, 5);
         assert_eq!(update.lines[0].1, line("hi"));
+    }
+
+    /// Extensions are read by builds of every age: their bytes never change.
+    /// A new kind adds its own sample here (and an incompatible change is a
+    /// new kind, with a new sample, never an edit of these).
+    #[test]
+    fn extensions_are_frozen() {
+        let bytes = |message: &ServerMessage| postcard::to_stdvec(message).unwrap();
+        let status = ServerExtension::Status(StatusUpdate {
+            window: 300,
+            line: StatusLine {
+                left: vec![StatusSegment {
+                    text: "l".into(),
+                    fg: Some(Rgb { r: 1, g: 2, b: 3 }),
+                    bg: None,
+                    bold: true,
+                    dim: false,
+                }],
+                right: vec![StatusSegment {
+                    text: "r".into(),
+                    fg: None,
+                    bg: Some(Rgb { r: 4, g: 5, b: 6 }),
+                    bold: false,
+                    dim: true,
+                }],
+            },
+        });
+        let message = status.message();
+        let ServerMessage::Extension { kind, data } = &message else { panic!() };
+        assert_eq!(kind, "status");
+        assert_eq!(data, &FROZEN_STATUS);
+        assert_eq!(ServerExtension::decode(kind, data), Some(status));
+        // The envelopes, each way (core: changed only in a breaking release).
+        assert_eq!(bytes(&message), FROZEN_ENVELOPE);
+        let client = ClientMessage::Extension { kind: "k".into(), data: vec![7] };
+        assert_eq!(postcard::to_stdvec(&client).unwrap(), FROZEN_CLIENT_ENVELOPE);
+        assert_eq!(
+            bytes(&ServerMessage::Extensions { kinds: vec!["status".into()] }),
+            FROZEN_KINDS
+        );
+    }
+
+    /// `status`: window 300, `l` bold in 1,2,3 on the left, `r` dim on
+    /// 4,5,6 on the right.
+    const FROZEN_STATUS: [u8; 22] =
+        [172, 2, 1, 1, 108, 1, 1, 2, 3, 0, 1, 0, 1, 1, 114, 0, 1, 4, 5, 6, 0, 1];
+    /// `ServerMessage::Extension` (variant 18): `status`, then its payload.
+    const FROZEN_ENVELOPE: [u8; 31] = [
+        18, 6, 115, 116, 97, 116, 117, 115, 22, 172, 2, 1, 1, 108, 1, 1, 2, 3, 0, 1, 0, 1, 1, 114,
+        0, 1, 4, 5, 6, 0, 1,
+    ];
+    /// `ClientMessage::Extension` (variant 49): `k`, `[7]`.
+    const FROZEN_CLIENT_ENVELOPE: [u8; 5] = [49, 1, 107, 1, 7];
+    /// `ServerMessage::Extensions` (variant 17): `["status"]`.
+    const FROZEN_KINDS: [u8; 9] = [17, 1, 6, 115, 116, 97, 116, 117, 115];
+
+    #[test]
+    fn unknown_and_unreadable_extensions_are_skipped() {
+        assert_eq!(ServerExtension::decode("nothing.yet", &[1, 2, 3]), None);
+        assert_eq!(ServerExtension::decode(extension::STATUS, &[0xff]), None);
+    }
+
+    #[test]
+    fn hellos_list_extensions_and_older_ones_none() {
+        let old = r#"{"cmd":"attach","version":1,"app_version":"0"}"#;
+        let Hello::Attach { extensions, .. } = serde_json::from_str(old).unwrap();
+        assert!(extensions.is_empty());
+        let new = r#"{"cmd":"attach","version":1,"app_version":"0","extensions":["status"]}"#;
+        let Hello::Attach { extensions, .. } = serde_json::from_str(new).unwrap();
+        assert_eq!(extensions, ["status"]);
     }
 }

@@ -221,6 +221,8 @@ impl Plain {
             version: protocol_version(),
             server_version: SERVER_VERSION.to_owned(),
         });
+        // No status line, nor any other extension.
+        self.send(ServerMessage::Extensions { kinds: Vec::new() });
         loop {
             // Screens waiting: no longer than until they're due.
             let wait = match self.due() {

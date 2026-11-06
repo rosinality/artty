@@ -13,8 +13,9 @@ use std::time::{Duration, Instant, SystemTime};
 use artty_core::control::{Request, Response};
 use artty_core::layout::PaneId;
 use artty_core::protocol::{
-    AppCommand, ClientMessage, Hello, PaneSpec, PaneState, Query, Reply, ServerMessage, WindowId,
-    decode_response, encode_request, read_message, write_message,
+    AppCommand, ClientMessage, Hello, PaneSpec, PaneState, Query, Reply, ServerExtension,
+    ServerMessage, StatusUpdate, WindowId, decode_response, encode_request, read_message,
+    write_message,
 };
 use artty_core::remote::{Login, Prompts};
 use artty_core::vt::term::TermMode;
@@ -434,6 +435,7 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
     let mut hello = serde_json::to_string(&Hello::Attach {
         version: artty_core::protocol::protocol_version(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        extensions: ServerExtension::KINDS.iter().map(|&k| k.to_owned()).collect(),
     })?;
     hello.push('\n');
     let mut writer = stream.try_clone()?;
@@ -690,17 +692,23 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                 view.update(cx, |view, cx| view.set_layout(window, layout, cx));
             }
         },
-        ServerMessage::Status { window, line } => {
-            let statuses = &mut cx.global_mut::<Shared>().statuses;
-            if line.is_empty() {
-                statuses.remove(&window);
-            } else {
-                statuses.insert(window, line);
-            }
-            if let Some(view) = view_for(window, cx) {
-                view.update(cx, |_, cx| cx.notify());
-            }
+        // Kinds this build doesn't know are skipped.
+        ServerMessage::Extension { kind, data } => match ServerExtension::decode(&kind, &data) {
+            Some(ServerExtension::Status(StatusUpdate { window, line })) => {
+                let statuses = &mut cx.global_mut::<Shared>().statuses;
+                if line.is_empty() {
+                    statuses.remove(&window);
+                } else {
+                    statuses.insert(window, line);
+                }
+                if let Some(view) = view_for(window, cx) {
+                    view.update(cx, |_, cx| cx.notify());
+                }
+            },
+            None => {},
         },
+        // What the server sends and reads: every kind the app shows, so far.
+        ServerMessage::Extensions { .. } => {},
         ServerMessage::WindowClosed { window } => {
             cx.global_mut::<Shared>().statuses.remove(&window);
             if let Some(view) =

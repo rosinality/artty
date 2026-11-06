@@ -306,6 +306,7 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
     let hello = serde_json::to_string(&Hello::Attach {
         version: crate::protocol::protocol_version(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
+        extensions: crate::protocol::ServerExtension::KINDS.iter().map(|&k| k.into()).collect(),
     })
     .map_err(|err| err.to_string())?;
     let welcome = writer

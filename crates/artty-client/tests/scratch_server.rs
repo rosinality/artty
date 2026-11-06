@@ -144,6 +144,10 @@ fn link_to(dir: &std::path::Path) -> Link {
     let d = dir.display();
     Link::command(&[
         "env".to_owned(),
+        "-u".to_owned(),
+        "ARTTY_SOCKET".to_owned(),
+        "-u".to_owned(),
+        "ARTTY_SESSION_ID".to_owned(),
         format!("HOME={d}"),
         format!("XDG_STATE_HOME={d}/state"),
         format!("TMPDIR={d}/t/"),
@@ -262,6 +266,27 @@ fn status_lines_come_rendered_and_follow_changes() {
         _ => None,
     });
     let _ = std::fs::remove_file(&dir);
+}
+
+#[test]
+fn status_lines_go_only_to_clients_asking() {
+    let config = "[status]\nright = \"here\"\n";
+    let Some((link, scratch)) = scratch_with(config) else { return };
+    let (without, without_events) = Client::start_with(link, "test", &[]).unwrap();
+    assert!(without.supports("status"));
+    let (window, _) = new_window(&without, &without_events);
+    // Another client, asking, shown the same window: it gets the line.
+    let (with, with_events) = Client::start(link_to(&scratch.0), "test").unwrap();
+    with.attach(Some(window), true).unwrap();
+    until(&with_events, |e| match e {
+        Event::Status { window: w, line } if *w == window && !line.is_empty() => Some(()),
+        _ => None,
+    });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(event) = without_events.recv_timeout(left) else { break };
+        assert!(!matches!(event, Event::Status { .. }), "sent to a client not asking");
+    }
 }
 
 fn stop(dir: &std::path::Path) {

@@ -34,7 +34,8 @@ pub type ClientId = u64;
 pub(crate) enum Input {
     /// A one-off request from the `artty` command; answer on the sender.
     Control(Request, Sender<Response>),
-    Connected(ClientId, Sender<ServerMessage>),
+    /// An app, with the extension kinds it reads.
+    Connected(ClientId, Sender<ServerMessage>, Vec<String>),
     Client(ClientId, ClientMessage),
     Disconnected(ClientId),
     /// Folders watched for apps changed (see `watch`).
@@ -181,8 +182,8 @@ fn serve(stream: UnixStream, id: ClientId, tx: Arc<Inbox>) {
         if line.trim().is_empty() {
             continue;
         }
-        if let Ok(Hello::Attach { .. }) = serde_json::from_str::<Hello>(&line) {
-            return serve_app(reader, writer, id, tx);
+        if let Ok(Hello::Attach { extensions, .. }) = serde_json::from_str::<Hello>(&line) {
+            return serve_app(reader, writer, id, extensions, tx);
         }
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
@@ -208,10 +209,11 @@ fn serve_app(
     mut reader: BufReader<UnixStream>,
     mut writer: UnixStream,
     id: ClientId,
+    extensions: Vec<String>,
     tx: Arc<Inbox>,
 ) {
     let (outgoing, messages) = mpsc::channel::<ServerMessage>();
-    if tx.send(Input::Connected(id, outgoing)).is_err() {
+    if tx.send(Input::Connected(id, outgoing, extensions)).is_err() {
         return;
     }
     WRITERS.fetch_add(1, Ordering::Relaxed);

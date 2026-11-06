@@ -5,7 +5,9 @@
 //! which server they go to.
 
 use artty_core::layout::Node;
-use artty_core::protocol::{AppCommand, ClientMessage, Query, Reply, ServerMessage, WindowLayout};
+use artty_core::protocol::{
+    AppCommand, ClientMessage, Query, Reply, ServerExtension, ServerMessage, WindowLayout,
+};
 
 /// A server's number: 0 is this Mac's, then the configured ones in order.
 pub type ServerId = u8;
@@ -60,9 +62,18 @@ fn tag_layout(server: ServerId, layout: &mut WindowLayout) {
 pub fn incoming(server: ServerId, message: &mut ServerMessage) {
     let tag = |id: &mut u64| *id = tag(server, *id);
     match message {
-        ServerMessage::Attached { window, .. }
-        | ServerMessage::WindowClosed { window }
-        | ServerMessage::Status { window, .. } => tag(window),
+        ServerMessage::Attached { window, .. } | ServerMessage::WindowClosed { window } => {
+            tag(window)
+        },
+        // Known kinds' ids are tagged inside (unknown ones are skipped).
+        ServerMessage::Extension { kind, data } => {
+            if let Some(mut extension) = ServerExtension::decode(kind, data) {
+                match &mut extension {
+                    ServerExtension::Status(update) => tag(&mut update.window),
+                }
+                *message = extension.message();
+            }
+        },
         ServerMessage::Layout { window, layout } => {
             tag(window);
             tag_layout(server, layout);
@@ -110,6 +121,7 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
         },
         ServerMessage::Image(image) => tag(&mut image.id),
         ServerMessage::Welcome { .. }
+        | ServerMessage::Extensions { .. }
         | ServerMessage::Notify { .. }
         | ServerMessage::Control { .. }
         | ServerMessage::Stopping { .. }
@@ -210,7 +222,9 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
         ClientMessage::Control { .. }
         | ClientMessage::Ack { .. }
         | ClientMessage::Ping { .. }
-        | ClientMessage::Appearance { .. } => {},
+        | ClientMessage::Appearance { .. }
+        // No kinds from the app yet (one naming ids is untagged here).
+        | ClientMessage::Extension { .. } => {},
     }
     server
 }
@@ -219,6 +233,23 @@ pub fn outgoing(message: &mut ClientMessage) -> Option<ServerId> {
 mod tests {
     use super::*;
     use artty_core::protocol::{PaneSpec, TabLayout, WorkspaceLayout};
+
+    #[test]
+    fn extensions_from_a_server_are_tagged_inside() {
+        use artty_core::protocol::{StatusLine, StatusUpdate};
+        let update = StatusUpdate { window: 4, line: StatusLine::default() };
+        let mut message = ServerExtension::Status(update).message();
+        incoming(2, &mut message);
+        let ServerMessage::Extension { kind, data } = &message else { panic!() };
+        let Some(ServerExtension::Status(update)) = ServerExtension::decode(kind, data) else {
+            panic!()
+        };
+        assert_eq!(update.window, tag(2, 4));
+        // Unknown kinds go through untouched (and are skipped later).
+        let mut message = ServerMessage::Extension { kind: "later".into(), data: vec![4] };
+        incoming(2, &mut message);
+        assert!(matches!(message, ServerMessage::Extension { data, .. } if data == [4]));
+    }
 
     #[test]
     fn ids_round_trip_through_their_server() {

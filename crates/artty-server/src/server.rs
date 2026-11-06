@@ -15,9 +15,9 @@ use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
     AppCommand, ClientMessage, DirEntry, Existing, FileChunk, Listing, OutputHit, PaneSpec,
-    PaneState, Query, Reply, SelectionOp, ServerMessage, StatusLine, TabLayout, UploadError,
-    UploadTo, Uploaded, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId,
-    WorkspaceLayout,
+    PaneState, Query, Reply, SelectionOp, ServerExtension, ServerMessage, StatusLine, StatusUpdate,
+    TabLayout, UploadError, UploadTo, Uploaded, WORKSPACE_COLORS, WindowId, WindowLayout,
+    WindowSummary, WorkspaceId, WorkspaceLayout, extension,
 };
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
@@ -208,9 +208,16 @@ struct Client {
     pings: bool,
     /// When its user last typed, scrolled or brought a window of it forward.
     last_used: Option<Instant>,
+    /// The extension kinds it reads (its `Hello`'s).
+    extensions: Vec<String>,
 }
 
 impl Client {
+    /// It reads extension `kind`: only then is it sent (or worked out).
+    fn takes(&self, kind: &str) -> bool {
+        self.extensions.iter().any(|k| k == kind)
+    }
+
     /// It's behind on screen updates: send it no more for now.
     fn behind(&self) -> bool {
         self.batches_sent - self.batches_acked >= FRAMES_IN_FLIGHT
@@ -1479,7 +1486,7 @@ impl Server {
                     let _ = reply.send(self.respond(request).unwrap_or_else(Response::error));
                 },
             },
-            Input::Connected(id, tx) => {
+            Input::Connected(id, tx, extensions) => {
                 let build = std::env::current_exe()
                     .map(|exe| artty_core::protocol::build_id(&exe))
                     .unwrap_or_default();
@@ -1487,6 +1494,8 @@ impl Server {
                     version: artty_core::protocol::protocol_version(),
                     server_version: build,
                 });
+                let kinds = ServerExtension::KINDS.iter().map(|&k| k.to_owned()).collect();
+                let _ = tx.send(ServerMessage::Extensions { kinds });
                 self.clients.insert(
                     id,
                     Client {
@@ -1501,6 +1510,7 @@ impl Server {
                         last_heard: Instant::now(),
                         last_used: None,
                         pings: false,
+                        extensions,
                     },
                 );
             },
@@ -1946,6 +1956,10 @@ impl Server {
                 }
             },
             ClientMessage::Ping { id } => self.send(client, ServerMessage::Pong { id }),
+            // No kinds from apps yet.
+            ClientMessage::Extension { kind, .. } => {
+                log::debug!("skipped an extension of unknown kind {kind:?}");
+            },
             ClientMessage::Unwatch { pane } => self.watches.unwatch(client, pane),
             ClientMessage::Reveal { pane, line, column, length } => {
                 if let Some(state) = self.panes.get_mut(&pane) {
@@ -3013,11 +3027,19 @@ impl Server {
     /// Send each app its windows' layouts, pane states and screen updates.
     fn push_updates(&mut self, now: Instant) {
         let infos = self.pane_infos();
-        // Each shown window's status line, worked out once.
+        // The status line of each window shown to an app taking them,
+        // worked out once.
         let mut lines: HashMap<WindowId, StatusLine> = HashMap::new();
+        let takes_status =
+            |c: &ClientId| self.clients.get(c).is_some_and(|c| c.takes(extension::STATUS));
         let shown: Vec<WindowId> = match self.status.is_empty() {
             true => Vec::new(),
-            false => self.windows.iter().filter(|(_, w)| w.shown()).map(|(&id, _)| id).collect(),
+            false => self
+                .windows
+                .iter()
+                .filter(|(_, w)| w.clients.iter().any(takes_status))
+                .map(|(&id, _)| id)
+                .collect(),
         };
         for window in shown {
             let facts = self.status_facts(window);
@@ -3109,12 +3131,14 @@ impl Server {
                 })
                 .collect();
             client.status_sent.retain(|window, _| mine.contains(window));
+            let mine = if client.takes(extension::STATUS) { mine } else { Vec::new() };
             for window in mine {
                 let line = lines.get(&window).cloned().unwrap_or_default();
                 let sent = client.status_sent.get(&window);
                 if sent.unwrap_or(&StatusLine::default()) != &line {
                     client.status_sent.insert(window, line.clone());
-                    messages.push(ServerMessage::Status { window, line });
+                    let update = StatusUpdate { window, line };
+                    messages.push(ServerExtension::Status(update).message());
                 }
             }
             for message in messages {
