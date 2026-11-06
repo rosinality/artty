@@ -523,6 +523,7 @@ object Session : LoginAsker {
             is ClientEvent.Attached -> {
                 val again = (phase as? Phase.Shown)?.window == event.window
                 phase = Phase.Shown(server, event.window)
+                applyAppearance()
                 updateService()
                 focus(true)
                 if (again) onReattached?.invoke()
@@ -558,6 +559,12 @@ object Session : LoginAsker {
             is ClientEvent.Bell -> if (store.bellVibrates) vibrate()
             is ClientEvent.Forwards -> forwards = connection?.let { runCatching { it.forwards() }.getOrNull() } ?: emptyList()
         }
+    }
+
+    /** The chosen colors and cursor, to a plain ssh machine's panes (an artty server keeps the Mac app's). */
+    fun applyAppearance() {
+        if (server?.plain != true) return
+        runCatching { connection?.setAppearance(store.theme, store.cursorShape) }
     }
 
     /** A forward added while connected: started again when the connection is made again. */

@@ -79,6 +79,12 @@ TCP:%h:%p`), or through a Cloudflare Tunnel (`cloudflared access ssh --hostname
 refused, naming it.
 The drawer lists the connection's forwards, and adds more.
 
+A plain ssh machine's colors are chosen in Settings, Terminal: a few
+well-known themes, or a theme file another terminal uses (iTerm2's
+`.itermcolors`, Ghostty's, kitty's, Alacritty's and WezTerm's, Windows
+Terminal's), and the cursor's shape. (An artty server shows the colors the
+Mac app sends it: shared with the Mac, they aren't changed from the phone.)
+
 Settings also has the machines' keys (to forget one that changed for a good
 reason), the terminal's (text size, the volume keys, the keys row's
 characters, a vibrating bell, a plain tab's history), and a backup of it all to

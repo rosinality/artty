@@ -53,7 +53,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import uniffi.artty_android.CursorShape
 import uniffi.artty_android.LogLine
+import uniffi.artty_android.TerminalTheme
+import uniffi.artty_android.builtinThemes
+import uniffi.artty_android.importTheme
 import uniffi.artty_android.checkConfig
 import uniffi.artty_android.clearConnectionLog
 import uniffi.artty_android.connectionLog
@@ -65,7 +72,7 @@ private enum class Page(val title: String, val about: String) {
     Keys("Keys", "This phone's key, and private keys added for the ssh config's IdentityFiles"),
     Config("SSH config", "As ~/.ssh/config: hosts, users, keys, jump hosts, forwards"),
     KnownHosts("Known hosts", "The machines' keys this phone trusts"),
-    Terminal("Terminal", "Text size, the volume keys, the keys row, the bell"),
+    Terminal("Terminal", "Colors, the cursor, text size, the volume keys, the keys row, the bell"),
     Updates("Updates", "Installing new builds from where they're published"),
     Log("Connection log", "What connecting did, step by step: for when it doesn't"),
     Backup("Back up and restore", "Servers, the ssh config, machines' keys and settings, to a file"),
@@ -353,14 +360,82 @@ private fun KnownHostsPage(store: Store) {
 
 // The terminal.
 
+/** A theme's look: its background, a sample in its foreground, its colors. */
+@Composable
+private fun ThemeRow(theme: TerminalTheme, chosen: Boolean, onChoose: () -> Unit, onRemove: (() -> Unit)?) {
+    fun color(rgb: UInt) = Color(0xff000000.toInt() or rgb.toInt())
+    Row(
+        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp).clip(RoundedCornerShape(8.dp))
+            .background(if (chosen) Accent.copy(alpha = 0.25f) else Panel).clickable(onClick = onChoose).padding(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(Modifier.clip(RoundedCornerShape(6.dp)).background(color(theme.background)).padding(horizontal = 8.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("ls", color = color(theme.foreground), fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+            Spacer(Modifier.width(6.dp))
+            for (c in theme.ansi.take(8).drop(1)) Box(Modifier.padding(1.dp).size(10.dp).background(color(c)))
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(theme.name, modifier = Modifier.weight(1f), fontWeight = if (chosen) FontWeight.Medium else FontWeight.Normal)
+        onRemove?.let { TextButton(onClick = it) { Text("✕", color = Faint) } }
+    }
+}
+
 @Composable
 private fun TerminalPage(store: Store) {
+    val context = LocalContext.current
+    val builtIn = remember { builtinThemes() }
+    var imported by remember { mutableStateOf(store.importedThemes) }
+    var chosen by remember { mutableStateOf(store.theme) }
+    var cursor by remember { mutableStateOf(store.cursorShape) }
+    fun choose(theme: TerminalTheme) {
+        chosen = theme
+        store.theme = theme
+        Session.applyAppearance()
+    }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val name = displayName(context, uri) ?: "theme"
+        runCatching { importTheme(name, readText(context, uri) ?: "") }
+            .onSuccess { theme ->
+                imported = imported.filter { it.name != theme.name } + theme
+                store.importedThemes = imported
+                choose(theme)
+            }
+            .onFailure { android.widget.Toast.makeText(context, it.message ?: "Not a theme", android.widget.Toast.LENGTH_LONG).show() }
+    }
     var size by remember { mutableFloatStateOf(store.fontSize) }
     var volume by remember { mutableStateOf(store.volumeKeys) }
     var bell by remember { mutableStateOf(store.bellVibrates) }
     var row by remember { mutableStateOf(store.rowKeys) }
     var scrollback by remember { mutableStateOf(store.scrollback.toString()) }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
+        Section("Colors")
+        Text(
+            "For plain ssh machines. An artty server shows the colors your Mac's artty sends it (shared with the Mac, so not changed from here).",
+            color = Faint, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+        )
+        for (theme in builtIn) ThemeRow(theme, theme == chosen, { choose(theme) }, null)
+        for (theme in imported) {
+            ThemeRow(theme, theme == chosen, { choose(theme) }) {
+                imported = imported - theme
+                store.importedThemes = imported
+                if (theme == chosen) choose(builtIn.first())
+            }
+        }
+        TextButton(onClick = { pick.launch(arrayOf("*/*")) }, modifier = Modifier.padding(horizontal = 8.dp)) {
+            Text("Import a theme file (iTerm2, Ghostty, kitty, Alacritty, WezTerm, Windows Terminal)")
+        }
+        Section("The cursor")
+        Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            for ((shape, label) in listOf(CursorShape.BLOCK to "Block", CursorShape.BAR to "Bar", CursorShape.UNDERLINE to "Underline", CursorShape.HOLLOW to "Hollow")) {
+                TextButton(onClick = {
+                    cursor = shape
+                    store.cursorShape = shape
+                    Session.applyAppearance()
+                }) { Text(label, color = if (cursor == shape) Accent else Faint) }
+            }
+        }
+        Text("When a program doesn't choose one; plain ssh machines.", color = Faint, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 20.dp))
         Section("Text size: ${"%.0f".format(size)}")
         Slider(size, { size = it; store.fontSize = it }, valueRange = 8f..28f, steps = 19, modifier = Modifier.padding(horizontal = 20.dp))
         Text("Pinching the terminal changes it too.", color = Faint, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 20.dp))

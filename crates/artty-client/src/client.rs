@@ -665,6 +665,16 @@ impl Client {
         self.send(&ClientMessage::Resize { pane, size })
     }
 
+    /// The colors and cursor for the server's panes (a server of this app's
+    /// own, the plain ssh stand-in; an artty server takes the Mac app's).
+    pub fn appearance(
+        &self,
+        theme: artty_core::Theme,
+        cursor: artty_core::CursorStyle,
+    ) -> Result<(), String> {
+        self.send(&ClientMessage::Appearance { theme, cursor })
+    }
+
     /// Scroll the pane's history (`lines` up, if positive).
     pub fn scroll(&self, pane: PaneId, lines: i32) -> Result<(), String> {
         self.send(&ClientMessage::Scroll { pane, lines })

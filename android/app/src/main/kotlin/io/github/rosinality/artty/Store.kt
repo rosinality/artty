@@ -6,7 +6,10 @@ import java.io.File
 import java.security.MessageDigest
 import org.json.JSONArray
 import org.json.JSONObject
+import uniffi.artty_android.CursorShape
 import uniffi.artty_android.SshKey
+import uniffi.artty_android.TerminalTheme
+import uniffi.artty_android.builtinThemes
 import uniffi.artty_android.SshSetup
 import uniffi.artty_android.keystorePublicKey
 
@@ -157,6 +160,40 @@ class Store(private val context: Context) {
         get() = prefs.getInt("scrollback", 10_000)
         set(value) = prefs.edit().putInt("scrollback", value).apply()
 
+    // Colors (for plain ssh machines: an artty server keeps the Mac app's).
+
+    private fun json(t: TerminalTheme) = JSONObject()
+        .put("name", t.name).put("foreground", t.foreground.toLong()).put("background", t.background.toLong())
+        .put("cursor", t.cursor.toLong()).put("selection", t.selection.toLong())
+        .put("ansi", JSONArray().apply { t.ansi.forEach { put(it.toLong()) } })
+
+    private fun theme(o: JSONObject) = TerminalTheme(
+        o.getString("name"),
+        o.getLong("foreground").toUInt(),
+        o.getLong("background").toUInt(),
+        o.getLong("cursor").toUInt(),
+        o.getLong("selection").toUInt(),
+        o.getJSONArray("ansi").let { a -> (0 until a.length()).map { a.getLong(it).toUInt() } },
+    )
+
+    /** The colors chosen. */
+    var theme: TerminalTheme
+        get() = prefs.getString("theme", null)?.let { runCatching { theme(JSONObject(it)) }.getOrNull() } ?: builtinThemes().first()
+        set(value) = prefs.edit().putString("theme", json(value).toString()).apply()
+
+    /** Themes imported from files, beside the built-in ones. */
+    var importedThemes: List<TerminalTheme>
+        get() = runCatching {
+            val list = JSONArray(prefs.getString("imported_themes", "[]"))
+            (0 until list.length()).map { theme(list.getJSONObject(it)) }
+        }.getOrDefault(emptyList())
+        set(value) = prefs.edit().putString("imported_themes", JSONArray().apply { value.forEach { put(json(it)) } }.toString()).apply()
+
+    /** The cursor's shape when a program doesn't choose one. */
+    var cursorShape: CursorShape
+        get() = runCatching { CursorShape.valueOf(prefs.getString("cursor_shape", null) ?: "") }.getOrDefault(CursorShape.BLOCK)
+        set(value) = prefs.edit().putString("cursor_shape", value.name).apply()
+
     // Updating.
 
     /** Where new builds are published (publish.sh's folder: `version.json` and the APK). */
@@ -185,7 +222,10 @@ class Store(private val context: Context) {
                     .put("volume_keys", volumeKeys)
                     .put("bell_vibrates", bellVibrates)
                     .put("row_keys", rowKeys)
-                    .put("scrollback", scrollback),
+                    .put("scrollback", scrollback)
+                    .put("theme", json(theme))
+                    .put("imported_themes", JSONArray().apply { importedThemes.forEach { put(json(it)) } })
+                    .put("cursor_shape", cursorShape.name),
             )
             .put("updates_url", updatesUrl ?: "")
         if (withKeys) {
@@ -228,6 +268,11 @@ class Store(private val context: Context) {
             bellVibrates = t.optBoolean("bell_vibrates", bellVibrates)
             rowKeys = t.optString("row_keys", rowKeys)
             scrollback = t.optInt("scrollback", scrollback)
+            t.optJSONObject("theme")?.let { runCatching { theme = theme(it) } }
+            t.optJSONArray("imported_themes")?.let { list ->
+                runCatching { importedThemes = (0 until list.length()).map { theme(list.getJSONObject(it)) } }
+            }
+            runCatching { cursorShape = CursorShape.valueOf(t.optString("cursor_shape")) }
         }
         o.optString("updates_url").takeIf { it.isNotBlank() }?.let { updatesUrl = it }
         var keysAdded = 0

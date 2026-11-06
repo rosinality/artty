@@ -16,6 +16,8 @@ uniffi::setup_scaffolding!();
 
 mod trail;
 pub use trail::{LogLine, clear_connection_log, connection_log};
+mod themes;
+pub use themes::{CursorShape, TerminalTheme, builtin_themes, import_theme};
 
 /// Where to connect, as the app keeps it.
 #[derive(uniffi::Record, Clone)]
@@ -837,6 +839,16 @@ pub enum ForwardKind {
 
 #[uniffi::export]
 impl Connection {
+    /// Colors and the cursor's shape for the panes, on a plain ssh machine
+    /// (an artty server keeps the Mac app's: not to be sent there).
+    pub fn set_appearance(
+        &self,
+        theme: TerminalTheme,
+        cursor: CursorShape,
+    ) -> Result<(), ConnectError> {
+        Ok(self.client.appearance(themes::theme(&theme), themes::cursor(cursor))?)
+    }
+
     /// Its port forwards.
     pub fn forwards(&self) -> Vec<ForwardItem> {
         self.forwards
