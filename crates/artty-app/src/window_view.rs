@@ -3320,6 +3320,7 @@ impl WindowView {
             )
             .when(!app_state::several_servers(cx), |d| d.child(self.sidebar_heading(cx)))
             .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(3.)).overflow_y_scroll().children(rows))
+            .when_some(self.status_row(cx), |d, row| d.child(row))
             .when_some(self.config_error.clone(), |d, error| {
                 d.child(
                     div()
@@ -3341,6 +3342,45 @@ impl WindowView {
                     app_state::restart_server,
                 ))
             })
+    }
+
+    /// The shown window's status line (`[status]`), at the bottom of the
+    /// sidebar: its left part, then its right part on a line of its own,
+    /// to the right; nothing when it's empty.
+    fn status_row(&self, cx: &App) -> Option<gpui::Div> {
+        let line = cx.global::<Shared>().statuses.get(&self.window?)?;
+        let part = |segments: &[artty_core::protocol::StatusSegment]| {
+            let mut text = String::new();
+            let mut styles = Vec::new();
+            for segment in segments {
+                let start = text.len();
+                text.push_str(&segment.text);
+                let style = gpui::HighlightStyle {
+                    color: segment.fg.map(crate::terminal::hsla),
+                    background_color: segment.bg.map(crate::terminal::hsla),
+                    font_weight: segment.bold.then_some(FontWeight::BOLD),
+                    fade_out: segment.dim.then_some(0.5),
+                    ..Default::default()
+                };
+                styles.push((start..text.len(), style));
+            }
+            let text = gpui::StyledText::new(text).with_highlights(styles);
+            div().overflow_hidden().line_clamp(1).text_ellipsis().child(text)
+        };
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .mt_2()
+                .px_2()
+                .pt(px(6.))
+                .border_t_1()
+                .border_color(ui(0xffffff12))
+                .text_size(px(11.5))
+                .text_color(ui(0xffffffa0))
+                .when(!line.left.is_empty(), |d| d.child(part(&line.left)))
+                .when(!line.right.is_empty(), |d| d.child(part(&line.right).flex().justify_end())),
+        )
     }
 
     /// The right-click menu, over a backdrop that dismisses it.

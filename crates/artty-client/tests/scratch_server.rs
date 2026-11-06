@@ -42,6 +42,38 @@ fn scratch() -> Option<(Link, Scratch)> {
     Some((Link::command(&command).unwrap(), Scratch(dir)))
 }
 
+/// A scratch server with this config file (its own config home, and none
+/// of the artty this may run in).
+fn scratch_with(config: &str) -> Option<(Link, Scratch)> {
+    let exe = std::env::current_exe().ok()?;
+    let artty = exe.parent()?.parent()?.join("artty");
+    if !artty.exists() {
+        return None;
+    }
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("artty-client-c{}-{n}", std::process::id()));
+    std::fs::create_dir_all(dir.join("t")).unwrap();
+    std::fs::create_dir_all(dir.join("config/artty")).unwrap();
+    std::fs::write(dir.join("config/artty/config.toml"), config).unwrap();
+    let d = dir.display();
+    let command = [
+        "env".to_owned(),
+        "-u".to_owned(),
+        "ARTTY_SOCKET".to_owned(),
+        "-u".to_owned(),
+        "ARTTY_SESSION_ID".to_owned(),
+        format!("HOME={d}"),
+        format!("XDG_CONFIG_HOME={d}/config"),
+        format!("XDG_STATE_HOME={d}/state"),
+        format!("TMPDIR={d}/t/"),
+        artty.display().to_string(),
+        "server".to_owned(),
+        "--stdio".to_owned(),
+    ];
+    Some((Link::command(&command).unwrap(), Scratch(dir)))
+}
+
 /// Events until `want` takes one; panics after a while.
 fn until<T>(
     events: &std::sync::mpsc::Receiver<Event>,
@@ -196,6 +228,40 @@ fn images_arrive_and_go() {
         let _ = events.recv_timeout(Duration::from_millis(100));
     }
     assert!(client.image(id).is_none(), "still kept");
+}
+
+#[test]
+fn status_lines_come_rendered_and_follow_changes() {
+    let dir = std::env::temp_dir().join(format!("artty-status-value-{}", std::process::id()));
+    std::fs::write(&dir, "one\n").unwrap();
+    let config = format!(
+        "[status]\nleft = \"[{{user}}]\"\nright = \"#[fg=red,bold]n={{cmd:n}} {{nothing}} {{exit}}\"\n\
+         [status.commands.n]\nrun = \"cat '{}'\"\nevery = \"300ms\"\n",
+        dir.display()
+    );
+    let Some((link, _scratch)) = scratch_with(&config) else { return };
+    let (client, events) = Client::start(link, "test").unwrap();
+    let (window, _) = new_window(&client, &events);
+    let text = |segments: &[artty_core::protocol::StatusSegment]| -> String {
+        segments.iter().map(|s| s.text.as_str()).collect()
+    };
+    let line = until(&events, |e| match e {
+        Event::Status { window: w, line } if *w == window && text(&line.right) == "n=one" => {
+            Some(line.clone())
+        },
+        _ => None,
+    });
+    assert!(text(&line.left).starts_with('[') && text(&line.left).ends_with(']'));
+    assert!(line.right.iter().all(|s| s.bold && s.fg.is_some()), "{line:?}");
+    // The command's output changes: so does the line.
+    std::fs::write(&dir, "two\n").unwrap();
+    until(&events, |e| match e {
+        Event::Status { window: w, line } if *w == window => {
+            (text(&line.right) == "n=two").then_some(())
+        },
+        _ => None,
+    });
+    let _ = std::fs::remove_file(&dir);
 }
 
 fn stop(dir: &std::path::Path) {

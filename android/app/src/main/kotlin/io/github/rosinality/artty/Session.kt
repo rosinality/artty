@@ -23,6 +23,7 @@ import uniffi.artty_android.LoginAsker
 import uniffi.artty_android.PaneItem
 import uniffi.artty_android.Prompt
 import uniffi.artty_android.ServerAddress
+import uniffi.artty_android.StatusPiece
 import uniffi.artty_android.TabItem
 import uniffi.artty_android.LinuxBuilds
 import uniffi.artty_android.WindowItem
@@ -96,6 +97,9 @@ object Session : LoginAsker {
         private set
     /** What the shown window's panes are doing, by pane. */
     var panes by mutableStateOf<Map<ULong, PaneItem>>(emptyMap())
+        private set
+    /** The shown window's status line (the server's `[status]`): its left part and its right. */
+    var status by mutableStateOf<Pair<List<StatusPiece>, List<StatusPiece>>>(Pair(emptyList(), emptyList()))
         private set
     /** A pane of the tab chosen in place of its focused one (in a split). */
     var chosenPane by mutableStateOf<ULong?>(null)
@@ -179,6 +183,7 @@ object Session : LoginAsker {
         drop()
         tabs = emptyList()
         panes = emptyMap()
+        status = Pair(emptyList(), emptyList())
         forwards = emptyList()
         added.clear()
         agentAllowed.clear()
@@ -522,6 +527,7 @@ object Session : LoginAsker {
             }
             is ClientEvent.Attached -> {
                 val again = (phase as? Phase.Shown)?.window == event.window
+                if (!again) status = Pair(emptyList(), emptyList())
                 phase = Phase.Shown(server, event.window)
                 applyAppearance()
                 updateService()
@@ -549,6 +555,7 @@ object Session : LoginAsker {
                 }
             }
             is ClientEvent.Panes -> panes = event.panes.associateBy { it.pane }
+            is ClientEvent.Status -> if ((phase as? Phase.Shown)?.window == event.window) status = Pair(event.left, event.right)
             is ClientEvent.Screen -> onScreen?.invoke(event.pane)
             is ClientEvent.Image -> onImage?.invoke(event.id)
             is ClientEvent.DirChanged -> onDirChanged?.invoke(event.pane)

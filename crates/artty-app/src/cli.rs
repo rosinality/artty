@@ -47,14 +47,16 @@ usage:
   artty [-e command [args...]]           open the app (optionally running a command)
 
 a window of the server in this terminal (as tmux attach), here or over ssh:
-  artty attach [WINDOW] [--share | --new] [--prefix KEY]
+  artty attach [WINDOW] [--new] [--prefix KEY]
                [--ssh DESTINATION [--artty PATH] | --remote NAME]
                                          show WINDOW, else the newest window no
-                                         app shows, else a new one (--new: a new
-                                         one anyway; --share: one an app shows,
-                                         too). ctrl-b (or --prefix, or
-                                         $ARTTY_PREFIX) then d detaches, ? lists
-                                         the keys; sessions keep running
+                                         app shows, else the newest one (shared
+                                         with the apps showing it), else a new
+                                         one (--new: a new one anyway; --share
+                                         is taken and does nothing). ctrl-b (or
+                                         --prefix, or $ARTTY_PREFIX) then d
+                                         detaches, ? lists the keys; sessions
+                                         keep running
   artty attach --list [...]              the server's windows
 
 control a running artty. Ids name panes (a tab has one or more); inside
@@ -816,7 +818,7 @@ fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String
 fn attach(args: &[String]) -> Result<i32, String> {
     use artty_client::attach::{self, Ended, KeyPress, Options};
     let mut window = None;
-    let (mut share, mut new, mut list) = (false, false, false);
+    let (mut new, mut list) = (false, false);
     let mut prefix = std::env::var("ARTTY_PREFIX").ok().filter(|p| !p.is_empty());
     let mut server = artty_core::ServerConfig::default();
     let mut remote_name = None;
@@ -824,7 +826,8 @@ fn attach(args: &[String]) -> Result<i32, String> {
     while let Some(arg) = rest.next() {
         let mut value = || rest.next().cloned().ok_or(format!("attach: {arg} needs a value"));
         match arg.as_str() {
-            "--share" => share = true,
+            // Windows are shared anyway (as they once weren't without it).
+            "--share" => {},
             "--new" => new = true,
             "--list" | "-l" => list = true,
             "--prefix" => prefix = Some(value()?),
@@ -887,7 +890,7 @@ fn attach(args: &[String]) -> Result<i32, String> {
         }
         return Ok(0);
     }
-    match attach::run(link, Options { window, share, new, prefix })? {
+    match attach::run(link, Options { window, new, prefix })? {
         Ended::Detached(window) => println!("[detached from window {window}]"),
         Ended::Closed(window) => println!("[window {window} closed]"),
     }

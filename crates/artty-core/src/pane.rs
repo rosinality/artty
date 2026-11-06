@@ -235,6 +235,11 @@ impl Pane {
         self.last_exit = exit;
     }
 
+    /// The last command's exit code (none while one runs).
+    pub fn last_exit(&self) -> Option<i32> {
+        self.last_exit
+    }
+
     pub fn set_agents(&mut self, agents: Arc<[String]>) {
         self.agents = agents;
     }

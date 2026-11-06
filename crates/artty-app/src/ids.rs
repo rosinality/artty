@@ -60,9 +60,9 @@ fn tag_layout(server: ServerId, layout: &mut WindowLayout) {
 pub fn incoming(server: ServerId, message: &mut ServerMessage) {
     let tag = |id: &mut u64| *id = tag(server, *id);
     match message {
-        ServerMessage::Attached { window, .. } | ServerMessage::WindowClosed { window } => {
-            tag(window)
-        },
+        ServerMessage::Attached { window, .. }
+        | ServerMessage::WindowClosed { window }
+        | ServerMessage::Status { window, .. } => tag(window),
         ServerMessage::Layout { window, layout } => {
             tag(window);
             tag_layout(server, layout);

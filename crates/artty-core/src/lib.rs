@@ -20,12 +20,14 @@ pub mod remote;
 mod session;
 mod shell;
 mod state;
+pub mod status;
 mod theme;
 pub mod theme_import;
 
 pub use artty_vt as vt;
 pub use config::{
     Colors, Config, CursorStyle, KeyAction, ResumeCommand, ServerConfig, SidebarStyle,
+    StatusCommand, StatusConfig, parse_duration,
 };
 pub use frame::{
     Frame, FrameCursor, FrameImage, FrameLine, FrameRect, FrameRun, FrameUnderline, UnderlineStyle,

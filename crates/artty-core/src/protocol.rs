@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -134,6 +134,25 @@ pub fn protocol_version() -> u32 {
             columns: 66.,
             rows: 67.,
         })),
+        postcard::to_stdvec(&ServerMessage::Status {
+            window: 79,
+            line: StatusLine {
+                left: vec![StatusSegment {
+                    text: "l".into(),
+                    fg: Some(Rgb { r: 80, g: 81, b: 82 }),
+                    bg: None,
+                    bold: true,
+                    dim: true,
+                }],
+                right: vec![StatusSegment {
+                    text: "r".into(),
+                    fg: None,
+                    bg: Some(Rgb { r: 83, g: 84, b: 85 }),
+                    bold: false,
+                    dim: false,
+                }],
+            },
+        }),
         postcard::to_stdvec(&ClientMessage::Resize {
             pane: 68,
             size: TerminalSize { columns: 69, lines: 70, cell_width: 71, cell_height: 72 },
@@ -992,6 +1011,36 @@ pub enum ServerMessage {
     DirChanged {
         pane: PaneId,
     },
+    /// The window's status line changed (see [`crate::status`]).
+    Status {
+        window: WindowId,
+        line: StatusLine,
+    },
+}
+
+/// A window's status line, worked out by the server from the `[status]`
+/// config: what goes on its left and on its right, in styled pieces.
+/// Empty when there's none to show.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StatusLine {
+    pub left: Vec<StatusSegment>,
+    pub right: Vec<StatusSegment>,
+}
+
+impl StatusLine {
+    pub fn is_empty(&self) -> bool {
+        self.left.is_empty() && self.right.is_empty()
+    }
+}
+
+/// Text in one style; colors `None` are the client's own.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct StatusSegment {
+    pub text: String,
+    pub fg: Option<Rgb>,
+    pub bg: Option<Rgb>,
+    pub bold: bool,
+    pub dim: bool,
 }
 
 /// An image's pixels and how big it's shown.

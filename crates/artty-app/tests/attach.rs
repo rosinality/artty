@@ -28,7 +28,15 @@ impl Scratch {
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("artty-at-{}-{n}", std::process::id()));
         std::fs::create_dir_all(dir.join("t")).unwrap();
+        std::fs::create_dir_all(dir.join("config/artty")).unwrap();
         Scratch(dir)
+    }
+
+    /// With this config file.
+    fn with_config(config: &str) -> Scratch {
+        let scratch = Scratch::new();
+        std::fs::write(scratch.0.join("config/artty/config.toml"), config).unwrap();
+        scratch
     }
 
     /// What `artty` runs with: this home.
@@ -36,6 +44,7 @@ impl Scratch {
         let d = self.0.display();
         vec![
             ("HOME".into(), d.to_string()),
+            ("XDG_CONFIG_HOME".into(), format!("{d}/config")),
             ("XDG_STATE_HOME".into(), format!("{d}/state")),
             ("TMPDIR".into(), format!("{d}/t/")),
             ("ARTTY_PREFIX".into(), String::new()),
@@ -206,18 +215,72 @@ fn another_prefix_copy_mode_and_the_server_going() {
 }
 
 #[test]
-fn windows_shown_elsewhere_are_shared_only_if_asked() {
+fn windows_shown_elsewhere_are_shared() {
     let scratch = Scratch::new();
     let first = scratch.attach(&[]);
     first.until("the status line", |_| first.status().contains(" 1:"));
     let listed = scratch.artty(&["attach", "--list"]);
     let window = listed.split_whitespace().next().unwrap().to_owned();
+    // Asked for by number: shared, saying so.
     let second = scratch.attach(&[&window]);
-    second.until("refused", |s| has(s, "--share shows it here too"));
-    // Shared: the same tabs.
+    second.until("shared", |_| second.status().contains("shared with another app"));
     first.type_text("\x02c");
     first.until("a second tab", |_| first.status().contains(" 2:"));
-    let second = scratch.attach(&[&window, "--share"]);
     second.until("the same tabs", |_| second.status().contains(" 2:"));
     assert_eq!(scratch.artty(&["attach", "--list"]).matches("shown in 2 apps").count(), 1);
+    // `--share` is still taken.
+    let third = scratch.attach(&[&window, "--share"]);
+    third.until("the same tabs", |_| third.status().contains(" 2:"));
+}
+
+#[test]
+fn without_a_window_it_joins_the_one_shown() {
+    let scratch = Scratch::new();
+    let first = scratch.attach(&[]);
+    first.until("the status line", |_| first.status().contains(" 1:"));
+    first.type_text("\x02c");
+    first.until("a second tab", |_| first.status().contains(" 2:"));
+    // As tmux attach: no new window, but the one there is, shared.
+    let second = scratch.attach(&[]);
+    second.until("shared", |_| {
+        second.status().contains("shared with another app") && second.status().contains(" 2:")
+    });
+    let listed = scratch.artty(&["attach", "--list"]);
+    assert_eq!(listed.lines().count(), 1, "{listed}");
+    assert!(listed.contains("shown in 2 apps"), "{listed}");
+    // Unless asked for a new one.
+    let third = scratch.attach(&["--new"]);
+    third.until("a new window", |_| {
+        third.status().contains(" 1:") && !third.status().contains(" 2:")
+    });
+    assert_eq!(scratch.artty(&["attach", "--list"]).lines().count(), 2);
+}
+
+#[test]
+fn the_servers_status_line() {
+    let value = std::env::temp_dir().join(format!("artty-at-value-{}", std::process::id()));
+    std::fs::write(&value, "one\n").unwrap();
+    let scratch = Scratch::with_config(&format!(
+        "[status]\nleft = \"L={{cmd:v}}\"\nright = \"R={{cmd:v}} {{nothing}}\"\n\
+         [status.commands.v]\nrun = \"cat '{}'\"\nevery = \"300ms\"\n",
+        value.display()
+    ));
+    let terminal = scratch.attach(&[]);
+    // The left part after the tabs; the right part once the hint is gone.
+    terminal.until("the left part", |_| {
+        terminal.status().contains("1:") && terminal.status().contains("L=one")
+    });
+    terminal.until("the right part", |_| terminal.status().trim_end().ends_with("R=one"));
+    std::fs::write(&value, "two\n").unwrap();
+    terminal.until("the new value", |_| {
+        let status = terminal.status();
+        status.contains("L=two") && status.trim_end().ends_with("R=two")
+    });
+    // The prefix pressed takes the right side for a moment.
+    terminal.type_text("\x02");
+    terminal.until("the prefix", |_| {
+        terminal.status().contains("ctrl-b") && !terminal.status().contains("R=two")
+    });
+    terminal.type_text("\x02");
+    let _ = std::fs::remove_file(&value);
 }

@@ -63,7 +63,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -76,6 +79,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import uniffi.artty_android.LinkSpan
+import uniffi.artty_android.StatusPiece
 import uniffi.artty_android.checkConfig
 import uniffi.artty_android.resolve
 import uniffi.artty_android.TabItem
@@ -543,6 +547,7 @@ private fun TerminalScreen(store: Store) {
     ) {
         Column(Modifier.fillMaxSize()) {
             TabBar(tab, onTabs = { scope.launch { drawer.open() } }, onFind = { finding = true }, onPaste = paste)
+            StatusRow()
             // Over the terminal (not above it): showing them mustn't resize the pane.
             Box(Modifier.weight(1f).fillMaxWidth()) {
                 AndroidView(factory = { view.also { it.post { it.showKeyboard() } } }, modifier = Modifier.fillMaxSize()) {
@@ -724,6 +729,30 @@ private fun TabBar(tab: TabItem?, onTabs: () -> Unit, onFind: () -> Unit, onPast
         TextButton(onClick = onFind) { Text("⌕", fontSize = 20.sp) }
         // Here, not in the keys row: just after copying, Android's clipboard preview covers that.
         TextButton(onClick = onPaste) { Text("Paste") }
+    }
+}
+
+/** The server's status line for the window, when it has one: its left part, and its right at the end. */
+@Composable
+private fun StatusRow() {
+    val (left, right) = Session.status
+    if (left.isEmpty() && right.isEmpty()) return
+    val plain = Color(0xb0ffffff)
+    Row(Modifier.fillMaxWidth().background(Color(0x0fffffff)).padding(horizontal = 12.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text(styled(left, plain), maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = FontFamily.Monospace, fontSize = 12.sp, modifier = Modifier.weight(1f))
+        Text(styled(right, plain), maxLines = 1, overflow = TextOverflow.Ellipsis, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+    }
+}
+
+private fun styled(pieces: List<StatusPiece>, plain: Color) = buildAnnotatedString {
+    for (piece in pieces) {
+        val fg = piece.fg?.let { Color(0xff000000.toInt() or it.toInt()) } ?: plain
+        val style = SpanStyle(
+            color = if (piece.dim) fg.copy(alpha = fg.alpha * 0.5f) else fg,
+            background = piece.bg?.let { Color(0xff000000.toInt() or it.toInt()) } ?: Color.Unspecified,
+            fontWeight = if (piece.bold) FontWeight.Bold else null,
+        )
+        withStyle(style) { append(piece.text) }
     }
 }
 

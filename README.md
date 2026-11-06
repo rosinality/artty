@@ -116,6 +116,36 @@ type text; the example lists every action. Keys can come in sequences —
 (`key-sequence-timeout` sets a limit), the keys so far shown at the bottom
 of the window meanwhile.
 
+### A status line
+
+`[status]` gives every window a status line, which the server works out and
+every app shows the same: at the bottom of the Mac's sidebar, under the tab
+bar on a phone, and on `artty attach`'s status line (after the tabs, and on
+the right). Templates as tmux's, with the focused pane's values and your
+commands' output:
+
+```toml
+[status]
+left = "{cwd}"
+right = "{git.branch}{git.dirty} #[fg=yellow]⚑{agents.waiting} #[default]{cmd:gpu} {time:%H:%M}"
+
+[status.commands.gpu]
+run = "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader"
+every = "5s"      # 10s if not said
+timeout = "2s"    # 2s if not said; a failing or slow command shows a dim ⚠
+```
+
+The values: `host`, `user`, `cwd`, `git.branch`, `git.dirty` (`*`),
+`command`, `exit` (when not 0), `duration`, `agent`, `agents.waiting`,
+`progress`, `ports`, `time:FORMAT` (strftime's `%H %M %S %d %e %m %Y %y %a %b
+%I %p`) and `cmd:NAME`. `#[fg=COLOR]`, `#[bg=COLOR]`, `#[bold]`, `#[dim]` and
+`#[default]` style what follows. A word whose values are all empty is left
+out with its spaces, so `⚑{agents.waiting}` shows only when an agent waits.
+Commands run in the background, in the focused pane's directory (with
+`ARTTY_CWD` and `ARTTY_PANE`), on the server's machine; their output's first
+line is kept between runs. Without `[status]` there's no status line. Plain
+ssh machines (without artty) have none: it's their server's config that says.
+
 ## Agents
 
 ### Status in the sidebar

@@ -85,6 +85,9 @@ well-known themes, or a theme file another terminal uses (iTerm2's
 Terminal's), and the cursor's shape. (An artty server shows the colors the
 Mac app sends it: shared with the Mac, they aren't changed from the phone.)
 
+A server with a `[status]` in its config shows its status line in a thin
+row under the tab bar (see the main README); a plain ssh machine has none.
+
 Settings also has the machines' keys (to forget one that changed for a good
 reason), the terminal's (text size, the volume keys, the keys row's
 characters, a vibrating bell, a plain tab's history), and a backup of it all to

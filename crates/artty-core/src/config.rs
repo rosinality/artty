@@ -79,6 +79,64 @@ pub struct Config {
     pub key_sequence_timeout: f32,
     /// Other machines' artty servers, shown in the sidebar beside this one's.
     pub servers: Vec<ServerConfig>,
+    /// A status line for each window, worked out by the server.
+    pub status: StatusConfig,
+}
+
+/// `[status]`: what the status line shows, left and right (templates, see
+/// [`crate::status`]), and the commands whose output it can show.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct StatusConfig {
+    pub left: String,
+    pub right: String,
+    /// `{cmd:NAME}`'s commands, by name.
+    pub commands: BTreeMap<String, StatusCommand>,
+}
+
+/// A command whose output's first line a status line shows.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct StatusCommand {
+    /// Run with `sh -c`, in the focused pane's directory.
+    pub run: String,
+    /// How often (`5s`, `500ms`, `2m`); 10 seconds if not said.
+    #[serde(default = "every", deserialize_with = "duration")]
+    pub every: std::time::Duration,
+    /// How long it may take; 2 seconds if not said.
+    #[serde(default = "timeout", deserialize_with = "duration")]
+    pub timeout: std::time::Duration,
+}
+
+fn every() -> std::time::Duration {
+    std::time::Duration::from_secs(10)
+}
+
+fn timeout() -> std::time::Duration {
+    std::time::Duration::from_secs(2)
+}
+
+/// `500ms`, `5s`, `2m`, `1h`; a bare number is seconds.
+pub fn parse_duration(text: &str) -> Option<std::time::Duration> {
+    let text = text.trim();
+    let split = text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let number: f64 = number.parse().ok()?;
+    let seconds = match unit.trim() {
+        "ms" => number / 1000.,
+        "" | "s" => number,
+        "m" => number * 60.,
+        "h" => number * 3600.,
+        _ => return None,
+    };
+    std::time::Duration::try_from_secs_f64(seconds).ok()
+}
+
+fn duration<'de, D: Deserializer<'de>>(d: D) -> Result<std::time::Duration, D::Error> {
+    let text = String::deserialize(d)?;
+    parse_duration(&text).ok_or_else(|| {
+        serde::de::Error::custom(format!("invalid duration {text:?}, expected e.g. \"5s\""))
+    })
 }
 
 /// Another machine's artty server: reached over ssh, or by any command
@@ -351,6 +409,7 @@ impl Default for Config {
             keys: BTreeMap::new(),
             key_sequence_timeout: 0.,
             servers: Vec::new(),
+            status: StatusConfig::default(),
         }
     }
 }
@@ -541,6 +600,24 @@ mod tests {
             assert_eq!(config.cursor_style, style);
         }
         assert!(Config::parse("cursor-style = \"beam\"").is_err());
+    }
+
+    #[test]
+    fn status_commands() {
+        let config = Config::parse(
+            "[status]\nright = \"{cmd:gpu}\"\n[status.commands.gpu]\nrun = \"nvidia-smi\"\nevery = \"5s\"\n\
+             [status.commands.load]\nrun = \"uptime\"\ntimeout = \"500ms\"\n",
+        )
+        .unwrap();
+        let gpu = &config.status.commands["gpu"];
+        assert_eq!((gpu.every.as_secs(), gpu.timeout.as_secs()), (5, 2));
+        let load = &config.status.commands["load"];
+        assert_eq!((load.every.as_secs(), load.timeout.as_millis()), (10, 500));
+        assert!(Config::parse("[status.commands.x]\nrun = \"x\"\nevery = \"often\"").is_err());
+        assert_eq!(parse_duration("2m"), Some(std::time::Duration::from_secs(120)));
+        assert_eq!(parse_duration("1.5"), Some(std::time::Duration::from_millis(1500)));
+        assert_eq!(parse_duration("-1s"), None);
+        assert!(Config::parse("").unwrap().status == StatusConfig::default());
     }
 
     #[test]

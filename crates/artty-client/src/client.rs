@@ -18,9 +18,9 @@ use artty_core::layout::{Axis, PaneId};
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
     ClientMessage, CopyModeOp, FileChunk, Hello, ImageData, Listing, OutputHit, PaneSpec,
-    PaneState, Query, Reply, SearchFound, SelectionOp, ServerMessage, SessionHit, UploadError,
-    UploadTo, Uploaded, WindowId, WindowLayout, WindowSummary, WorkspaceId, protocol_version,
-    read_message, write_message,
+    PaneState, Query, Reply, SearchFound, SelectionOp, ServerMessage, SessionHit, StatusLine,
+    UploadError, UploadTo, Uploaded, WindowId, WindowLayout, WindowSummary, WorkspaceId,
+    protocol_version, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
 
@@ -53,6 +53,11 @@ pub enum Event {
     },
     /// What every pane shown is doing (titles, agents, progress).
     Panes(Vec<PaneState>),
+    /// A window's status line changed (empty: none to show).
+    Status {
+        window: WindowId,
+        line: StatusLine,
+    },
     Bell {
         pane: PaneId,
     },
@@ -213,6 +218,9 @@ impl Client {
                                 Event::Image { id }
                             },
                             ServerMessage::Panes { panes } => Event::Panes(panes),
+                            ServerMessage::Status { window, line } => {
+                                Event::Status { window, line }
+                            },
                             ServerMessage::Bell { pane } => Event::Bell { pane },
                             ServerMessage::DirChanged { pane } => Event::DirChanged { pane },
                             ServerMessage::Notify { title, body, window, pane } => {

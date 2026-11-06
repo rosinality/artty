@@ -15,8 +15,8 @@ use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
     AppCommand, ClientMessage, DirEntry, Existing, FileChunk, Listing, OutputHit, PaneSpec,
-    PaneState, Query, Reply, SelectionOp, ServerMessage, TabLayout, UploadError, UploadTo,
-    Uploaded, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId,
+    PaneState, Query, Reply, SelectionOp, ServerMessage, StatusLine, TabLayout, UploadError,
+    UploadTo, Uploaded, WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId,
     WorkspaceLayout,
 };
 use artty_core::vt::ansi::Progress;
@@ -195,6 +195,8 @@ struct Client {
     sent: HashMap<PaneId, (Frame, Instant)>,
     dirty: HashSet<PaneId>,
     panes_sent: Vec<PaneState>,
+    /// Its windows' status lines as last sent (none: empty).
+    status_sent: HashMap<WindowId, StatusLine>,
     /// Images it has (by id), so each is sent once.
     images_sent: HashSet<u64>,
     /// Batches of screen updates sent, and acknowledged.
@@ -282,6 +284,8 @@ pub(crate) struct Server {
     closed: Vec<ClosedTab>,
     /// Each app's size for each pane it shows (see [`Window::driver`]).
     sizes: HashMap<(ClientId, PaneId), TerminalSize>,
+    /// Windows' status lines, and what goes into them.
+    status: crate::status::Status,
 }
 
 /// A closed tab as saved, and where it was.
@@ -491,6 +495,15 @@ impl Server {
             log::error!("config: {error}");
         }
         let watches = crate::watch::Watches::new(inbox.clone());
+        let status = {
+            let inbox = inbox.clone();
+            crate::status::Status::new(
+                &config.status,
+                Arc::new(move |job, result| {
+                    let _ = inbox.send(Input::Status(job, result));
+                }),
+            )
+        };
         let sink: Arc<dyn Fn(PaneId, Event) + Send + Sync> =
             Arc::new(move |id, event| inbox.pane_event(id, event));
         let now = Instant::now();
@@ -534,6 +547,7 @@ impl Server {
             handover_to: None,
             handed: HashMap::new(),
             closed: Vec::new(),
+            status,
         }
     }
 
@@ -1413,12 +1427,15 @@ impl Server {
         }
         let window = self.window_of(pane);
         for client in self.told_of(Instant::now()) {
-            self.send(client, ServerMessage::Notify {
-                title: title.clone(),
-                body: body.clone(),
-                window,
-                pane: Some(pane),
-            });
+            self.send(
+                client,
+                ServerMessage::Notify {
+                    title: title.clone(),
+                    body: body.clone(),
+                    window,
+                    pane: Some(pane),
+                },
+            );
         }
     }
 
@@ -1477,6 +1494,7 @@ impl Server {
                         sent: HashMap::new(),
                         dirty: HashSet::new(),
                         panes_sent: Vec::new(),
+                        status_sent: HashMap::new(),
                         images_sent: HashSet::new(),
                         batches_sent: 0,
                         batches_acked: 0,
@@ -1491,6 +1509,10 @@ impl Server {
                 for (client, pane) in self.watches.changed(&dirs) {
                     self.send(client, ServerMessage::DirChanged { pane });
                 }
+            },
+            // (Sent with the next updates, if it changed a line.)
+            Input::Status(job, result) => {
+                self.status.finished(job, result);
             },
             Input::Disconnected(id) => {
                 self.clients.remove(&id);
@@ -2880,6 +2902,8 @@ impl Server {
             self.refresh_title(workspace);
         }
         self.sample_usage();
+        let windows = &self.windows;
+        self.status.retain(|window| windows.contains_key(&window));
         let now = Instant::now();
         for run in self.runs.extract_if(.., |run| run.deadline.is_some_and(|d| d <= now)) {
             Self::answer(&self.clients, run.waiter, Response::error("timed out"));
@@ -2896,6 +2920,7 @@ impl Server {
                     self.cursor = config.cursor_style;
                 }
                 self.agents = config.agents.clone().into();
+                self.status.configure(&config.status);
                 for pane in self.panes.values_mut() {
                     pane.session.set_theme(self.theme.clone());
                     pane.session.set_cursor_shape(self.cursor.shape());
@@ -2918,6 +2943,51 @@ impl Server {
                 pane.seen();
             }
         }
+    }
+
+    /// What `window`'s status line shows of its focused pane, and of its panes.
+    fn status_facts(&self, window: WindowId) -> Option<crate::status::Facts> {
+        let id = self.window_focused_pane(window)?;
+        let pane = self.panes.get(&id)?;
+        let state = self.windows.get(&window)?;
+        let panes: Vec<PaneId> = state
+            .workspaces
+            .iter()
+            .filter_map(|w| self.workspaces.get(w))
+            .flat_map(|w| w.tabs.iter().flat_map(|t| t.root.panes()))
+            .collect();
+        let waiting = panes
+            .iter()
+            .filter_map(|p| self.panes.get(p))
+            .filter(|p| matches!(p.status, Status::Agent { state: AgentState::Waiting, .. }))
+            .count();
+        let mut ports: Vec<u16> =
+            panes.iter().filter_map(|p| self.ports.get(p)).flatten().copied().collect();
+        ports.sort_unstable();
+        ports.dedup();
+        let (command, agent) = match &pane.status {
+            Status::Running { command, .. } => (command.clone(), None),
+            Status::Agent { name, .. } => (None, Some(format!("{name} {}", pane.status.label()))),
+            _ => (None, None),
+        };
+        let last = pane.session.last_command();
+        let progress = match pane.progress {
+            Some(Progress::Normal(p) | Progress::Paused(Some(p)) | Progress::Error(Some(p))) => {
+                Some(p)
+            },
+            _ => None,
+        };
+        Some(crate::status::Facts {
+            pane: id,
+            cwd: pane.session.cwd(),
+            command,
+            exit: pane.last_exit(),
+            duration: last.and_then(|c| Some(c.finished? - c.started)),
+            agent,
+            waiting,
+            progress,
+            ports,
+        })
     }
 
     fn pane_state(&self, pane: &Pane, info: TabInfo) -> PaneState {
@@ -2943,6 +3013,16 @@ impl Server {
     /// Send each app its windows' layouts, pane states and screen updates.
     fn push_updates(&mut self, now: Instant) {
         let infos = self.pane_infos();
+        // Each shown window's status line, worked out once.
+        let mut lines: HashMap<WindowId, StatusLine> = HashMap::new();
+        let shown: Vec<WindowId> = match self.status.is_empty() {
+            true => Vec::new(),
+            false => self.windows.iter().filter(|(_, w)| w.shown()).map(|(&id, _)| id).collect(),
+        };
+        for window in shown {
+            let facts = self.status_facts(window);
+            lines.insert(window, self.status.line(window, facts.as_ref(), &self.theme));
+        }
         let client_ids: Vec<ClientId> = self.clients.keys().copied().collect();
         for client_id in client_ids {
             let windows: Vec<(WindowId, WindowLayout, Vec<PaneId>)> = self
@@ -3020,6 +3100,22 @@ impl Server {
             if client.panes_sent != states {
                 client.panes_sent = states.clone();
                 messages.push(ServerMessage::Panes { panes: states });
+            }
+            let mine: Vec<WindowId> = messages
+                .iter()
+                .filter_map(|m| match m {
+                    ServerMessage::Layout { window, .. } => Some(*window),
+                    _ => None,
+                })
+                .collect();
+            client.status_sent.retain(|window, _| mine.contains(window));
+            for window in mine {
+                let line = lines.get(&window).cloned().unwrap_or_default();
+                let sent = client.status_sent.get(&window);
+                if sent.unwrap_or(&StatusLine::default()) != &line {
+                    client.status_sent.insert(window, line.clone());
+                    messages.push(ServerMessage::Status { window, line });
+                }
             }
             for message in messages {
                 let _ = client.tx.send(message);

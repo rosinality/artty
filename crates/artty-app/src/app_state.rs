@@ -199,6 +199,8 @@ pub struct Shared {
     /// Images screens show, by id (decoded off the main thread).
     pub images: HashMap<u64, ShownImage>,
     pub panes: HashMap<PaneId, PaneState>,
+    /// Windows' status lines (`[status]`), those not empty.
+    pub statuses: HashMap<WindowId, artty_core::protocol::StatusLine>,
     /// Visual bells: when each pane last rang.
     pub flashes: HashMap<PaneId, Instant>,
     /// Typing shown before its echo comes back, per pane (see `echo`).
@@ -315,6 +317,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         controls: HashMap::new(),
         screens: HashMap::new(),
         panes: HashMap::new(),
+        statuses: HashMap::new(),
         flashes: HashMap::new(),
         echoes: HashMap::new(),
         windows: HashMap::new(),
@@ -687,7 +690,19 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                 view.update(cx, |view, cx| view.set_layout(window, layout, cx));
             }
         },
+        ServerMessage::Status { window, line } => {
+            let statuses = &mut cx.global_mut::<Shared>().statuses;
+            if line.is_empty() {
+                statuses.remove(&window);
+            } else {
+                statuses.insert(window, line);
+            }
+            if let Some(view) = view_for(window, cx) {
+                view.update(cx, |_, cx| cx.notify());
+            }
+        },
         ServerMessage::WindowClosed { window } => {
+            cx.global_mut::<Shared>().statuses.remove(&window);
             if let Some(view) =
                 cx.global_mut::<Shared>().windows.remove(&window).and_then(|w| w.upgrade())
             {

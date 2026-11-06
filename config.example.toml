@@ -164,3 +164,34 @@ latest = "gemini --resume latest"
 # [[servers]]
 # name = "Second"
 # command = ["sh", "-c", "mkdir -p /tmp/artty-second && TMPDIR=/tmp/artty-second/ XDG_STATE_HOME=/tmp/artty-second/state exec /Applications/artty.app/Contents/MacOS/artty server --stdio"]
+
+# A status line for each window, worked out by the server (so the same on
+# the Mac, a phone and `artty attach`): at the bottom of the sidebar, under
+# a phone's tab bar, on attach's status line. Empty (the default), there's
+# none. `{name}` puts in a value, of the focused pane of the window's tab:
+#   host, user, cwd (~ for home), git.branch, git.dirty (`*` with changes,
+#   checked every few seconds), command (running), exit (the last one's code,
+#   if not 0), duration (the last command's), agent (`claude waiting`),
+#   agents.waiting (panes of the window whose agent waits for you), progress
+#   (`40%`), ports (what the window's panes listen on, on Linux),
+#   time:FORMAT (%H %M %S %d %e %m %Y %y %a %b %I %p; `{time}` is %H:%M),
+#   cmd:NAME (the first line of [status.commands.NAME]'s output; a dim ⚠ if
+#   it fails or takes too long).
+# `#[fg=COLOR]`, `#[bg=COLOR]`, `#[bold]`, `#[dim]` style what follows, as in
+# tmux (`#[fg=red,bold]`; `#[default]` goes back); colors are the ANSI names
+# (red, brightblue…, in the theme's shades) or "#rrggbb". `{{`, `}}`, `##`
+# are `{`, `}`, `#`. A word (text between spaces) whose values are all empty
+# is left out with the spaces after it (the last one's, before it), so
+# `✘{exit}` shows only after a failure, and nothing leaves a stray space.
+# Changes apply as soon as the file is saved.
+[status]
+# left = "{cwd}"
+# right = "{git.branch}{git.dirty} #[fg=yellow]⚑{agents.waiting} #[default]{cmd:gpu} {time:%H:%M}"
+#
+# A command's output, for `{cmd:gpu}`: run by `sh -c` in the focused pane's
+# directory (with ARTTY_CWD and ARTTY_PANE set), every 10 seconds unless
+# `every` says, stopped after 2 unless `timeout` says.
+# [status.commands.gpu]
+# run = "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader"
+# every = "5s"
+# timeout = "2s"

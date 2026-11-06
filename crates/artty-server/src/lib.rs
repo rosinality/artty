@@ -9,6 +9,7 @@ mod handover;
 mod inbox;
 mod server;
 mod sessions;
+mod status;
 mod watch;
 
 use std::io::{self, BufRead, BufReader, Write};
@@ -38,6 +39,8 @@ pub(crate) enum Input {
     Disconnected(ClientId),
     /// Folders watched for apps changed (see `watch`).
     DirsChanged(Vec<PathBuf>),
+    /// Something a status line shows was found out (see `status`).
+    Status(status::Job, Result<String, String>),
 }
 
 /// Run the server until its last session ends. Fails if another server is

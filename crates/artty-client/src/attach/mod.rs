@@ -1,6 +1,7 @@
 //! A server's window in this terminal, as tmux shows a session: the active
 //! tab's panes as its layout places them, between borders, each drawn from
-//! its screen; a status line with the workspace and its tabs; typing to the
+//! its screen; a status line with the workspace and its tabs (and the
+//! server's `[status]`, after them and on the right); typing to the
 //! focused pane, in its mode; a prefix key (Ctrl-b) for tabs, splits,
 //! focus, zoom, copy mode and leaving; the mouse to focus, select and
 //! scroll. Leaving (detaching) leaves everything running.
@@ -16,8 +17,8 @@ use std::time::{Duration, Instant};
 use artty_core::TerminalSize;
 use artty_core::layout::{self, Axis, Direction, PaneId, Rect};
 use artty_core::protocol::{
-    CopyModeOp, CopyMotion, PaneState, TabLayout, WindowId, WindowLayout, WindowSummary,
-    WorkspaceId, WorkspaceLayout,
+    CopyModeOp, CopyMotion, PaneState, StatusLine, StatusSegment, TabLayout, WindowId,
+    WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
 };
 use artty_core::vt::ansi::{CursorShape, Rgb};
 use artty_core::vt::term::TermMode;
@@ -30,12 +31,10 @@ use crate::{Client, Event, Link, MouseAction, MouseButton, SelectionKind, StartE
 
 /// What to show, and how.
 pub struct Options {
-    /// The window: `None` takes the newest one no app shows (any, with
-    /// `share`), else a new one.
+    /// The window: `None` takes the newest one no app shows, else the
+    /// newest of all, else a new one. One another app shows is shared (its
+    /// panes take the size of the app used last).
     pub window: Option<WindowId>,
-    /// Show a window another app shows too (its panes take the size of the
-    /// one used last).
-    pub share: bool,
     /// A new window, whatever there is.
     pub new: bool,
     /// The key before a command (Ctrl-b).
@@ -99,23 +98,22 @@ fn list(client: &Client, events: &mpsc::Receiver<Event>) -> Result<Vec<WindowSum
 pub fn run(link: Link, options: Options) -> Result<Ended, String> {
     let (client, events) = start(link)?;
     let windows = list(&client, &events)?;
-    let window = match options.window {
-        Some(window) => {
-            let found = windows
+    // As tmux attaches: the window asked for, else the newest one no app
+    // shows, else the newest of all; a new one only if there are none.
+    let newest =
+        |free: bool| windows.iter().filter(|w| !free || w.apps == 0).max_by_key(|w| w.window);
+    let chosen = match options.window {
+        Some(window) => Some(
+            windows
                 .iter()
                 .find(|w| w.window == window)
-                .ok_or(format!("no window {window} (artty attach --list shows them)"))?;
-            if found.apps > 0 && !options.share {
-                return Err(format!(
-                    "window {window} is shown in another app: --share shows it here too"
-                ));
-            }
-            Some(window)
-        },
+                .ok_or(format!("no window {window} (artty attach --list shows them)"))?,
+        ),
         None if options.new => None,
-        None => windows.iter().filter(|w| options.share || w.apps == 0).map(|w| w.window).max(),
+        None => newest(true).or_else(|| newest(false)),
     };
-    client.attach(window, options.share)?;
+    let shared = chosen.is_some_and(|w| w.apps > 0);
+    client.attach(chosen.map(|w| w.window), true)?;
     let deadline = Instant::now() + WAIT;
     let window = loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -142,7 +140,7 @@ pub fn run(link: Link, options: Options) -> Result<Ended, String> {
         let signals = tx.clone();
         term::watch_signals(move |signal| signals.send(Message::Signal(signal)).is_ok())?;
         term::read_input(move |bytes| tx.send(Message::Typed(bytes)).is_ok());
-        let ended = View::new(&client, window, options.prefix).run(&rx);
+        let ended = View::new(&client, window, options.prefix, shared).run(&rx);
         drop(terminal);
         ended
     });
@@ -211,6 +209,8 @@ struct View<'a> {
     decoder: Decoder,
     mode: Mode,
     message: Option<(String, Instant)>,
+    /// The server's status line for the window (`[status]`).
+    status: StatusLine,
     drag: Option<Drag>,
     /// The tab shown, and the one before.
     tab: Option<(WorkspaceId, usize)>,
@@ -224,9 +224,12 @@ struct View<'a> {
 }
 
 impl<'a> View<'a> {
-    fn new(client: &'a Client, window: WindowId, prefix: KeyPress) -> Self {
+    fn new(client: &'a Client, window: WindowId, prefix: KeyPress, shared: bool) -> Self {
         let (columns, lines, cell_width, cell_height) = term::size();
-        let hint = format!("{} ? lists the keys", prefix.describe());
+        let mut hint = format!("{} ? lists the keys", prefix.describe());
+        if shared {
+            hint = format!("shared with another app · {hint}");
+        }
         View {
             client,
             window,
@@ -242,6 +245,7 @@ impl<'a> View<'a> {
             decoder: Decoder::default(),
             mode: Mode::Normal,
             message: Some((hint, Instant::now())),
+            status: StatusLine::default(),
             drag: None,
             tab: None,
             last_tab: None,
@@ -334,6 +338,10 @@ impl<'a> View<'a> {
             },
             Event::Panes(states) => {
                 self.panes = states.into_iter().map(|s| (s.info.id, s)).collect();
+                self.dirty = true;
+            },
+            Event::Status { window, line } if window == self.window => {
+                self.status = line;
                 self.dirty = true;
             },
             Event::WindowClosed { window } if window == self.window => {
@@ -937,16 +945,35 @@ impl<'a> View<'a> {
                 }
             }
         }
-        let right = match (&self.mode, &self.message) {
+        // On the right: the prefix pressed, else something said, else the
+        // server's status line; its left part after the tabs, where there's
+        // room. All cut short to fit.
+        let said = match (&self.mode, &self.message) {
             (Mode::Prefix, _) => Some((format!(" {} ", self.prefix.describe()), strong)),
             (_, Some((text, _))) => Some((format!(" {text} "), bar)),
             _ => None,
         };
-        if let Some((text, style)) = right {
-            let length: usize = text.chars().map(screen::char_width).sum();
-            let room = width.saturating_sub(x + 1);
-            let at = width.saturating_sub(length.min(room));
-            grid.text(at, y, length.min(room), &text, style);
+        let right: Vec<(String, Style)> = match said {
+            Some(said) => vec![said],
+            None if self.status.right.is_empty() => Vec::new(),
+            None => {
+                let mut parts = styled(&self.status.right, bar);
+                parts.push((" ".to_owned(), bar));
+                parts
+            },
+        };
+        let length: usize = right.iter().flat_map(|(t, _)| t.chars()).map(screen::char_width).sum();
+        let room = width.saturating_sub(x + 1);
+        let at = width.saturating_sub(length.min(room));
+        let mut end = at;
+        for (text, style) in right {
+            end += grid.text(end, y, width - end, &text, style);
+        }
+        if !self.status.left.is_empty() && x + 1 < at {
+            let mut left = x + 1;
+            for (text, style) in styled(&self.status.left, bar) {
+                left += grid.text(left, y, at.saturating_sub(left + 1), &text, style);
+            }
         }
         None
     }
@@ -1000,6 +1027,23 @@ impl<'a> View<'a> {
             grid.text(area.x + 2, area.y + 1 + i, width.saturating_sub(4), line, style);
         }
     }
+}
+
+/// A status line's pieces in this terminal's styles: their colors or the
+/// bar's, dimmed toward the background.
+fn styled(segments: &[StatusSegment], bar: Style) -> Vec<(String, Style)> {
+    segments
+        .iter()
+        .map(|segment| {
+            let bg = segment.bg.unwrap_or(bar.bg);
+            let mut fg = segment.fg.unwrap_or(bar.fg);
+            if segment.dim {
+                fg = mix(bg, fg, 0.55);
+            }
+            let style = Style { bold: segment.bold, ..Style::plain(fg, bg) };
+            (segment.text.clone(), style)
+        })
+        .collect()
 }
 
 /// Onto this terminal's clipboard (OSC 52), where it takes that.

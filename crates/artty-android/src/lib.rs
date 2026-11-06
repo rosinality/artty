@@ -289,6 +289,12 @@ pub enum ClientEvent {
     Panes {
         panes: Vec<PaneItem>,
     },
+    /// A window's status line (the server's `[status]`); empty: none.
+    Status {
+        window: u64,
+        left: Vec<StatusPiece>,
+        right: Vec<StatusPiece>,
+    },
     /// An image a screen shows arrived: `Connection::image` has it.
     Image {
         id: u64,
@@ -319,6 +325,31 @@ pub enum ClientEvent {
     /// A forward started, stopped, or its connections changed:
     /// `Connection::forwards` has them.
     Forwards,
+}
+
+/// Text of a status line in one style; colors 0xRRGGBB, `None` the app's own.
+#[derive(uniffi::Record)]
+pub struct StatusPiece {
+    pub text: String,
+    pub fg: Option<u32>,
+    pub bg: Option<u32>,
+    pub bold: bool,
+    pub dim: bool,
+}
+
+fn status_pieces(segments: Vec<artty_core::protocol::StatusSegment>) -> Vec<StatusPiece> {
+    let rgb =
+        |c: artty_core::vt::ansi::Rgb| u32::from(c.r) << 16 | u32::from(c.g) << 8 | u32::from(c.b);
+    segments
+        .into_iter()
+        .map(|s| StatusPiece {
+            text: s.text,
+            fg: s.fg.map(rgb),
+            bg: s.bg.map(rgb),
+            bold: s.bold,
+            dim: s.dim,
+        })
+        .collect()
 }
 
 /// Where what happens goes (called off the main thread).
@@ -804,6 +835,11 @@ pub fn connect(
                                 detail: state.short_detail(&state.info.title),
                             })
                             .collect(),
+                    },
+                    Event::Status { window, line } => ClientEvent::Status {
+                        window,
+                        left: status_pieces(line.left),
+                        right: status_pieces(line.right),
                     },
                     Event::Stopping { .. } => continue,
                 };
