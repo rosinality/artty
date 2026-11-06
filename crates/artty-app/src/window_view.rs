@@ -2257,7 +2257,7 @@ impl WindowView {
             .flex()
             .flex_col()
             .gap(px(1.))
-            .py(px(3.))
+            .py(px(5.))
             // Without icons, titles off the box's edge.
             .pl(px(if self.config.sidebar_icons { 4. } else { 8. }))
             .pr_1()
