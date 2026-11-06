@@ -2021,29 +2021,8 @@ impl WindowView {
             })
     }
 
-    /// What a sidebar row shows at its right: the command or agent (not
-    /// its time or state; the icon tells that), an exit code, progress. Not
-    /// what the title already says: shells put the running command in it.
-    fn short_detail(title: &str, state: &PaneState) -> Option<String> {
-        let detail = state.info.detail.as_deref()?;
-        let what = detail.split_once(" · ").map_or(detail, |(what, _)| what);
-        let what = (!title.starts_with(what)).then(|| what.to_owned());
-        match (what, state.progress) {
-            (Some(what), Some(percent)) => Some(format!("{what} · {percent}%")),
-            (None, Some(percent)) => Some(format!("{percent}%")),
-            (what, None) => what,
-        }
-    }
-
     fn urgency(state: Option<&PaneState>) -> u8 {
-        match state.map(|s| s.icon.as_str()) {
-            Some("waiting") => 5,
-            Some("busy") => 4,
-            Some("failed") => 3,
-            Some("done") => 2,
-            Some("attention") => 1,
-            _ => 0,
-        }
+        state.map_or(0, PaneState::urgency)
     }
 
     /// Part of the titlebar: a double click does what System Settings says
@@ -2101,7 +2080,7 @@ impl WindowView {
         let detail = if list {
             None
         } else {
-            focused.and_then(|state| Self::short_detail(&self.tab_title(tab, cx), state))
+            focused.and_then(|state| state.short_detail(&self.tab_title(tab, cx)))
         };
 
         // One line: icon, title, then what it's doing on the right, and a
@@ -2152,7 +2131,7 @@ impl WindowView {
                     let is_focused = id == tab.focused;
                     let title =
                         state.map(|s| s.info.title.clone()).unwrap_or_else(|| "shell".into());
-                    let detail = state.and_then(|state| Self::short_detail(&title, state));
+                    let detail = state.and_then(|state| state.short_detail(&title));
                     let pane_attention = state.is_some_and(|s| s.info.needs_attention);
                     // Without the tab's own line, the first pane's line has its
                     // ⌘N label and close button.

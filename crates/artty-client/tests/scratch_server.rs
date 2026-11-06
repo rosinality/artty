@@ -152,7 +152,9 @@ fn notifications_go_to_the_app_in_use() {
     assert!(mac.key(pane, &Key::parse("enter")).unwrap());
     mac.focus(window, false).unwrap();
     let (w, p) = until(&mac_events, |e| match e {
-        Event::Notify { body, window, pane, .. } if body == "from-the-pane" => Some((*window, *pane)),
+        Event::Notify { body, window, pane, .. } if body == "from-the-pane" => {
+            Some((*window, *pane))
+        },
         _ => None,
     });
     assert_eq!((w, p), (Some(window), Some(pane)));

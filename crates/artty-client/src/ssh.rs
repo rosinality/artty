@@ -429,7 +429,9 @@ fn der_integers(der: &[u8]) -> Option<(&[u8], &[u8])> {
         match *bytes.first()? {
             n if n < 0x80 => Some((n as usize, &bytes[1..])),
             0x81 => Some((*bytes.get(1)? as usize, bytes.get(2..)?)),
-            0x82 => Some(((*bytes.get(1)? as usize) << 8 | *bytes.get(2)? as usize, bytes.get(3..)?)),
+            0x82 => {
+                Some(((*bytes.get(1)? as usize) << 8 | *bytes.get(2)? as usize, bytes.get(3..)?))
+            },
             _ => None,
         }
     }

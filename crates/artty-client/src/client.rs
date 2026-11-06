@@ -16,7 +16,7 @@ use artty_core::keys::Key;
 use artty_core::layout::PaneId;
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
-    ClientMessage, Hello, PaneState, Query, Reply, SelectionOp, ServerMessage, WindowId,
+    ClientMessage, Hello, PaneSpec, PaneState, Query, Reply, SelectionOp, ServerMessage, WindowId,
     WindowLayout, WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
@@ -104,7 +104,9 @@ pub struct Client {
 pub enum StartError {
     /// It runs another artty build, whose messages this one can't read: the
     /// fix is the same build on both ends.
-    AnotherBuild { server_version: String },
+    AnotherBuild {
+        server_version: String,
+    },
     Failed(String),
 }
 
@@ -379,6 +381,46 @@ impl Client {
     /// Show a workspace's tab.
     pub fn select_tab(&self, workspace: WorkspaceId, tab: usize) -> Result<(), String> {
         self.send(&ClientMessage::SelectTab { workspace, tab })
+    }
+
+    /// A new tab (a shell) at the end of `workspace`, or of the window's
+    /// active one.
+    pub fn new_tab(&self, window: WindowId, workspace: Option<WorkspaceId>) -> Result<(), String> {
+        self.send(&ClientMessage::NewTab { window, workspace, spec: PaneSpec::default() })
+    }
+
+    /// Close a tab: its programs stop.
+    pub fn close_tab(&self, workspace: WorkspaceId, tab: usize) -> Result<(), String> {
+        self.send(&ClientMessage::CloseTab { workspace, tab })
+    }
+
+    /// Name a tab (`None`: back to what its programs say).
+    pub fn rename_tab(
+        &self,
+        workspace: WorkspaceId,
+        tab: usize,
+        title: Option<String>,
+    ) -> Result<(), String> {
+        self.send(&ClientMessage::RenameTab { workspace, tab, title })
+    }
+
+    /// A workspace with a shell, after the window's others.
+    pub fn new_workspace(&self, window: WindowId, name: Option<String>) -> Result<(), String> {
+        self.send(&ClientMessage::NewWorkspace { window, name, spec: PaneSpec::default() })
+    }
+
+    /// Name a workspace (`None`: back to its directory's or repository's).
+    pub fn rename_workspace(
+        &self,
+        workspace: WorkspaceId,
+        name: Option<String>,
+    ) -> Result<(), String> {
+        self.send(&ClientMessage::RenameWorkspace { workspace, name })
+    }
+
+    /// Close a workspace, every tab in it.
+    pub fn close_workspace(&self, workspace: WorkspaceId) -> Result<(), String> {
+        self.send(&ClientMessage::CloseWorkspace { workspace })
     }
 
     /// A pane's screen as last sent.

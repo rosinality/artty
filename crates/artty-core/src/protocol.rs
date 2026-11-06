@@ -816,6 +816,35 @@ pub struct PaneState {
     pub ports: Vec<u16>,
 }
 
+impl PaneState {
+    /// What a sidebar row shows beside a tab's title: the command or agent
+    /// (not its time or state; the icon tells that), an exit code, progress.
+    /// Not what the title already says: shells put the running command in it.
+    pub fn short_detail(&self, title: &str) -> Option<String> {
+        let detail = self.info.detail.as_deref()?;
+        let what = detail.split_once(" · ").map_or(detail, |(what, _)| what);
+        let what = (!title.starts_with(what)).then(|| what.to_owned());
+        match (what, self.progress) {
+            (Some(what), Some(percent)) => Some(format!("{what} · {percent}%")),
+            (None, Some(percent)) => Some(format!("{percent}%")),
+            (what, None) => what,
+        }
+    }
+
+    /// How much a tab with this pane wants the user, for showing the most
+    /// urgent of its panes: waiting, busy, failed, done, attention, nothing.
+    pub fn urgency(&self) -> u8 {
+        match self.icon.as_str() {
+            "waiting" => 5,
+            "busy" => 4,
+            "failed" => 3,
+            "done" => 2,
+            "attention" => 1,
+            _ => 0,
+        }
+    }
+}
+
 /// A screen update: everything but the lines, plus the lines that changed.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FrameUpdate {

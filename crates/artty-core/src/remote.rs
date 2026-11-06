@@ -485,7 +485,8 @@ mod tests {
 
     #[test]
     fn what_a_failed_command_said() {
-        let fish = "fish: Unknown command: ldd\nfish: \nuname -sm; ldd --version 2>&1\n           ^~^\n";
+        let fish =
+            "fish: Unknown command: ldd\nfish: \nuname -sm; ldd --version 2>&1\n           ^~^\n";
         assert_eq!(last_said(fish).as_deref(), Some("fish: Unknown command: ldd"));
         let bash = "bash: line 1: ldd: command not found\n";
         assert_eq!(last_said(bash).as_deref(), Some("bash: line 1: ldd: command not found"));

@@ -31,14 +31,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -50,6 +54,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -64,13 +69,14 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.launch
 import uniffi.artty_android.TabItem
 
-private val Background = Color(0xff161a22)
-private val Panel = Color(0xff1e2430)
-private val Ink = Color(0xffd8dee9)
-private val Faint = Color(0x99d8dee9)
-private val Accent = Color(0xff7aa2f7)
+internal val Background = Color(0xff161a22)
+internal val Panel = Color(0xff1e2430)
+internal val Ink = Color(0xffd8dee9)
+internal val Faint = Color(0x99d8dee9)
+internal val Accent = Color(0xff7aa2f7)
 
 class MainActivity : ComponentActivity() {
     private lateinit var store: Store
@@ -435,74 +441,84 @@ private fun TerminalScreen() {
         }
     }
     val tab = Session.activeTab
-    val reconnecting = (Session.phase as? Phase.Shown)?.reconnecting
-    Column(Modifier.fillMaxSize()) {
-        TabBar(tab, onPaste = paste)
-        // Over the terminal (not above it): showing them mustn't resize the pane.
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            AndroidView(factory = { view.also { it.post { it.showKeyboard() } } }, modifier = Modifier.fillMaxSize()) {
-                it.pane = Session.pane
-            }
-            Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
-                // The last screen stays meanwhile; typing waits for the connection.
-                if (reconnecting != null) {
-                    Row(
-                        Modifier.fillMaxWidth().background(Color(0x33e0af68)).padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xffe0af68))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Reconnecting… ($reconnecting)", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
+    val shown = Session.phase as? Phase.Shown
+    val reconnecting = shown?.reconnecting
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    ModalNavigationDrawer(
+        drawerState = drawer,
+        // Opened by its button: a swipe from the edge belongs to the terminal (and its programs).
+        gesturesEnabled = drawer.isOpen,
+        drawerContent = { TabsDrawer(shown?.server?.name ?: "") { scope.launch { drawer.close() } } },
+    ) {
+        Column(Modifier.fillMaxSize()) {
+            TabBar(tab, onTabs = { scope.launch { drawer.open() } }, onPaste = paste)
+            // Over the terminal (not above it): showing them mustn't resize the pane.
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                AndroidView(factory = { view.also { it.post { it.showKeyboard() } } }, modifier = Modifier.fillMaxSize()) {
+                    it.pane = Session.pane
                 }
-                // Something selected: copy it, or let it go.
-                if (selected) {
-                    Row(
-                        Modifier.fillMaxWidth().background(Panel).padding(horizontal = 8.dp, vertical = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("Drag to select more", color = Faint, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                        KeyButton("Copy") {
-                            view.copy { text ->
-                                if (text != null) {
-                                    clipboard.setPrimaryClip(ClipData.newPlainText("artty", text))
-                                    // Android 13 and later say so themselves.
-                                    if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+                    // The last screen stays meanwhile; typing waits for the connection.
+                    if (reconnecting != null) {
+                        Row(
+                            Modifier.fillMaxWidth().background(Color(0x33e0af68)).padding(horizontal = 12.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xffe0af68))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Reconnecting… ($reconnecting)", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    // Something selected: copy it, or let it go.
+                    if (selected) {
+                        Row(
+                            Modifier.fillMaxWidth().background(Panel).padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Drag to select more", color = Faint, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            KeyButton("Copy") {
+                                view.copy { text ->
+                                    if (text != null) {
+                                        clipboard.setPrimaryClip(ClipData.newPlainText("artty", text))
+                                        // Android 13 and later say so themselves.
+                                        if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                                    }
                                 }
                             }
+                            KeyButton("Clear") { view.clearSelection() }
                         }
-                        KeyButton("Clear") { view.clearSelection() }
                     }
                 }
             }
-        }
-        Row(
-            Modifier.fillMaxWidth().background(Panel).horizontalScroll(rememberScrollState()).padding(4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            // The keyboard (a tap on a program that takes the mouse clicks instead).
-            KeyButton("⌨") { view.showKeyboard() }
-            // Touches select, even where the program takes the mouse.
-            KeyButton("Select", on = selectMode) {
-                selectMode = !selectMode
-                view.selectMode = selectMode
+            Row(
+                Modifier.fillMaxWidth().background(Panel).horizontalScroll(rememberScrollState()).padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                // The keyboard (a tap on a program that takes the mouse clicks instead).
+                KeyButton("⌨") { view.showKeyboard() }
+                // Touches select, even where the program takes the mouse.
+                KeyButton("Select", on = selectMode) {
+                    selectMode = !selectMode
+                    view.selectMode = selectMode
+                }
+                KeyButton("Esc") { view.key("escape") }
+                KeyButton("Tab") { view.key("tab") }
+                KeyButton("Ctrl", on = ctrl) {
+                    ctrl = !ctrl
+                    view.ctrl = ctrl
+                }
+                KeyButton("Alt", on = alt) {
+                    alt = !alt
+                    view.alt = alt
+                }
+                KeyButton("←") { view.key("left") }
+                KeyButton("↓") { view.key("down") }
+                KeyButton("↑") { view.key("up") }
+                KeyButton("→") { view.key("right") }
+                for (c in listOf("|", "-", "/", "~", "_")) KeyButton(c) { view.type(c) }
             }
-            KeyButton("Esc") { view.key("escape") }
-            KeyButton("Tab") { view.key("tab") }
-            KeyButton("Ctrl", on = ctrl) {
-                ctrl = !ctrl
-                view.ctrl = ctrl
-            }
-            KeyButton("Alt", on = alt) {
-                alt = !alt
-                view.alt = alt
-            }
-            KeyButton("←") { view.key("left") }
-            KeyButton("↓") { view.key("down") }
-            KeyButton("↑") { view.key("up") }
-            KeyButton("→") { view.key("right") }
-            for (c in listOf("|", "-", "/", "~", "_")) KeyButton(c) { view.type(c) }
         }
     }
     pasting?.let { text ->
@@ -522,34 +538,22 @@ private fun TerminalScreen() {
 }
 
 @Composable
-private fun TabBar(tab: TabItem?, onPaste: () -> Unit) {
-    var open by remember { mutableStateOf(false) }
+private fun TabBar(tab: TabItem?, onTabs: () -> Unit, onPaste: () -> Unit) {
     Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { Session.disconnect() }) { Text("‹", fontSize = 20.sp) }
-        Box(Modifier.weight(1f)) {
-            Text(
-                tab?.let { "${it.workspaceName} · ${it.title.ifBlank { "shell" }}" } ?: "",
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.combinedClickableCompat { open = true }.padding(8.dp),
-            )
-            DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-                for (item in Session.tabs) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                "${item.workspaceName} · ${item.title.ifBlank { "shell" }}",
-                                color = if (item.active) Accent else Ink,
-                            )
-                        },
-                        onClick = {
-                            open = false
-                            Session.selectTab(item)
-                        },
-                    )
-                }
+        // The workspaces and tabs; a dot when another tab wants you.
+        Box {
+            TextButton(onClick = onTabs) { Text("☰", fontSize = 18.sp) }
+            if (othersWaiting()) {
+                Box(Modifier.align(Alignment.TopEnd).padding(top = 10.dp, end = 10.dp).size(8.dp).clip(CircleShape).background(Color(0xffe0af68)))
             }
         }
+        Text(
+            tab?.let { "${it.workspaceName} · ${Session.title(it)}" } ?: "",
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).combinedClickableCompat(onTabs).padding(8.dp),
+        )
         // A split tab: its panes, one at a time.
         if (tab != null && tab.panes.size > 1) {
             for ((i, pane) in tab.panes.withIndex()) {

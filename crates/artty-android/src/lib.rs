@@ -26,10 +26,14 @@ pub struct ServerAddress {
 /// What went wrong.
 #[derive(Debug, uniffi::Error)]
 pub enum ConnectError {
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
     /// It runs another artty build (`server_version`), whose messages this
     /// app can't read: [`install`] puts this app's there.
-    AnotherBuild { server_version: String },
+    AnotherBuild {
+        server_version: String,
+    },
 }
 
 impl std::fmt::Display for ConnectError {
@@ -106,15 +110,36 @@ pub enum MouseAction {
 #[derive(uniffi::Record, Clone)]
 pub struct TabItem {
     pub workspace: u64,
+    /// Its name, or (`workspace_named` false) its directory's or repository's.
     pub workspace_name: String,
+    pub workspace_named: bool,
+    /// One of the workspace colors (`red`, `orange`, …), if it has one.
+    pub workspace_color: Option<String>,
     /// Its place in its workspace.
     pub index: u32,
+    /// The name given it; empty for none (its focused pane's title is shown).
     pub title: String,
     /// Its panes, and the one focused.
     pub panes: Vec<u64>,
     pub focused: u64,
     /// The one the window shows.
     pub active: bool,
+}
+
+/// What a pane is doing, for the tabs drawer.
+#[derive(uniffi::Record)]
+pub struct PaneItem {
+    pub pane: u64,
+    /// What its programs call it (a tab without a name shows its focused pane's).
+    pub title: String,
+    /// `busy`, `waiting`, `done`, `failed`, `attention`, or empty.
+    pub icon: String,
+    /// How much it wants the user (waiting most): a tab shows its most urgent pane's icon.
+    pub urgency: u8,
+    /// The agent running in it (`claude`, `codex`), if any.
+    pub agent: Option<String>,
+    /// The command or agent, an exit code, progress (not what the title says).
+    pub detail: Option<String>,
 }
 
 /// A window of the server's, as listed to choose from.
@@ -140,6 +165,10 @@ pub enum ClientEvent {
     },
     WindowClosed {
         window: u64,
+    },
+    /// What the shown window's panes are doing (all of them, each time).
+    Panes {
+        panes: Vec<PaneItem>,
     },
     /// A pane's screen changed: `Connection::screen` has it.
     Screen {
@@ -294,6 +323,8 @@ fn tabs(layout: &WindowLayout) -> Vec<TabItem> {
             tabs.push(TabItem {
                 workspace: workspace.id,
                 workspace_name: name.clone(),
+                workspace_named: workspace.name.is_some(),
+                workspace_color: workspace.color.clone(),
                 index: index as u32,
                 title: tab.title.clone().unwrap_or_default(),
                 panes: tab.root.panes(),
@@ -354,7 +385,11 @@ fn credentials(
         }],
         _ => Vec::new(),
     };
-    Ok(Credentials { agent: false, held, keys: private_key.into_iter().map(|k| (k, None)).collect() })
+    Ok(Credentials {
+        agent: false,
+        held,
+        keys: private_key.into_iter().map(|k| (k, None)).collect(),
+    })
 }
 
 /// The builds of artty for Linux the app carries (its own build).
@@ -458,7 +493,20 @@ pub fn connect(
                         ClientEvent::Notify { title, body, window, pane }
                     },
                     Event::Closed(reason) => ClientEvent::Closed { reason },
-                    Event::Panes(_) | Event::Stopping { .. } => continue,
+                    Event::Panes(panes) => ClientEvent::Panes {
+                        panes: panes
+                            .iter()
+                            .map(|state| PaneItem {
+                                pane: state.info.id,
+                                title: state.info.title.clone(),
+                                icon: state.icon.clone(),
+                                urgency: state.urgency(),
+                                agent: state.agent.clone(),
+                                detail: state.short_detail(&state.info.title),
+                            })
+                            .collect(),
+                    },
+                    Event::Stopping { .. } => continue,
                 };
                 events.event(event);
             }
@@ -507,6 +555,42 @@ impl Connection {
 
     pub fn select_tab(&self, workspace: u64, index: u32) -> Result<(), ConnectError> {
         Ok(self.client.select_tab(workspace, index as usize)?)
+    }
+
+    /// A new tab at the end of `workspace`, or of the window's active one.
+    pub fn new_tab(&self, window: u64, workspace: Option<u64>) -> Result<(), ConnectError> {
+        Ok(self.client.new_tab(window, workspace)?)
+    }
+
+    pub fn close_tab(&self, workspace: u64, index: u32) -> Result<(), ConnectError> {
+        Ok(self.client.close_tab(workspace, index as usize)?)
+    }
+
+    /// `None`: back to what its programs call it.
+    pub fn rename_tab(
+        &self,
+        workspace: u64,
+        index: u32,
+        title: Option<String>,
+    ) -> Result<(), ConnectError> {
+        Ok(self.client.rename_tab(workspace, index as usize, title)?)
+    }
+
+    pub fn new_workspace(&self, window: u64, name: Option<String>) -> Result<(), ConnectError> {
+        Ok(self.client.new_workspace(window, name)?)
+    }
+
+    /// `None`: back to its directory's or repository's name.
+    pub fn rename_workspace(
+        &self,
+        workspace: u64,
+        name: Option<String>,
+    ) -> Result<(), ConnectError> {
+        Ok(self.client.rename_workspace(workspace, name)?)
+    }
+
+    pub fn close_workspace(&self, workspace: u64) -> Result<(), ConnectError> {
+        Ok(self.client.close_workspace(workspace)?)
     }
 
     pub fn screen(&self, pane: u64) -> Option<Screen> {

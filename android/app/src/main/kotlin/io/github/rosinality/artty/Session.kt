@@ -15,6 +15,7 @@ import uniffi.artty_android.ConnectException
 import uniffi.artty_android.Connection
 import uniffi.artty_android.Events
 import uniffi.artty_android.LoginAsker
+import uniffi.artty_android.PaneItem
 import uniffi.artty_android.Prompt
 import uniffi.artty_android.ServerAddress
 import uniffi.artty_android.TabItem
@@ -78,6 +79,9 @@ object Session : LoginAsker {
         private set
     /** The shown window's tabs. */
     var tabs by mutableStateOf<List<TabItem>>(emptyList())
+        private set
+    /** What the shown window's panes are doing, by pane. */
+    var panes by mutableStateOf<Map<ULong, PaneItem>>(emptyMap())
         private set
     /** A pane of the tab chosen in place of its focused one (in a split). */
     var chosenPane by mutableStateOf<ULong?>(null)
@@ -153,6 +157,7 @@ object Session : LoginAsker {
         generation++
         drop()
         tabs = emptyList()
+        panes = emptyMap()
         chosenPane = null
         revealing = null
         question = null
@@ -323,6 +328,46 @@ object Session : LoginAsker {
         runCatching { connection?.selectTab(tab.workspace, tab.index) }
     }
 
+    /** A tab's name: the one given it, else its focused pane's title. */
+    fun title(tab: TabItem): String =
+        tab.title.ifBlank { panes[tab.focused]?.title?.ifBlank { null } ?: "shell" }
+
+    /** The tab's most urgent pane's state (waiting before busy, before done…). */
+    fun state(tab: TabItem): PaneItem? =
+        tab.panes.mapNotNull { panes[it] }.filter { it.urgency > 0u }.maxByOrNull { it.urgency }
+            ?: panes[tab.focused]
+
+    private val window get() = (phase as? Phase.Shown)?.window
+
+    /** A shell in a new tab, at the end of `workspace` (or of the active one). */
+    fun newTab(workspace: ULong? = null) {
+        val window = window ?: return
+        runCatching { connection?.newTab(window, workspace) }
+    }
+
+    fun closeTab(tab: TabItem) {
+        runCatching { connection?.closeTab(tab.workspace, tab.index) }
+    }
+
+    /** `null` or blank: back to what its programs call it. */
+    fun renameTab(tab: TabItem, title: String?) {
+        runCatching { connection?.renameTab(tab.workspace, tab.index, title?.trim()?.ifBlank { null }) }
+    }
+
+    fun newWorkspace(name: String?) {
+        val window = window ?: return
+        runCatching { connection?.newWorkspace(window, name?.trim()?.ifBlank { null }) }
+    }
+
+    /** `null` or blank: back to its directory's or repository's name. */
+    fun renameWorkspace(workspace: ULong, name: String?) {
+        runCatching { connection?.renameWorkspace(workspace, name?.trim()?.ifBlank { null }) }
+    }
+
+    fun closeWorkspace(workspace: ULong) {
+        runCatching { connection?.closeWorkspace(workspace) }
+    }
+
     /** Show `pane` of `window` (a notification about it tapped): its tab, its window first. */
     fun reveal(window: ULong, pane: ULong) {
         if (connection == null) return
@@ -417,6 +462,7 @@ object Session : LoginAsker {
                     runCatching { connection?.listWindows() }
                 }
             }
+            is ClientEvent.Panes -> panes = event.panes.associateBy { it.pane }
             is ClientEvent.Screen -> onScreen?.invoke(event.pane)
             is ClientEvent.Clipboard -> copied?.invoke(event.text)
             is ClientEvent.Closed -> lost(event.reason)
