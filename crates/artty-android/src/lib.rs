@@ -1287,16 +1287,8 @@ pub fn resolve(destination: String, home: String) -> Resolution {
             if !t.identity_files.is_empty() {
                 details.push(format!("IdentityFile {}", t.identity_files.join(", ")));
             }
-            if let Some(tunnel) = ssh::tunnel(t) {
-                let access = if tunnel.service_token.is_some() {
-                    ", with an Access service token"
-                } else {
-                    ""
-                };
-                details.push(format!(
-                    "Through Cloudflare's tunnel at {}{access} (as cloudflared)",
-                    tunnel.hostname
-                ));
+            if let Ok(Some(proxy)) = ssh::proxy(t) {
+                details.push(format!("ProxyCommand, done here: {}", proxy.describe()));
             }
             if t.forward_agent {
                 details.push("ForwardAgent yes".into());

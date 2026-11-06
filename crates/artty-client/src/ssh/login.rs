@@ -15,6 +15,7 @@ use russh::{ChannelMsg, Disconnect, Preferred};
 use super::agent::Agent;
 use super::forward::{Forwards, Kind, RemoteTargets};
 use super::held::HeldSigner;
+use super::proxy::{Proxy, proxy};
 use super::{CONNECT_TIMEOUT, Credentials, HostKey, KnownHosts, Login, Target};
 use crate::ssh_config::{Config, Local, Resolved, StrictHostKeys};
 
@@ -69,16 +70,20 @@ fn hops(
         return Err(format!("{}: jump hosts go round in a loop", resolved.alias));
     }
     if resolved.proxy_jump.is_empty() {
-        // Only cloudflared's (a Cloudflare Tunnel), which is done here.
-        if let Some(command) = &resolved.proxy_command
-            && super::cloudflare::tunnel(resolved).is_none()
-        {
-            return Err(format!(
-                "{}: ProxyCommand ({command}) can't run here; a ProxyJump can do the same",
-                resolved.alias
-            ));
-        }
-        return Ok(Vec::new());
+        // A ProxyCommand through another ssh (`ssh -W`) is a jump host; the
+        // others (a proxy, a tunnel) are opened when connecting.
+        return match proxy(resolved)? {
+            Some(Proxy::Jump { destination, identity, .. }) => {
+                let mut hop = with_user(config.resolve(&destination, local), local)?;
+                if let Some(identity) = identity {
+                    hop.identity_files.insert(0, identity);
+                }
+                let mut out = hops(config, local, &hop, depth + 1)?;
+                out.push(hop);
+                Ok(out)
+            },
+            _ => Ok(Vec::new()),
+        };
     }
     let mut out = Vec::new();
     for (index, hop) in resolved.proxy_jump.iter().enumerate() {
@@ -147,24 +152,40 @@ impl Connection {
                 let connecting = async {
                     // Through the one before (the last logged in to), if any.
                     match last.as_ref() {
-                        // Through a Cloudflare Tunnel (ProxyCommand cloudflared…), or direct.
-                        None => match super::cloudflare::tunnel(resolved) {
-                            Some(tunnel) => {
-                                let stream = super::cloudflare::open(&tunnel)
-                                    .await
-                                    .map_err(|err| russh::Error::IO(std::io::Error::other(err)))?;
-                                client::connect_stream(config, stream, handler).await
-                            },
-                            None => {
-                                let address = (resolved.host_name.as_str(), resolved.port);
-                                client::connect(config, address, handler).await
-                            },
+                        // As its ProxyCommand says (a tunnel, a proxy), or direct.
+                        None => {
+                            let failed = |err: String| russh::Error::IO(std::io::Error::other(err));
+                            match proxy(resolved).map_err(failed)? {
+                                Some(Proxy::Cloudflare(tunnel)) => {
+                                    let stream =
+                                        super::cloudflare::open(&tunnel).await.map_err(failed)?;
+                                    client::connect_stream(config, stream, handler).await
+                                },
+                                Some(
+                                    other @ (Proxy::Socks { .. }
+                                    | Proxy::Http { .. }
+                                    | Proxy::Direct { .. }),
+                                ) => {
+                                    let stream =
+                                        super::proxy::open(&other).await.map_err(failed)?;
+                                    client::connect_stream(config, stream, handler).await
+                                },
+                                Some(Proxy::Jump { .. }) | None => {
+                                    let address = (resolved.host_name.as_str(), resolved.port);
+                                    client::connect(config, address, handler).await
+                                },
+                            }
                         },
                         Some(through) => {
+                            // Where `ssh -W` (as a ProxyCommand) said, else the host.
+                            let to = match proxy(resolved) {
+                                Ok(Some(Proxy::Jump { to, .. })) => to,
+                                _ => (resolved.host_name.clone(), resolved.port),
+                            };
                             let channel = through
                                 .channel_open_direct_tcpip(
-                                    resolved.host_name.as_str(),
-                                    resolved.port.into(),
+                                    to.0.as_str(),
+                                    to.1.into(),
                                     "127.0.0.1",
                                     0,
                                 )
@@ -716,7 +737,8 @@ mod tests {
         let c = config(
             "Host t\n  ProxyJump j1,j2\n  User me\nHost j1\n  ProxyJump bastion\n  User a\n\
              Host j2\n  ProxyJump nowhere\n  User b\nHost bastion\n  HostName b.example\n  User c\n\
-             Host loop\n  ProxyJump loop\n  User d\nHost pc\n  ProxyCommand nc %h %p\n  User e\n",
+             Host loop\n  ProxyJump loop\n  User d\nHost pc\n  ProxyCommand aws ssm start-session --target %h\n  User e\n\
+             Host w\n  ProxyCommand ssh -W %h:%p -l f j1\n  User g\n",
         );
         let local = Local::default();
         let p = plan(&c, &local, "t").unwrap();
@@ -725,6 +747,11 @@ mod tests {
         assert_eq!(hops, ["b.example", "j1", "j2"]);
         assert!(plan(&c, &local, "loop").unwrap_err().contains("loop"));
         assert!(plan(&c, &local, "pc").unwrap_err().contains("ProxyCommand"));
+        // `ssh -W` as a ProxyCommand: a jump host, through its own jumps.
+        let p = plan(&c, &local, "w").unwrap();
+        let hops: Vec<(&str, Option<&str>)> =
+            p.hops.iter().map(|h| (h.host_name.as_str(), h.user.as_deref())).collect();
+        assert_eq!(hops, [("b.example", Some("c")), ("j1", Some("f"))]);
         assert!(plan(&c, &local, "someone-else").unwrap_err().contains("no user"));
         assert_eq!(plan(&c, &local, "x@someone-else").unwrap().target.user.as_deref(), Some("x"));
     }

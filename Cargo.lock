@@ -206,6 +206,7 @@ name = "artty-client"
 version = "0.1.0"
 dependencies = [
  "artty-core",
+ "base64",
  "futures-util",
  "libc",
  "log",

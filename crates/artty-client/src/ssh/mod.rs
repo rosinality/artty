@@ -12,6 +12,7 @@ mod cloudflare;
 mod forward;
 mod held;
 mod login;
+mod proxy;
 mod shells;
 
 use std::path::{Path, PathBuf};
@@ -21,10 +22,11 @@ use std::time::Duration;
 use russh::ChannelMsg;
 use russh::keys::{PublicKey, ssh_key};
 
-pub use cloudflare::{Tunnel, tunnel};
+pub use cloudflare::Tunnel;
 pub use forward::{ForwardState, Forwards, Kind as ForwardKind};
 pub use held::held_public_key;
 pub use login::{Plan, plan};
+pub use proxy::{Proxy, proxy};
 
 use crate::link::{ChunkReader, ChunkWriter, Link};
 use login::Connection;

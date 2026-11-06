@@ -12,12 +12,10 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use crate::ssh_config::{Local, Resolved};
-
 /// The most sent in one WebSocket message.
 const MESSAGE: usize = 4 * 1024;
 
-/// Where a `cloudflared access ssh` command goes.
+/// Where a `cloudflared access ssh` command goes (read by `proxy`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tunnel {
     /// The tunnel's public hostname for the machine's ssh.
@@ -25,46 +23,6 @@ pub struct Tunnel {
     /// Cloudflare Access's service token (client id and secret), if the
     /// command gives one (`--service-token-id`, `--service-token-secret`).
     pub service_token: Option<(String, String)>,
-}
-
-/// The tunnel `resolved`'s `ProxyCommand` reaches, if it is cloudflared's
-/// `access ssh` (its `%` tokens as ssh expands them).
-pub fn tunnel(resolved: &Resolved) -> Option<Tunnel> {
-    let command = resolved.proxy_command.as_deref()?;
-    let words: Vec<&str> =
-        command.split_whitespace().map(|w| w.trim_matches(['"', '\''])).collect();
-    let (program, args) = words.split_first()?;
-    if program.rsplit('/').next() != Some("cloudflared") {
-        return None;
-    }
-    // `access ssh`, maybe after global flags (`--loglevel x`).
-    let at = args.windows(2).position(|w| w == ["access", "ssh"])?;
-    let args = &args[at + 2..];
-    // Flags as Go reads them: `--name value`, `--name=value`, one dash or two.
-    let flag = |names: &[&str]| -> Option<String> {
-        args.iter().enumerate().find_map(|(i, arg)| {
-            let bare = arg.trim_start_matches('-');
-            if !arg.starts_with('-') {
-                return None;
-            }
-            names.iter().find_map(|name| match bare.split_once('=') {
-                Some((n, value)) if n == *name => Some(value.to_owned()),
-                None if bare == *name => args.get(i + 1).map(|v| (*v).to_owned()),
-                _ => None,
-            })
-        })
-    };
-    let local = Local::default();
-    let hostname = resolved.expand(&flag(&["hostname"])?, &local);
-    let hostname = hostname
-        .trim_start_matches("https://")
-        .trim_start_matches("ssh://")
-        .trim_end_matches('/')
-        .to_owned();
-    let id = flag(&["service-token-id", "id"]);
-    let secret = flag(&["service-token-secret", "secret"]);
-    let service_token = id.zip(secret);
-    (!hostname.is_empty()).then_some(Tunnel { hostname, service_token })
 }
 
 /// Open the tunnel: a stream that is the machine's ssh.
@@ -162,47 +120,4 @@ pub(super) async fn open(tunnel: &Tunnel) -> Result<DuplexStream, String> {
         let _ = sink.close().await;
     });
     Ok(ours)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ssh_config::Config;
-
-    fn tunnel_of(config: &str, host: &str) -> Option<Tunnel> {
-        tunnel(&Config::parse(config, &|_| Vec::new()).resolve(host, &Local::default()))
-    }
-
-    #[test]
-    fn cloudflared_commands() {
-        let t = tunnel_of(
-            "Host ssh.example.com\n  ProxyCommand cloudflared access ssh --hostname %h\n",
-            "ssh.example.com",
-        );
-        assert_eq!(t, Some(Tunnel { hostname: "ssh.example.com".into(), service_token: None }));
-        // A path, flags as Go takes them, a service token, a HostName.
-        let t = tunnel_of(
-            "Host box\n  HostName box.example.com\n  ProxyCommand /opt/homebrew/bin/cloudflared --loglevel warn access ssh -hostname=%h --service-token-id ID --service-token-secret=SECRET\n",
-            "box",
-        )
-        .unwrap();
-        assert_eq!(t.hostname, "box.example.com");
-        assert_eq!(t.service_token, Some(("ID".into(), "SECRET".into())));
-        assert_eq!(
-            tunnel_of(
-                "Host x\n  ProxyCommand cloudflared access ssh --hostname https://ssh.x.io/\n",
-                "x"
-            )
-            .unwrap()
-            .hostname,
-            "ssh.x.io"
-        );
-        // Not cloudflared's ssh: not a tunnel.
-        assert_eq!(tunnel_of("Host x\n  ProxyCommand nc %h %p\n", "x"), None);
-        assert_eq!(
-            tunnel_of("Host x\n  ProxyCommand cloudflared access tcp --hostname %h\n", "x"),
-            None
-        );
-        assert_eq!(tunnel_of("Host x\n  ProxyCommand cloudflared access ssh\n", "x"), None);
-    }
 }
