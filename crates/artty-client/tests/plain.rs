@@ -237,7 +237,7 @@ fn over_ssh() {
         },
         Err(_) => Credentials::usual(),
     };
-    let link = ssh::shells(&plan, &credentials, known, Arc::new(Known)).unwrap();
+    let (link, forwards) = ssh::shells(&plan, &credentials, known, Arc::new(Known)).unwrap();
     let (client, events) = Client::start(link, "test").unwrap();
     client.attach(Some(plain::WINDOW), true).unwrap();
     let pane = until(&events, |e| match e {
@@ -267,5 +267,75 @@ fn over_ssh() {
     }
     assert!(client.silent_for() < pinged.elapsed(), "no answer");
     eprintln!("answered in {:?}", pinged.elapsed() - client.silent_for());
+    if std::env::var_os("ARTTY_PLAIN_FORWARDS").is_some() {
+        forwarding(&forwards);
+    }
     client.input(pane, b"exit\r".to_vec()).unwrap();
+}
+
+/// Each kind of forward to an echo server here: `-L` and `-D` listen here,
+/// `-R` there (the server is this machine, so its port is reached here too).
+fn forwarding(forwards: &artty_client::ssh::Forwards) {
+    use artty_client::ssh::ForwardKind;
+    use artty_client::ssh_config::Forward;
+    use std::net::{TcpListener, TcpStream};
+    let echo = TcpListener::bind("127.0.0.1:0").unwrap();
+    let echo_port = echo.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in echo.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let mut reader = stream.try_clone().unwrap();
+                let _ = std::io::copy(&mut reader, &mut stream);
+            });
+        }
+    });
+    let to = Some(("127.0.0.1".to_owned(), echo_port));
+    let local =
+        forwards.add(ForwardKind::Local, Forward { bind: None, port: 0, to: to.clone() }, false);
+    let dynamic =
+        forwards.add(ForwardKind::Dynamic, Forward { bind: None, port: 0, to: None }, false);
+    let remote = forwards.add(ForwardKind::Remote, Forward { bind: None, port: 0, to }, false);
+    let listening = |id: u64| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let state = forwards.list().into_iter().find(|s| s.id == id).unwrap();
+            assert_eq!(state.error, None, "{}", state.describe());
+            if let Some(port) = state.listening {
+                return port;
+            }
+            assert!(std::time::Instant::now() < deadline, "{} never listened", state.describe());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let echoes = |mut stream: TcpStream, what: &str| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.write_all(what.as_bytes()).unwrap();
+        let mut back = vec![0; what.len()];
+        stream.read_exact(&mut back).unwrap();
+        assert_eq!(String::from_utf8(back).unwrap(), what);
+    };
+    echoes(TcpStream::connect(("127.0.0.1", listening(local))).unwrap(), "through -L");
+    // SOCKS 5, by name: CONNECT localhost:echo.
+    let mut socks = TcpStream::connect(("127.0.0.1", listening(dynamic))).unwrap();
+    socks.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    socks.write_all(&[5, 1, 0]).unwrap();
+    let mut answer = [0; 2];
+    socks.read_exact(&mut answer).unwrap();
+    assert_eq!(answer, [5, 0]);
+    let mut request = vec![5, 1, 0, 3, 9];
+    request.extend_from_slice(b"localhost");
+    request.extend_from_slice(&echo_port.to_be_bytes());
+    socks.write_all(&request).unwrap();
+    let mut reply = [0; 10];
+    socks.read_exact(&mut reply).unwrap();
+    assert_eq!(reply[1], 0, "SOCKS connected");
+    echoes(socks, "through -D");
+    echoes(TcpStream::connect(("127.0.0.1", listening(remote))).unwrap(), "through -R");
+    let total: usize = forwards.list().iter().map(|s| s.total).sum();
+    assert_eq!(total, 2, "-L and -D count their connections");
+    eprintln!("{:?}", forwards.list().iter().map(|s| s.describe()).collect::<Vec<_>>());
+    forwards.stop(local);
+    assert!(TcpStream::connect(("127.0.0.1", listening(dynamic))).is_ok());
+    assert_eq!(forwards.list().len(), 2);
 }

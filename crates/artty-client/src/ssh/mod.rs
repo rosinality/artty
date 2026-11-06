@@ -7,6 +7,7 @@
 //! says meanwhile (a banner, Tailscale's sign-in address) — goes through
 //! [`Login`].
 
+mod forward;
 mod held;
 mod login;
 mod shells;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use russh::ChannelMsg;
 use russh::keys::{PublicKey, ssh_key};
 
+pub use forward::{ForwardState, Forwards, Kind as ForwardKind};
 pub use held::held_public_key;
 pub use login::{Plan, plan};
 
@@ -142,15 +144,17 @@ impl KnownHosts {
 }
 
 /// Log in as `plan` says and run `command` there (`artty server --stdio`,
-/// through the login shell); its stdin and stdout are the link.
+/// through the login shell); its stdin and stdout are the link. Its
+/// forwards (the config's, at first) live as long as the link.
 pub fn connect(
     plan: &Plan,
     command: &str,
     credentials: &Credentials,
     known: KnownHosts,
     login: Arc<dyn Login>,
-) -> Result<Link, String> {
+) -> Result<(Link, Forwards), String> {
     let connection = Connection::open(plan, credentials, known, login.clone())?;
+    let forwards = connection.forwards.clone();
     let channel = connection.block_on(async {
         let channel =
             connection.handle.channel_open_session().await.map_err(|err| err.to_string())?;
@@ -202,25 +206,28 @@ pub fn connect(
         }
         let _ = channel.eof().await;
     });
-    Ok(Link {
+    let link = Link {
         reader: Box::new(ChunkReader::new(chunks)),
         writer: Box::new(ChunkWriter(writer)),
         keep: Box::new(connection),
-    })
+    };
+    Ok((link, forwards))
 }
 
 /// Log in as `plan` says, to a machine without artty, for its shells: the
 /// link to a stand-in for an artty server, here ([`crate::plain`]), whose
-/// tabs are shells there, over this connection.
+/// tabs are shells there, over this connection; and its forwards.
 pub fn shells(
     plan: &Plan,
     credentials: &Credentials,
     known: KnownHosts,
     login: Arc<dyn Login>,
-) -> Result<Link, String> {
+) -> Result<(Link, Forwards), String> {
     let connection = Connection::open(plan, credentials, known, login)?;
+    let forwards = connection.forwards.clone();
     let name = format!("{}@{}", connection.target.user, plan.target.alias);
-    crate::plain::serve(Box::new(shells::Shells::new(connection, plan.target.clone())), name)
+    let shells = shells::Shells::new(connection, plan.target.clone());
+    Ok((crate::plain::serve(Box::new(shells), name)?, forwards))
 }
 
 /// Install artty as `plan` says, as the Mac app does

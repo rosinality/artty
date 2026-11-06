@@ -695,10 +695,10 @@ pub fn connect(
     let known = KnownHosts(PathBuf::from(&setup.known_hosts));
     let asking = Asking::new(login);
     let link = if server.plain {
-        ssh::shells(&plan, &credentials, known, asking.clone())?
+        ssh::shells(&plan, &credentials, known, asking.clone())?.0
     } else {
         let command = ssh::server_command(server.artty.as_deref());
-        ssh::connect(&plan, &command, &credentials, known, asking.clone())?
+        ssh::connect(&plan, &command, &credentials, known, asking.clone())?.0
     };
     let (client, received) = match Client::start(link, env!("CARGO_PKG_VERSION")) {
         Ok(started) => started,

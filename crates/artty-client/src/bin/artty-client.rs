@@ -50,7 +50,7 @@ fn run() -> Result<(), String> {
                 "Logging in to {user}@{}:{} (through {through:?})…",
                 target.host_name, target.port
             );
-            let link = ssh::connect(
+            let (link, _forwards) = ssh::connect(
                 &plan,
                 &ssh::server_command(artty.as_deref()),
                 &Credentials::usual(),

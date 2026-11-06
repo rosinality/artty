@@ -12,6 +12,7 @@ use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate, ssh_key};
 use russh::{ChannelMsg, Disconnect, Preferred};
 
+use super::forward::{Forwards, Kind, RemoteTargets};
 use super::held::HeldSigner;
 use super::{CONNECT_TIMEOUT, Credentials, HostKey, KnownHosts, Login, Target};
 use crate::ssh_config::{Config, Local, Resolved, StrictHostKeys};
@@ -97,6 +98,7 @@ pub(super) struct Connection {
     runtime: Option<tokio::runtime::Runtime>,
     /// Who it is, logged in.
     pub(super) target: Target,
+    pub(super) forwards: Forwards,
 }
 
 impl Connection {
@@ -114,12 +116,13 @@ impl Connection {
             .map_err(|err| err.to_string())?;
         let known = Arc::new(known);
         let passphrases = Arc::new(Mutex::new(HashMap::new()));
+        let remote = RemoteTargets::default();
         let (handle, jumps) = runtime.block_on(async {
             let mut jumps: Vec<Handle<Handler>> = Vec::new();
             let stages = plan.hops.iter().chain([&plan.target]);
             let mut last = None;
             for resolved in stages {
-                let handler = Handler::new(resolved, login.clone(), known.clone());
+                let handler = Handler::new(resolved, login.clone(), known.clone(), remote.clone());
                 let config = Arc::new(client_config(resolved)?);
                 let timeout = resolved
                     .connect_timeout
@@ -170,7 +173,19 @@ impl Connection {
             host: plan.target.host_name.clone(),
             port: plan.target.port,
         };
-        Ok(Connection { handle: Arc::new(handle), jumps, runtime: Some(runtime), target })
+        let handle = Arc::new(handle);
+        let forwards = Forwards::new(&handle, runtime.handle().clone(), remote);
+        let configured = [
+            (Kind::Local, &plan.target.local_forwards),
+            (Kind::Remote, &plan.target.remote_forwards),
+            (Kind::Dynamic, &plan.target.dynamic_forwards),
+        ];
+        for (kind, list) in configured {
+            for forward in list {
+                forwards.add(kind, forward.clone(), true);
+            }
+        }
+        Ok(Connection { handle, jumps, runtime: Some(runtime), target, forwards })
     }
 
     pub(super) fn block_on<F: Future>(&self, future: F) -> F::Output {
@@ -356,10 +371,17 @@ pub(super) struct Handler {
     strict: StrictHostKeys,
     login: Arc<dyn Login>,
     known: Arc<KnownHosts>,
+    /// Where remote forwards' connections go.
+    remote: RemoteTargets,
 }
 
 impl Handler {
-    fn new(resolved: &Resolved, login: Arc<dyn Login>, known: Arc<KnownHosts>) -> Handler {
+    fn new(
+        resolved: &Resolved,
+        login: Arc<dyn Login>,
+        known: Arc<KnownHosts>,
+        remote: RemoteTargets,
+    ) -> Handler {
         let target = Target {
             user: resolved.user.clone().unwrap_or_default(),
             host: resolved.host_name.clone(),
@@ -372,6 +394,7 @@ impl Handler {
             strict: resolved.strict_host_key_checking,
             login,
             known,
+            remote,
         }
     }
 }
@@ -420,6 +443,21 @@ impl client::Handler for Handler {
             self.known.learn(name, port, &key);
         }
         Ok(trusted)
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        // Not one of ours: refused (`reply` dropped).
+        Forwards::arrived(&self.remote, channel, connected_port, reply);
+        Ok(())
     }
 
     async fn auth_banner(
