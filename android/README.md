@@ -34,3 +34,16 @@ cargo-zigbuild, and the Rust target for each CPU (`x86_64-unknown-linux-gnu`,
 in Android Keystore. The server needs this build of artty (the protocol must
 match): connecting to one that runs another build offers to install this one
 there.
+
+The keys row's Ctrl and Alt hold for the next key; a long press keeps them on
+until tapped again. The volume keys, held, add what a phone keyboard lacks:
+volume down is Ctrl, and volume up with W A S D gives the arrows, E Esc, T Tab,
+P N pages up and down, H L Home and End, and 1–0 F1–F10 (Termux's keys);
+pressed alone, they turn the volume. A hardware keyboard has Ctrl+Shift with T
+(new tab), W (close it), Tab or 1–9 (other tabs), C and V (copy, paste), F
+(find), and = - 0 (text size); Ctrl+Tab goes to the next tab. A tap on a link
+(an OSC 8 link, or a URL in the text) offers to open or copy it; a `file://`
+link opens the file from the pane's machine.
+
+The text is JetBrains Mono, under the SIL Open Font License
+(`licenses/JetBrainsMono-OFL.txt`).

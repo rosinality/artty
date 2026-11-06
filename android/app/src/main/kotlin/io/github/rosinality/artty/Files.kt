@@ -82,10 +82,12 @@ private data class Sending(val uri: Uri, val name: String)
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun FilesScreen(pane: ULong, onTypePath: (String) -> Unit, onClose: () -> Unit) {
+fun FilesScreen(pane: ULong, onTypePath: (String) -> Unit, open: String? = null, onClose: () -> Unit) {
     val context = LocalContext.current
     /** The folder asked for; `null`: the pane's own (and follow it as it moves). */
-    var asked by remember { mutableStateOf<String?>(null) }
+    var asked by remember { mutableStateOf(open?.substringBeforeLast('/', "")?.ifEmpty { "/" }) }
+    /** A file to show once its folder is listed (a link to it was tapped). */
+    var opening by remember { mutableStateOf(open) }
     var folder by remember { mutableStateOf<Folder?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
@@ -103,9 +105,17 @@ fun FilesScreen(pane: ULong, onTypePath: (String) -> Unit, onClose: () -> Unit) 
         loading = true
         Session.io({ it.listDir(pane, path, true) }) { result ->
             loading = false
-            result.onSuccess {
-                folder = it
+            result.onSuccess { listed ->
+                folder = listed
                 error = null
+                opening?.let { file ->
+                    opening = null
+                    val entry = listed.entries.firstOrNull { it.name == file.substringAfterLast('/') }
+                    if (entry != null && !entry.dir) viewing = Picked(file, entry) else if (entry != null) {
+                        asked = file
+                        load(file)
+                    }
+                }
             }.onFailure { error = it.message ?: it.toString() }
         }
     }
@@ -113,7 +123,7 @@ fun FilesScreen(pane: ULong, onTypePath: (String) -> Unit, onClose: () -> Unit) 
         asked = path
         load(path)
     }
-    LaunchedEffect(Unit) { load(null) }
+    LaunchedEffect(Unit) { load(asked) }
     DisposableEffect(pane) {
         Session.onDirChanged = { if (it == pane) load(asked) }
         onDispose {
@@ -256,7 +266,11 @@ fun FilesScreen(pane: ULong, onTypePath: (String) -> Unit, onClose: () -> Unit) 
         }
     }
     viewing?.let { file ->
-        FileViewer(pane, file, onClose = { viewing = null }, onSave = {
+        FileViewer(pane, file, onClose = {
+            viewing = null
+            // Opened from a link: back to the terminal.
+            if (file.path == open) onClose()
+        }, onSave = {
             saving = file
             pickWhereToSave.launch(file.entry.name)
         }, onShare = { share(file) }, onTypePath = {

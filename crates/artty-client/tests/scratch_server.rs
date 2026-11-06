@@ -166,6 +166,38 @@ fn notifications_go_to_the_app_in_use() {
     }
 }
 
+#[test]
+fn images_arrive_and_go() {
+    let Some((link, _scratch)) = scratch() else { return };
+    let (client, events) = Client::start(link, "test").unwrap();
+    let (_, pane) = new_window(&client, &events);
+    // A 2×2 red square (kitty's graphics, RGBA), then the screen cleared.
+    let pixels = "/wAA//8AAP//AAD//wAA/w==";
+    let print = format!("printf '\\033_Gf=32,s=2,v=2,a=T,c=2,r=1;{pixels}\\033\\\\'");
+    client.input(pane, print.into_bytes()).unwrap();
+    assert!(client.key(pane, &Key::parse("enter")).unwrap());
+    let id = until(&events, |e| match e {
+        Event::Image { id } => Some(*id),
+        _ => None,
+    });
+    let image = client.image(id).expect("kept");
+    assert_eq!((image.width, image.height, image.data.len()), (2, 2, 16));
+    let shown = |id| {
+        let screen = client.screen(pane).unwrap();
+        screen.frame.lines.iter().any(|l| l.images.iter().any(|i| i.image == id))
+    };
+    until(&events, |e| matches!(e, Event::Screen { .. } if shown(id)).then_some(()));
+    // Gone from the screen: let go of.
+    client.input(pane, b"clear".to_vec()).unwrap();
+    assert!(client.key(pane, &Key::parse("enter")).unwrap());
+    until(&events, |e| matches!(e, Event::Screen { .. } if !shown(id)).then_some(()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while client.image(id).is_some() && Instant::now() < deadline {
+        let _ = events.recv_timeout(Duration::from_millis(100));
+    }
+    assert!(client.image(id).is_none(), "still kept");
+}
+
 fn stop(dir: &std::path::Path) {
     let exe = std::env::current_exe().unwrap();
     let artty = exe.parent().unwrap().parent().unwrap().join("artty");

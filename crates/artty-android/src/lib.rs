@@ -272,6 +272,10 @@ pub enum ClientEvent {
     Panes {
         panes: Vec<PaneItem>,
     },
+    /// An image a screen shows arrived: `Connection::image` has it.
+    Image {
+        id: u64,
+    },
     /// A pane's screen changed: `Connection::screen` has it.
     Screen {
         pane: u64,
@@ -324,14 +328,68 @@ pub struct Rect {
     pub color: u32,
 }
 
+/// How cells are underlined.
+#[derive(uniffi::Enum, Clone, Copy)]
+pub enum UnderlineStyle {
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+/// Cells from `column`, `width` wide, underlined in a color.
+#[derive(uniffi::Record)]
+pub struct Underline {
+    pub column: u32,
+    pub width: u32,
+    pub color: u32,
+    pub style: UnderlineStyle,
+}
+
+/// Cells from `column`, `cells` wide, showing a row of an image: from its
+/// cell (`tile_column`, `tile_row`) on.
+#[derive(uniffi::Record)]
+pub struct ImageSpan {
+    pub column: u32,
+    pub cells: u32,
+    pub image: u64,
+    pub tile_column: u32,
+    pub tile_row: u32,
+}
+
+/// An image's pixels, and its size in cells.
+#[derive(uniffi::Record)]
+pub struct Image {
+    /// An image file (PNG, JPEG, GIF…), else RGBA rows.
+    pub encoded: bool,
+    pub data: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    pub columns: f32,
+    pub rows: f32,
+}
+
+/// A link on a line: `start..end` columns.
+#[derive(uniffi::Record)]
+pub struct LinkSpan {
+    pub url: String,
+    pub start: u32,
+    pub end: u32,
+}
+
 #[derive(uniffi::Record)]
 pub struct Line {
     pub runs: Vec<Run>,
     pub backgrounds: Vec<Rect>,
-    /// Selected cells, drawn over the backgrounds.
+    /// Search matches, drawn over the backgrounds (the selection marks the
+    /// current one).
+    pub matches: Vec<Rect>,
+    /// Selected cells, drawn over the matches.
     pub selection: Vec<Rect>,
-    /// Underlined cells.
-    pub underlines: Vec<Rect>,
+    /// Parts of images, over the backgrounds and under the text.
+    pub images: Vec<ImageSpan>,
+    pub underlines: Vec<Underline>,
 }
 
 #[derive(uniffi::Record)]
@@ -342,6 +400,7 @@ pub struct Cursor {
     pub color: u32,
     /// A block (else a bar or underline: drawn thin).
     pub block: bool,
+    pub blinking: bool,
 }
 
 /// A pane's screen.
@@ -390,14 +449,33 @@ impl From<artty_client::Screen> for Screen {
                         })
                         .collect(),
                     backgrounds: rects(&line.backgrounds),
+                    matches: rects(&line.matches),
                     selection: rects(&line.selection),
+                    images: line
+                        .images
+                        .iter()
+                        .map(|i| ImageSpan {
+                            column: i.column as u32,
+                            cells: i.cells as u32,
+                            image: i.image,
+                            tile_column: u32::from(i.tile_column),
+                            tile_row: u32::from(i.tile_row),
+                        })
+                        .collect(),
                     underlines: line
                         .underlines
                         .iter()
-                        .map(|u| Rect {
+                        .map(|u| Underline {
                             column: u.column as u32,
                             width: u.width as u32,
                             color: rgb(u.color),
+                            style: match u.style {
+                                artty_core::UnderlineStyle::Single => UnderlineStyle::Single,
+                                artty_core::UnderlineStyle::Double => UnderlineStyle::Double,
+                                artty_core::UnderlineStyle::Curly => UnderlineStyle::Curly,
+                                artty_core::UnderlineStyle::Dotted => UnderlineStyle::Dotted,
+                                artty_core::UnderlineStyle::Dashed => UnderlineStyle::Dashed,
+                            },
                         })
                         .collect(),
                 })
@@ -408,6 +486,7 @@ impl From<artty_client::Screen> for Screen {
                 wide: c.wide,
                 color: rgb(c.color),
                 block: matches!(c.shape, artty_core::vt::ansi::CursorShape::Block),
+                blinking: c.blinking,
             }),
             background: rgb(frame.background),
             foreground: rgb(frame.foreground),
@@ -578,6 +657,7 @@ pub fn connect(
                     },
                     Event::WindowClosed { window } => ClientEvent::WindowClosed { window },
                     Event::Screen { pane } => ClientEvent::Screen { pane },
+                    Event::Image { id } => ClientEvent::Image { id },
                     Event::Windows(windows) => ClientEvent::Windows {
                         windows: windows
                             .into_iter()
@@ -856,6 +936,31 @@ impl Connection {
 
     pub fn screen(&self, pane: u64) -> Option<Screen> {
         self.client.screen(pane).map(Screen::from)
+    }
+
+    /// An image an `ImageSpan` shows, if it has arrived.
+    pub fn image(&self, id: u64) -> Option<Image> {
+        let image = self.client.image(id)?;
+        Some(Image {
+            encoded: matches!(image.format, artty_core::vt::term::cell::ImageFormat::Encoded),
+            data: image.data.clone(),
+            width: image.width,
+            height: image.height,
+            columns: image.columns,
+            rows: image.rows,
+        })
+    }
+
+    /// The link under viewport cell (`line`, `column`): an OSC 8 hyperlink,
+    /// or a URL in the text. Asks the server: call it off the main thread.
+    pub fn link_at(
+        &self,
+        pane: u64,
+        line: u32,
+        column: u32,
+    ) -> Result<Option<LinkSpan>, ConnectError> {
+        let link = self.client.link_at(pane, line as usize, column as usize)?;
+        Ok(link.map(|(url, start, end)| LinkSpan { url, start: start as u32, end: end as u32 }))
     }
 
     /// Text typed or pasted.

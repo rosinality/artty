@@ -1,13 +1,20 @@
 package io.github.rosinality.artty
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.DashPathEffect
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
 import android.graphics.Typeface
+import android.media.AudioManager
 import android.text.InputType
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
+import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -18,10 +25,13 @@ import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import kotlin.math.ceil
 import kotlin.math.floor
+import kotlin.math.sin
+import uniffi.artty_android.LinkSpan
 import uniffi.artty_android.MouseAction
 import uniffi.artty_android.MouseButton
 import uniffi.artty_android.Screen
 import uniffi.artty_android.SelectionKind
+import uniffi.artty_android.UnderlineStyle
 
 /**
  * A pane's screen, drawn as the server sends it, and the keyboard into it.
@@ -41,16 +51,38 @@ class TerminalView(context: Context) : View(context) {
             sendSize()
         }
 
-    /** Ctrl and Alt held from the keys row: for the next key only. */
+    /** Ctrl and Alt held from the keys row: for the next key only, unless locked (a long press). */
     var ctrl = false
     var alt = false
+    var locked = false
     /** Told when Ctrl or Alt is used up, for the keys row. */
     var onModifiers: (() -> Unit)? = null
 
+    /** The app's own shortcuts, from a hardware keyboard: whether one was taken. */
+    var onShortcut: ((Shortcut) -> Boolean)? = null
+    /** A link tapped (asked of the server). */
+    var onLink: ((LinkSpan?) -> Unit)? = null
+    /** The link shown as tapped, underlined: its line. */
+    var link: Pair<Int, LinkSpan>? = null
+        set(value) {
+            field = value
+            invalidate()
+        }
+
     private var screen: Screen? = null
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Typeface.MONOSPACE }
+    private val regular = resources.getFont(R.font.jetbrains_mono_regular)
+    private val bold = resources.getFont(R.font.jetbrains_mono_bold)
+    private val italic = resources.getFont(R.font.jetbrains_mono_italic)
+    private val boldItalic = resources.getFont(R.font.jetbrains_mono_bold_italic)
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = regular
+        // As the Mac draws it: `->` stays two characters.
+        fontFeatureSettings = "'calt' 0, 'liga' 0"
+    }
+    private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private val density = resources.displayMetrics.density
-    private var fontSp = 13f
+    private val prefs = context.getSharedPreferences("artty", Context.MODE_PRIVATE)
+    private var fontSp = prefs.getFloat("font_size", DEFAULT_FONT_SP)
     private var cellWidth = 0f
     private var cellHeight = 0f
     private var baseline = 0f
@@ -77,8 +109,10 @@ class TerminalView(context: Context) : View(context) {
         baseline = -metrics.ascent + (cellHeight - (metrics.descent - metrics.ascent)) / 2
     }
 
-    fun setFontSize(sp: Float) {
-        fontSp = sp.coerceIn(7f, 28f)
+    /** The text's size (kept for next time); `null`: as it starts. */
+    fun setFontSize(sp: Float?) {
+        fontSp = (sp ?: DEFAULT_FONT_SP).coerceIn(7f, 28f)
+        prefs.edit().putFloat("font_size", fontSp).apply()
         measureFont()
         sendSize()
         invalidate()
@@ -95,7 +129,66 @@ class TerminalView(context: Context) : View(context) {
     fun refresh() {
         val pane = pane ?: return
         screen = Session.connection?.screen(pane) ?: return
+        // Changed: the cursor shows (and blinks again from there).
+        cursorOn = true
+        removeCallbacks(blink)
+        if (screen?.cursor?.blinking == true) postDelayed(blink, BLINK_MS)
+        val shown = screen?.lines?.flatMap { line -> line.images.map { it.image } }?.toSet() ?: emptySet()
+        bitmaps.keys.retainAll(shown)
         invalidate()
+    }
+
+    // The cursor blinks where the program asks, while this has the keyboard.
+    private var cursorOn = true
+    private val blink = object : Runnable {
+        override fun run() {
+            cursorOn = !cursorOn || !hasFocus()
+            invalidate()
+            // Out of sight, it waits for the next screen.
+            if (screen?.cursor?.blinking == true && windowVisibility == VISIBLE) postDelayed(this, BLINK_MS)
+        }
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        removeCallbacks(blink)
+    }
+
+    // Images, decoded once each (off the main thread), while a screen shows them.
+    private class Shown(val bitmap: Bitmap, val columns: Float, val rows: Float)
+    private val bitmaps = HashMap<ULong, Shown?>()
+
+    /** An image arrived: drawn, if it's waited for. */
+    fun imageArrived(id: ULong) {
+        if (bitmaps.containsKey(id) && bitmaps[id] == null) {
+            bitmaps.remove(id)
+            invalidate()
+        }
+    }
+
+    private fun bitmap(id: ULong): Shown? {
+        if (bitmaps.containsKey(id)) return bitmaps[id]
+        bitmaps[id] = null
+        val connection = Session.connection ?: return null
+        Thread {
+            val image = runCatching { connection.image(id) }.getOrNull() ?: return@Thread
+            val bitmap = runCatching {
+                if (image.encoded) {
+                    BitmapFactory.decodeByteArray(image.data, 0, image.data.size)
+                } else {
+                    Bitmap.createBitmap(image.width.toInt(), image.height.toInt(), Bitmap.Config.ARGB_8888).apply {
+                        copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(image.data))
+                    }
+                }
+            }.getOrNull() ?: return@Thread
+            post {
+                if (bitmaps.containsKey(id)) {
+                    bitmaps[id] = Shown(bitmap, image.columns, image.rows)
+                    invalidate()
+                }
+            }
+        }.start()
+        return null
     }
 
     /** As many cells as fit: the pane's size while this phone uses it. */
@@ -129,27 +222,43 @@ class TerminalView(context: Context) : View(context) {
         if (screen == null) return
         for ((row, line) in screen.lines.withIndex()) {
             val top = row * cellHeight
-            for (rect in line.backgrounds + line.selection) {
+            for (rect in line.backgrounds + line.matches + line.selection) {
                 paint.color = argb(rect.color)
                 canvas.drawRect(rect.column.toFloat() * cellWidth, top, (rect.column + rect.width).toFloat() * cellWidth, top + cellHeight, paint)
             }
+            // Each run of image cells shows its part: the whole image placed where its top
+            // left cell would be, clipped to these cells.
+            for (span in line.images) {
+                val shown = bitmap(span.image) ?: continue
+                val left = (span.column.toFloat() - span.tileColumn.toFloat()) * cellWidth
+                val imageTop = top - span.tileRow.toFloat() * cellHeight
+                canvas.save()
+                canvas.clipRect(span.column.toFloat() * cellWidth, top, (span.column + span.cells).toFloat() * cellWidth, top + cellHeight)
+                canvas.drawBitmap(shown.bitmap, null, RectF(left, imageTop, left + shown.columns * cellWidth, imageTop + shown.rows * cellHeight), paint)
+                canvas.restore()
+            }
             for (run in line.runs) {
                 paint.color = argb(run.fg)
-                paint.isFakeBoldText = run.bold
-                paint.textSkewX = if (run.italic) -0.2f else 0f
+                paint.typeface = when {
+                    run.bold && run.italic -> boldItalic
+                    run.bold -> bold
+                    run.italic -> italic
+                    else -> regular
+                }
                 paint.isStrikeThruText = run.strikeout
                 canvas.drawText(run.text, run.column.toFloat() * cellWidth, top + baseline, paint)
             }
-            paint.isFakeBoldText = false
-            paint.textSkewX = 0f
+            paint.typeface = regular
             paint.isStrikeThruText = false
             for (underline in line.underlines) {
-                paint.color = argb(underline.color)
-                val y = top + cellHeight - density * 1.5f
-                canvas.drawRect(underline.column.toFloat() * cellWidth, y, (underline.column + underline.width).toFloat() * cellWidth, y + density, paint)
+                underline(canvas, top, underline.column.toInt(), underline.width.toInt(), underline.color, underline.style)
+            }
+            link?.let { (at, span) ->
+                if (at == row) underline(canvas, top, span.start.toInt(), (span.end - span.start).toInt(), screen.foreground, UnderlineStyle.SINGLE)
             }
         }
         val cursor = screen.cursor ?: return
+        if (!cursorOn) return
         val left = cursor.column.toFloat() * cellWidth
         val top = cursor.line.toFloat() * cellHeight
         val wide = if (cursor.wide) 2 else 1
@@ -173,6 +282,42 @@ class TerminalView(context: Context) : View(context) {
     }
 
     private fun argb(rgb: UInt) = (0xff000000u or rgb).toInt()
+
+    private fun underline(canvas: Canvas, top: Float, column: Int, width: Int, color: UInt, style: UnderlineStyle) {
+        val left = column * cellWidth
+        val right = (column + width) * cellWidth
+        val y = top + cellHeight - density * 1.5f
+        stroke.color = argb(color)
+        stroke.strokeWidth = density
+        stroke.pathEffect = null
+        when (style) {
+            UnderlineStyle.SINGLE -> canvas.drawLine(left, y, right, y, stroke)
+            UnderlineStyle.DOUBLE -> {
+                canvas.drawLine(left, y, right, y, stroke)
+                canvas.drawLine(left, y - density * 2, right, y - density * 2, stroke)
+            }
+            UnderlineStyle.DOTTED -> {
+                stroke.pathEffect = DashPathEffect(floatArrayOf(density, density * 2), 0f)
+                canvas.drawLine(left, y, right, y, stroke)
+            }
+            UnderlineStyle.DASHED -> {
+                stroke.pathEffect = DashPathEffect(floatArrayOf(density * 4, density * 2), 0f)
+                canvas.drawLine(left, y, right, y, stroke)
+            }
+            UnderlineStyle.CURLY -> {
+                // A wave a cell wide.
+                val path = Path()
+                val amplitude = density
+                var x = left
+                path.moveTo(x, y)
+                while (x < right) {
+                    x = (x + density).coerceAtMost(right)
+                    path.lineTo(x, y + amplitude * sin((x - left) / cellWidth * 2 * Math.PI).toFloat())
+                }
+                canvas.drawPath(path, stroke)
+            }
+        }
+    }
 
     // Touch. A pinch sizes the text. Where the program takes the mouse (htop, vim with
     // `mouse=a`, tmux), a tap clicks, a swipe turns the wheel, and a long press then a drag
@@ -265,11 +410,15 @@ class TerminalView(context: Context) : View(context) {
                 clearSelection()
                 return true
             }
+            if (link != null) {
+                link = null
+                onLink?.invoke(null)
+            }
             if (!selectMode && wantsMouse()) {
                 mouse(MouseAction.PRESS, e.x, e.y)
                 mouse(MouseAction.RELEASE, e.x, e.y)
             } else {
-                showKeyboard()
+                tapped(e.x, e.y)
             }
             return true
         }
@@ -343,6 +492,55 @@ class TerminalView(context: Context) : View(context) {
         return true
     }
 
+    /**
+     * A tap on the text: a link there is offered (the server knows: OSC 8 links, URLs in the
+     * text); else, or if it's slow to say, the keyboard comes.
+     */
+    private fun tapped(x: Float, y: Float) {
+        val pane = pane ?: return showKeyboard()
+        val connection = Session.connection ?: return showKeyboard()
+        val (line, column) = cellAt(x, y)
+        var answered = false
+        val keyboard = Runnable {
+            answered = true
+            showKeyboard()
+        }
+        postDelayed(keyboard, LINK_WAIT_MS)
+        Thread {
+            val span = runCatching { connection.linkAt(pane, line, column) }.getOrNull()
+            post {
+                if (span == null) {
+                    if (!answered) {
+                        removeCallbacks(keyboard)
+                        showKeyboard()
+                    }
+                    return@post
+                }
+                removeCallbacks(keyboard)
+                link = line.toInt() to span
+                onLink?.invoke(span)
+            }
+        }.start()
+    }
+
+    // A mouse's wheel, or two fingers on a touchpad.
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        if (event.isFromSource(InputDevice.SOURCE_CLASS_POINTER) && event.actionMasked == MotionEvent.ACTION_SCROLL) {
+            val pane = pane ?: return true
+            wheelTurned += event.getAxisValue(MotionEvent.AXIS_VSCROLL) * WHEEL_LINES
+            val lines = wheelTurned.toInt()
+            if (lines != 0) {
+                wheelTurned -= lines
+                val (line, column) = cellAt(event.x, event.y)
+                runCatching { Session.connection?.wheel(pane, lines, line, column) }
+            }
+            return true
+        }
+        return super.onGenericMotionEvent(event)
+    }
+
+    private var wheelTurned = 0f
+
     fun showKeyboard() {
         requestFocus()
         context.getSystemService(InputMethodManager::class.java).showSoftInput(this, 0)
@@ -392,40 +590,134 @@ class TerminalView(context: Context) : View(context) {
     private fun compose(text: String) {
         val common = composingSent.commonPrefixWith(text)
         repeat(composingSent.codePointCount(common.length, composingSent.length)) { key("backspace") }
-        type(text.substring(common.length))
+        if (!type(text.substring(common.length))) {
+            // It went as a key (Ctrl held, say): what the keyboard composes starts afresh.
+            composing = ""
+            composingSent = ""
+            context.getSystemService(InputMethodManager::class.java).restartInput(this)
+            return
+        }
         composing = text
         composingSent = text
         invalidate()
     }
 
-    /** Text typed: with Ctrl or Alt held, a single character as a key. */
-    fun type(text: String) {
-        if (text.isEmpty()) return
-        val pane = pane ?: return
-        if (text == "\n") return key("enter")
-        if ((ctrl || alt) && text.codePointCount(0, text.length) == 1) {
+    /**
+     * Text typed: with Ctrl or Alt held (the keys row, a volume key), a single character as a
+     * key. Returns whether it went as text.
+     */
+    fun type(text: String): Boolean {
+        if (text.isEmpty()) return true
+        val pane = pane ?: return true
+        if (text == "\n") {
+            key("enter")
+            return false
+        }
+        if (text.codePointCount(0, text.length) == 1) {
             val c = text[0]
-            return key(c.lowercaseChar().toString(), shift = c.isUpperCase())
+            if (volumeUp != null && volumeKey(c)) return false
+            if (ctrl || alt || volumeDown != null) {
+                key(c.lowercaseChar().toString(), shift = c.isUpperCase())
+                return false
+            }
         }
         runCatching { Session.connection?.text(pane, text) }
+        return true
     }
 
-    /** A key by name (`enter`, `up`, `c`…), with the keys row's Ctrl and Alt. */
+    /** A key by name (`enter`, `up`, `c`…), with the keys row's Ctrl and Alt (and volume down's Ctrl). */
     fun key(name: String, shift: Boolean = false, alt: Boolean = false, ctrl: Boolean = false) {
         val pane = pane ?: return
-        val withCtrl = ctrl || this.ctrl
+        val withCtrl = ctrl || this.ctrl || volumeDown != null
         val withAlt = alt || this.alt
+        volumeDown?.let { volumeDown = true }
         val taken = runCatching { Session.connection?.key(pane, name, shift, withAlt, withCtrl) }.getOrNull() ?: false
         // A plain character with no meaning as a key (Alt off, say): typed.
         if (!taken && name.length == 1) runCatching { Session.connection?.text(pane, if (shift) name.uppercase() else name) }
-        if (this.ctrl || this.alt) {
+        if ((this.ctrl || this.alt) && !locked) {
             this.ctrl = false
             this.alt = false
             onModifiers?.invoke()
         }
     }
 
+    // The volume keys, held: down is Ctrl, up makes the keys a phone keyboard lacks (as
+    // Termux has them: W A S D arrows, E Esc, T Tab, 1–0 F1–F10, P N pages up and down, H
+    // Home, L End). Pressed alone, they turn the volume as ever. Held: whether used since.
+    private var volumeDown: Boolean? = null
+    private var volumeUp: Boolean? = null
+
+    private fun volumeKey(c: Char): Boolean {
+        val name = when (c.lowercaseChar()) {
+            'w' -> "up"
+            'a' -> "left"
+            's' -> "down"
+            'd' -> "right"
+            'e' -> "escape"
+            't' -> "tab"
+            'p' -> "pageup"
+            'n' -> "pagedown"
+            'h' -> "home"
+            'l' -> "end"
+            in '1'..'9' -> "f${c - '0'}"
+            '0' -> "f10"
+            else -> return false
+        }
+        volumeUp = true
+        key(name)
+        return true
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        val direction = when (keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN -> volumeDown.also { volumeDown = null }?.let { used -> if (used) 0 else AudioManager.ADJUST_LOWER }
+            KeyEvent.KEYCODE_VOLUME_UP -> volumeUp.also { volumeUp = null }?.let { used -> if (used) 0 else AudioManager.ADJUST_RAISE }
+            else -> return super.onKeyUp(keyCode, event)
+        }
+        if (direction != null && direction != 0) {
+            context.getSystemService(AudioManager::class.java)
+                .adjustSuggestedStreamVolume(direction, AudioManager.USE_DEFAULT_STREAM_TYPE, AudioManager.FLAG_SHOW_UI)
+        }
+        return true
+    }
+
+    /**
+     * A hardware keyboard's shortcut for the app, if it is one: Ctrl+Shift with a key, as Linux
+     * terminals have them (or Meta, where the system lets it through: Android keeps most Meta
+     * keys for itself).
+     */
+    private fun shortcut(keyCode: Int, event: KeyEvent): Shortcut? {
+        val ctrlShift = event.isCtrlPressed && event.isShiftPressed
+        if (keyCode == KeyEvent.KEYCODE_TAB && event.isCtrlPressed) return if (event.isShiftPressed) Shortcut.PreviousTab else Shortcut.NextTab
+        if (!event.isMetaPressed && !ctrlShift) return null
+        return when (keyCode) {
+            KeyEvent.KEYCODE_T -> Shortcut.NewTab
+            KeyEvent.KEYCODE_W -> Shortcut.CloseTab
+            KeyEvent.KEYCODE_C -> Shortcut.Copy
+            KeyEvent.KEYCODE_V -> Shortcut.Paste
+            KeyEvent.KEYCODE_F -> Shortcut.Find
+            KeyEvent.KEYCODE_LEFT_BRACKET, KeyEvent.KEYCODE_PAGE_UP -> Shortcut.PreviousTab
+            KeyEvent.KEYCODE_RIGHT_BRACKET, KeyEvent.KEYCODE_PAGE_DOWN -> Shortcut.NextTab
+            KeyEvent.KEYCODE_EQUALS, KeyEvent.KEYCODE_PLUS -> Shortcut.Bigger
+            KeyEvent.KEYCODE_MINUS -> Shortcut.Smaller
+            KeyEvent.KEYCODE_0 -> Shortcut.ResetSize
+            in KeyEvent.KEYCODE_1..KeyEvent.KEYCODE_9 -> Shortcut.Tab(keyCode - KeyEvent.KEYCODE_1)
+            else -> null
+        }
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        when (keyCode) {
+            KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                if (volumeDown == null) volumeDown = false
+                return true
+            }
+            KeyEvent.KEYCODE_VOLUME_UP -> {
+                if (volumeUp == null) volumeUp = false
+                return true
+            }
+        }
+        shortcut(keyCode, event)?.let { if (onShortcut?.invoke(it) == true) return true }
         val name = when (keyCode) {
             KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> "enter"
             KeyEvent.KEYCODE_DEL -> "backspace"
@@ -452,10 +744,36 @@ class TerminalView(context: Context) : View(context) {
         val unicode = event.getUnicodeChar(event.metaState and (KeyEvent.META_CTRL_MASK or KeyEvent.META_ALT_MASK).inv())
         if (unicode != 0) {
             val text = String(Character.toChars(unicode))
+            if (volumeUp != null && volumeKey(text[0])) return true
             if (event.isCtrlPressed || event.isAltPressed) key(text.lowercase(), event.isShiftPressed, event.isAltPressed, event.isCtrlPressed)
             else type(text)
             return true
         }
         return super.onKeyDown(keyCode, event)
     }
+
+    fun biggerText(by: Float) = setFontSize(fontSp + by)
+
+    private companion object {
+        const val DEFAULT_FONT_SP = 13f
+        const val BLINK_MS = 530L
+        /** How long a tap waits to hear of a link before bringing the keyboard. */
+        const val LINK_WAIT_MS = 250L
+        const val WHEEL_LINES = 3f
+    }
+}
+
+/** What the app's hardware-keyboard shortcuts do. */
+sealed interface Shortcut {
+    data object NewTab : Shortcut
+    data object CloseTab : Shortcut
+    data object NextTab : Shortcut
+    data object PreviousTab : Shortcut
+    data class Tab(val index: Int) : Shortcut
+    data object Copy : Shortcut
+    data object Paste : Shortcut
+    data object Find : Shortcut
+    data object Bigger : Shortcut
+    data object Smaller : Shortcut
+    data object ResetSize : Shortcut
 }

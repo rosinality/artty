@@ -4,7 +4,7 @@
 //! What happens arrives as [`Event`]s; a pane's screen is read with
 //! [`Client::screen`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,9 +17,10 @@ use artty_core::keys::Key;
 use artty_core::layout::PaneId;
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
-    ClientMessage, FileChunk, Hello, Listing, OutputHit, PaneSpec, PaneState, Query, Reply,
-    SearchFound, SelectionOp, ServerMessage, SessionHit, UploadError, UploadTo, Uploaded, WindowId,
-    WindowLayout, WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
+    ClientMessage, FileChunk, Hello, ImageData, Listing, OutputHit, PaneSpec, PaneState, Query,
+    Reply, SearchFound, SelectionOp, ServerMessage, SessionHit, UploadError, UploadTo, Uploaded,
+    WindowId, WindowLayout, WindowSummary, WorkspaceId, protocol_version, read_message,
+    write_message,
 };
 use artty_core::vt::term::TermMode;
 
@@ -45,6 +46,10 @@ pub enum Event {
     /// A pane's screen changed: [`Client::screen`] has it.
     Screen {
         pane: PaneId,
+    },
+    /// An image a screen shows arrived: [`Client::image`] has it.
+    Image {
+        id: u64,
     },
     /// What every pane shown is doing (titles, agents, progress).
     Panes(Vec<PaneState>),
@@ -96,6 +101,8 @@ pub struct Screen {
 pub struct Client {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
     screens: Arc<Mutex<HashMap<PaneId, Screen>>>,
+    /// The images screens show, by id, as sent once each.
+    images: Arc<Mutex<HashMap<u64, Arc<ImageData>>>>,
     /// The server's build, from its greeting.
     pub server_version: String,
     /// When it last sent anything.
@@ -169,12 +176,13 @@ impl Client {
 
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
         let screens = Arc::new(Mutex::new(HashMap::<PaneId, Screen>::new()));
+        let images = Arc::new(Mutex::new(HashMap::<u64, Arc<ImageData>>::new()));
         let heard = Arc::new(Mutex::new(Instant::now()));
         let pending = Arc::new(Mutex::new(HashMap::<u64, mpsc::Sender<Reply>>::new()));
         let (events, received) = mpsc::channel();
         {
             let (writer, screens, heard) = (writer.clone(), screens.clone(), heard.clone());
-            let pending = pending.clone();
+            let (pending, images) = (pending.clone(), images.clone());
             std::thread::Builder::new()
                 .name("artty-client-reader".into())
                 .spawn(move || {
@@ -199,6 +207,11 @@ impl Client {
                                 update.apply(&mut screen.frame);
                                 Event::Screen { pane }
                             },
+                            ServerMessage::Image(image) => {
+                                let id = image.id;
+                                images.lock().unwrap().insert(id, Arc::new(image));
+                                Event::Image { id }
+                            },
                             ServerMessage::Panes { panes } => Event::Panes(panes),
                             ServerMessage::Bell { pane } => Event::Bell { pane },
                             ServerMessage::DirChanged { pane } => Event::DirChanged { pane },
@@ -220,8 +233,15 @@ impl Client {
                             ServerMessage::Stopping { restart } => Event::Stopping { restart },
                             // Screens are in: more may come.
                             ServerMessage::Sync { seq } => {
+                                let gone = forget_unshown(&screens, &images);
                                 let mut writer = writer.lock().unwrap();
-                                if write_message(&mut *writer, &ClientMessage::Ack { seq }).is_err()
+                                let forget = gone.is_empty() || {
+                                    let forget = ClientMessage::ForgetImages { ids: gone };
+                                    write_message(&mut *writer, &forget).is_ok()
+                                };
+                                if !forget
+                                    || write_message(&mut *writer, &ClientMessage::Ack { seq })
+                                        .is_err()
                                 {
                                     break "couldn't answer it".to_owned();
                                 }
@@ -259,6 +279,7 @@ impl Client {
         let client = Client {
             writer,
             screens,
+            images,
             server_version,
             heard,
             pending,
@@ -408,6 +429,25 @@ impl Client {
 
     pub fn select_clear(&self, pane: PaneId) -> Result<(), String> {
         self.send(&ClientMessage::Selection { pane, op: SelectionOp::Clear })
+    }
+
+    /// An image a screen shows ([`artty_core::frame::FrameImage::image`]).
+    pub fn image(&self, id: u64) -> Option<Arc<ImageData>> {
+        self.images.lock().unwrap().get(&id).cloned()
+    }
+
+    /// The link under a viewport cell (an OSC 8 hyperlink, or a URL in the
+    /// text), and the columns it covers on that line. Asks the server: blocks.
+    pub fn link_at(
+        &self,
+        pane: PaneId,
+        line: usize,
+        column: usize,
+    ) -> Result<Option<(String, usize, usize)>, String> {
+        match self.query(Query::LinkSpan { pane, line, column })? {
+            Reply::Link(link) => Ok(link),
+            _ => Err("an unexpected answer".to_owned()),
+        }
     }
 
     /// The text selected in the pane, if any (asks the server: blocks).
@@ -629,4 +669,27 @@ impl Client {
     pub fn scroll(&self, pane: PaneId, lines: i32) -> Result<(), String> {
         self.send(&ClientMessage::Scroll { pane, lines })
     }
+}
+
+/// Let go of images no screen shows anymore; returns their ids, for telling
+/// the server (which sends them again if they come back).
+fn forget_unshown(
+    screens: &Mutex<HashMap<PaneId, Screen>>,
+    images: &Mutex<HashMap<u64, Arc<ImageData>>>,
+) -> Vec<u64> {
+    let mut images = images.lock().unwrap();
+    if images.is_empty() {
+        return Vec::new();
+    }
+    let shown: HashSet<u64> = screens
+        .lock()
+        .unwrap()
+        .values()
+        .flat_map(|s| s.frame.lines.iter().flat_map(|l| l.images.iter().map(|i| i.image)))
+        .collect();
+    let gone: Vec<u64> = images.keys().copied().filter(|id| !shown.contains(id)).collect();
+    for id in &gone {
+        images.remove(id);
+    }
+    gone
 }

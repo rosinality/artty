@@ -1,5 +1,6 @@
 package io.github.rosinality.artty
 
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Intent
@@ -70,6 +71,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
+import uniffi.artty_android.LinkSpan
 import uniffi.artty_android.TabItem
 
 internal val Background = Color(0xff161a22)
@@ -416,8 +418,14 @@ private fun TerminalScreen() {
     val view = remember { TerminalView(context) }
     var ctrl by remember { mutableStateOf(false) }
     var alt by remember { mutableStateOf(false) }
+    /** Ctrl or Alt stays on (a long press) until tapped again. */
+    var locked by remember { mutableStateOf(false) }
     var selectMode by remember { mutableStateOf(false) }
     var selected by remember { mutableStateOf(false) }
+    /** A link tapped: open it, or copy it. */
+    var link by remember { mutableStateOf<LinkSpan?>(null) }
+    /** A file to open in Files (a `file://` link tapped). */
+    var openFile by remember { mutableStateOf<String?>(null) }
     /** Text that would run line by line, waiting for a yes. */
     var pasting by remember { mutableStateOf<String?>(null) }
     val clipboard = context.getSystemService(ClipboardManager::class.java)
@@ -427,17 +435,13 @@ private fun TerminalScreen() {
             if (view.pasteRunsLines(text)) pasting = text else view.paste(text)
         }
     }
-    DisposableEffect(view) {
-        Session.onScreen = { pane -> if (pane == view.pane) view.refresh() }
-        Session.onReattached = { view.reattached() }
-        view.onSelection = { selected = it }
-        view.onModifiers = {
-            ctrl = false
-            alt = false
-        }
-        onDispose {
-            Session.onScreen = null
-            Session.onReattached = null
+    val copy = {
+        view.copy { text ->
+            if (text != null) {
+                clipboard.setPrimaryClip(ClipData.newPlainText("artty", text))
+                // Android 13 and later say so themselves.
+                if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+            }
         }
     }
     val tab = Session.activeTab
@@ -449,6 +453,46 @@ private fun TerminalScreen() {
     /** Search everything, open (with what to search for). */
     var searchingAll by remember { mutableStateOf<String?>(null) }
     var browsing by remember { mutableStateOf(false) }
+    /** Another tab of the window, `by` along (wrapping). */
+    fun otherTab(by: Int) {
+        val tabs = Session.tabs
+        val at = tabs.indexOfFirst { it.active }
+        if (tabs.size > 1 && at >= 0) Session.selectTab(tabs[(at + by).mod(tabs.size)])
+    }
+    DisposableEffect(view) {
+        Session.onScreen = { pane -> if (pane == view.pane) view.refresh() }
+        Session.onImage = { view.imageArrived(it) }
+        Session.onReattached = { view.reattached() }
+        view.onSelection = { selected = it }
+        view.onLink = { link = it }
+        view.onModifiers = {
+            ctrl = false
+            alt = false
+        }
+        // As the Mac's ⌘ keys (with Meta, or Ctrl+Shift as Linux terminals have them).
+        view.onShortcut = { shortcut ->
+            when (shortcut) {
+                Shortcut.NewTab -> Session.newTab(Session.activeTab?.workspace)
+                Shortcut.CloseTab -> Session.activeTab?.let { Session.closeTab(it) }
+                Shortcut.NextTab -> otherTab(1)
+                Shortcut.PreviousTab -> otherTab(-1)
+                is Shortcut.Tab -> Session.tabs.getOrNull(shortcut.index)?.let { Session.selectTab(it) }
+                // Nothing selected: nothing to copy (and not Ctrl+C either).
+                Shortcut.Copy -> if (view.hasSelection) copy()
+                Shortcut.Paste -> paste()
+                Shortcut.Find -> finding = true
+                Shortcut.Bigger -> view.biggerText(1f)
+                Shortcut.Smaller -> view.biggerText(-1f)
+                Shortcut.ResetSize -> view.setFontSize(null)
+            }
+            true
+        }
+        onDispose {
+            Session.onScreen = null
+            Session.onImage = null
+            Session.onReattached = null
+        }
+    }
     ModalNavigationDrawer(
         drawerState = drawer,
         // Opened by its button: a swipe from the edge belongs to the terminal (and its programs).
@@ -498,16 +542,42 @@ private fun TerminalScreen() {
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text("Drag to select more", color = Faint, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                            KeyButton("Copy") {
-                                view.copy { text ->
-                                    if (text != null) {
-                                        clipboard.setPrimaryClip(ClipData.newPlainText("artty", text))
-                                        // Android 13 and later say so themselves.
-                                        if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                            KeyButton("Copy") { copy() }
+                            KeyButton("Clear") { view.clearSelection() }
+                        }
+                    }
+                    // A link tapped (underlined meanwhile).
+                    link?.let { span ->
+                        val done = {
+                            link = null
+                            view.link = null
+                        }
+                        Row(
+                            Modifier.fillMaxWidth().background(Panel).padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(span.url, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.MiddleEllipsis, modifier = Modifier.weight(1f))
+                            KeyButton("Open") {
+                                done()
+                                val uri = Uri.parse(span.url)
+                                // A file on the pane's machine: shown from there.
+                                if (uri.scheme == "file") {
+                                    openFile = uri.path
+                                } else {
+                                    try {
+                                        context.startActivity(Intent(Intent.ACTION_VIEW, uri))
+                                    } catch (_: ActivityNotFoundException) {
+                                        Toast.makeText(context, "Nothing here opens ${uri.scheme ?: "it"} links", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             }
-                            KeyButton("Clear") { view.clearSelection() }
+                            KeyButton("Copy") {
+                                done()
+                                clipboard.setPrimaryClip(ClipData.newPlainText("artty", span.url))
+                                if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                            }
+                            KeyButton("✕") { done() }
                         }
                     }
                 }
@@ -525,19 +595,38 @@ private fun TerminalScreen() {
                 }
                 KeyButton("Esc") { view.key("escape") }
                 KeyButton("Tab") { view.key("tab") }
-                KeyButton("Ctrl", on = ctrl) {
+                // A tap: for the next key. A long press: until tapped again.
+                fun modifier(on: Boolean, lock: Boolean) {
+                    locked = on && lock
+                    view.locked = locked
+                }
+                KeyButton("Ctrl", on = ctrl, locked = ctrl && locked, onLongClick = {
+                    ctrl = true
+                    view.ctrl = true
+                    modifier(true, lock = true)
+                }) {
                     ctrl = !ctrl
                     view.ctrl = ctrl
+                    modifier(ctrl || alt, lock = locked && alt)
                 }
-                KeyButton("Alt", on = alt) {
+                KeyButton("Alt", on = alt, locked = alt && locked, onLongClick = {
+                    alt = true
+                    view.alt = true
+                    modifier(true, lock = true)
+                }) {
                     alt = !alt
                     view.alt = alt
+                    modifier(ctrl || alt, lock = locked && ctrl)
                 }
                 KeyButton("←") { view.key("left") }
                 KeyButton("↓") { view.key("down") }
                 KeyButton("↑") { view.key("up") }
                 KeyButton("→") { view.key("right") }
-                for (c in listOf("|", "-", "/", "~", "_")) KeyButton(c) { view.type(c) }
+                KeyButton("Home") { view.key("home") }
+                KeyButton("End") { view.key("end") }
+                KeyButton("PgUp") { view.key("pageup") }
+                KeyButton("PgDn") { view.key("pagedown") }
+                for (c in listOf("|", "-", "/", "~", "_", "\\", "`", "*", "&", "$", ">", "<")) KeyButton(c) { view.type(c) }
             }
         }
     }
@@ -545,6 +634,10 @@ private fun TerminalScreen() {
     val pane = Session.pane
     if (browsing && pane != null) {
         FilesScreen(pane, onTypePath = { view.type(shellQuoted(it) + " ") }) { browsing = false }
+    }
+    val file = openFile
+    if (file != null && pane != null) {
+        FilesScreen(pane, onTypePath = { view.type(shellQuoted(it) + " ") }, open = file) { openFile = null }
     }
     pasting?.let { text ->
         AlertDialog(
@@ -592,15 +685,24 @@ private fun TabBar(tab: TabItem?, onTabs: () -> Unit, onFind: () -> Unit, onPast
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun KeyButton(label: String, on: Boolean = false, onClick: () -> Unit) {
+private fun KeyButton(label: String, on: Boolean = false, locked: Boolean = false, onLongClick: (() -> Unit)? = null, onClick: () -> Unit) {
     Box(
         Modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(if (on) Accent.copy(alpha = 0.45f) else Color(0x22ffffff))
-            .combinedClickableCompat(onClick)
+            .background(if (locked) Accent.copy(alpha = 0.8f) else if (on) Accent.copy(alpha = 0.45f) else Color(0x22ffffff))
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 12.dp, vertical = 8.dp),
-    ) { Text(label, fontFamily = FontFamily.Monospace, fontSize = 14.sp) }
+    ) {
+        // Locked: underlined, so it reads as staying on.
+        Text(
+            label,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            textDecoration = if (locked) androidx.compose.ui.text.style.TextDecoration.Underline else null,
+        )
+    }
 }
 
 @Composable

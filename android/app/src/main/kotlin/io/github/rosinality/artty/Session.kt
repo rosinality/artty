@@ -95,6 +95,8 @@ object Session : LoginAsker {
         private set
     /** Told when a pane's screen changes (on the main thread). */
     var onScreen: ((ULong) -> Unit)? = null
+    /** An image a screen shows arrived. */
+    var onImage: ((ULong) -> Unit)? = null
     /** Told when the folder watched for a pane changed (on the main thread). */
     var onDirChanged: ((ULong) -> Unit)? = null
     /** Told when a window is shown again after reconnecting: sizes are sent again. */
@@ -527,6 +529,7 @@ object Session : LoginAsker {
             }
             is ClientEvent.Panes -> panes = event.panes.associateBy { it.pane }
             is ClientEvent.Screen -> onScreen?.invoke(event.pane)
+            is ClientEvent.Image -> onImage?.invoke(event.id)
             is ClientEvent.DirChanged -> onDirChanged?.invoke(event.pane)
             is ClientEvent.Clipboard -> copied?.invoke(event.text)
             is ClientEvent.Closed -> lost(event.reason)
