@@ -21,6 +21,9 @@ pub struct ServerAddress {
     pub port: u16,
     /// `artty` there, if not on its PATH.
     pub artty: Option<String>,
+    /// No artty there: its shells, reached with plain ssh (tabs of shells
+    /// that end with the connection; no files or agents).
+    pub plain: bool,
 }
 
 /// What went wrong.
@@ -517,8 +520,14 @@ fn tabs(layout: &WindowLayout) -> Vec<TabItem> {
     tabs
 }
 
-/// Logging in, asked of the app.
-struct Asking(Arc<dyn LoginAsker>);
+/// Logging in, asked of the app; what the server said kept, for why it failed.
+struct Asking(Arc<dyn LoginAsker>, std::sync::Mutex<Vec<String>>);
+
+impl Asking {
+    fn new(asker: Arc<dyn LoginAsker>) -> Arc<Asking> {
+        Arc::new(Asking(asker, Default::default()))
+    }
+}
 
 impl Login for Asking {
     fn host_key(&self, target: &Target, fingerprint: &str, known: HostKey) -> bool {
@@ -526,6 +535,7 @@ impl Login for Asking {
     }
 
     fn said(&self, text: &str) {
+        self.1.lock().unwrap().push(text.to_owned());
         self.0.said(text.to_owned());
     }
 
@@ -608,7 +618,7 @@ pub fn install(
         &target,
         &credentials(keystore, public_key, private_key)?,
         KnownHosts(PathBuf::from(known_hosts)),
-        Arc::new(Asking(login)),
+        Asking::new(login),
         |cpu| builds.build(cpu.to_owned()),
     )?;
     let change = installed.artty_setting(server.artty.as_deref());
@@ -624,8 +634,8 @@ pub struct Connection {
 /// Log in to `server` with the Keystore key (`public_key` is its X.509
 /// `SubjectPublicKeyInfo`, as Keystore gives it), then `private_key`
 /// (OpenSSH format) — the server's own questions are asked too — and greet
-/// the artty server there. Machines' keys are recorded in `known_hosts` (a
-/// file of the app's). Blocks: call it off the main thread.
+/// the artty server there (or, `plain`, serve its shells from here).
+/// Machines' keys are recorded in `known_hosts` (a file of the app's). Blocks: call it off the main thread.
 #[uniffi::export]
 pub fn connect(
     server: ServerAddress,
@@ -638,14 +648,24 @@ pub fn connect(
 ) -> Result<Arc<Connection>, ConnectError> {
     let target = Target { user: server.user, host: server.host, port: server.port };
     let credentials = credentials(keystore, public_key, private_key)?;
-    let link = ssh::connect(
-        &target,
-        &ssh::server_command(server.artty.as_deref()),
-        &credentials,
-        KnownHosts(PathBuf::from(known_hosts)),
-        Arc::new(Asking(login)),
-    )?;
-    let (client, received) = Client::start(link, env!("CARGO_PKG_VERSION"))?;
+    let known = KnownHosts(PathBuf::from(known_hosts));
+    let asking = Asking::new(login);
+    let link = if server.plain {
+        ssh::shells(&target, &credentials, known, asking.clone())?
+    } else {
+        let command = ssh::server_command(server.artty.as_deref());
+        ssh::connect(&target, &command, &credentials, known, asking.clone())?
+    };
+    let (client, received) = match Client::start(link, env!("CARGO_PKG_VERSION")) {
+        Ok(started) => started,
+        // Its shell saying there's no artty: say so (the app offers plain ssh).
+        Err(artty_client::StartError::Failed(reason)) => {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            let said = asking.1.lock().unwrap().clone();
+            return Err(artty_core::remote::not_installed(&said).unwrap_or(reason).into());
+        },
+        Err(err) => return Err(err.into()),
+    };
     std::thread::Builder::new()
         .name("artty-events".into())
         .spawn(move || {

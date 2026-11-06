@@ -6,19 +6,23 @@ import org.json.JSONObject
 import java.io.File
 import uniffi.artty_android.keystorePublicKey
 
-/** A server to connect to: `user@host:port`, and artty's path there if not on its PATH. */
+/**
+ * A server to connect to: `user@host:port`, and artty's path there if not on its PATH; or,
+ * `plain`, a machine without artty, whose shells this app runs over plain ssh.
+ */
 data class Server(
     val name: String,
     val user: String,
     val host: String,
     val port: Int = 22,
     val artty: String? = null,
+    val plain: Boolean = false,
 ) {
     val address get() = if (port == 22) "$user@$host" else "$user@$host:$port"
 
     companion object {
         /** `user@host` or `user@host:port`. */
-        fun parse(name: String, address: String, artty: String?): Server? {
+        fun parse(name: String, address: String, artty: String?, plain: Boolean = false): Server? {
             val at = address.indexOf('@')
             if (at <= 0) return null
             val user = address.substring(0, at)
@@ -28,7 +32,7 @@ data class Server(
                 if (colon > 0) rest.substring(0, colon) to (rest.substring(colon + 1).toIntOrNull() ?: return null)
                 else rest to 22
             if (host.isBlank()) return null
-            return Server(name.ifBlank { host }, user, host, port, artty?.ifBlank { null })
+            return Server(name.ifBlank { host }, user, host, port, artty?.ifBlank { null }.takeUnless { plain }, plain)
         }
     }
 }
@@ -47,6 +51,7 @@ class Store(private val context: Context) {
                 o.getString("host"),
                 o.optInt("port", 22),
                 o.optString("artty").ifBlank { null },
+                o.optBoolean("plain", false),
             )
         }
     }
@@ -60,7 +65,8 @@ class Store(private val context: Context) {
                     .put("user", s.user)
                     .put("host", s.host)
                     .put("port", s.port)
-                    .put("artty", s.artty ?: ""),
+                    .put("artty", s.artty ?: "")
+                    .put("plain", s.plain),
             )
         }
         prefs.edit().putString("servers", list.toString()).apply()

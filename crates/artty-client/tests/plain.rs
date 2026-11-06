@@ -1,0 +1,249 @@
+//! The stand-in for a server on a machine without artty (`plain`), with
+//! shells that echo what's typed, through the client as any server's.
+
+use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use artty_client::plain::{self, Shells};
+use artty_client::{Client, Event, Key};
+use artty_core::TerminalSize;
+use artty_core::vt::tty::RemoteEnds;
+
+/// Shells that say `$ ` and echo each line back; `exit` ends one.
+#[derive(Clone, Default)]
+struct Echo {
+    closed: Arc<AtomicBool>,
+    sizes: Arc<Mutex<Vec<TerminalSize>>>,
+}
+
+impl Shells for Echo {
+    fn open(
+        &self,
+        size: TerminalSize,
+        ends: RemoteEnds,
+        mut sizes: tokio::sync::mpsc::UnboundedReceiver<TerminalSize>,
+    ) {
+        self.sizes.lock().unwrap().push(size);
+        let seen = self.sizes.clone();
+        std::thread::spawn(move || {
+            while let Some(size) = sizes.blocking_recv() {
+                seen.lock().unwrap().push(size);
+            }
+        });
+        std::thread::spawn(move || {
+            let RemoteEnds { mut stream, mut ended } = ends;
+            let _ = stream.write_all(b"$ ");
+            let mut line = Vec::new();
+            let mut byte = [0];
+            while let Ok(1) = stream.read(&mut byte) {
+                if byte[0] == b'\r' {
+                    let _ = stream.write_all(b"\r\n");
+                    if line == b"exit" {
+                        let _ = stream.write_all(b"bye\r\n");
+                        let _ = ended.write_all(&[1]);
+                        return;
+                    }
+                    line.clear();
+                    let _ = stream.write_all(b"$ ");
+                } else {
+                    line.push(byte[0]);
+                    let _ = stream.write_all(&byte);
+                }
+            }
+        });
+    }
+
+    fn ping(&self, answered: Box<dyn FnOnce() + Send>) {
+        answered();
+    }
+
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+}
+
+fn until<T>(
+    events: &std::sync::mpsc::Receiver<Event>,
+    mut want: impl FnMut(&Event) -> Option<T>,
+) -> T {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(event) = events.recv_timeout(left) else { break };
+        if let Some(found) = want(&event) {
+            return found;
+        }
+    }
+    panic!("not in time");
+}
+
+/// A pane's screen text, lines joined.
+fn text(client: &Client, pane: u64) -> String {
+    let Some(screen) = client.screen(pane) else { return String::new() };
+    let lines = screen.frame.lines.iter().map(|line| {
+        let mut text = String::new();
+        for run in &line.runs {
+            while text.chars().count() < run.column {
+                text.push(' ');
+            }
+            text.push_str(&run.text);
+        }
+        text.trim_end().to_owned()
+    });
+    lines.collect::<Vec<_>>().join("\n")
+}
+
+fn wait_for(client: &Client, events: &std::sync::mpsc::Receiver<Event>, pane: u64, want: &str) {
+    if text(client, pane).contains(want) {
+        return;
+    }
+    until(events, |e| {
+        matches!(e, Event::Screen { pane: p } if *p == pane && text(client, pane).contains(want))
+            .then_some(())
+    });
+}
+
+#[test]
+fn tabs_of_shells() {
+    let shells = Echo::default();
+    let link = plain::serve(Box::new(shells.clone()), "me@box".into()).unwrap();
+    let (client, events) = Client::start(link, "test").unwrap();
+    assert_eq!(client.server_version, plain::SERVER_VERSION);
+
+    // Its one window, there before it's shown.
+    client.list_windows().unwrap();
+    let windows = until(&events, |e| match e {
+        Event::Windows(windows) => Some(windows.clone()),
+        _ => None,
+    });
+    assert_eq!(windows.iter().map(|w| w.window).collect::<Vec<_>>(), [plain::WINDOW]);
+
+    client.attach(Some(plain::WINDOW), true).unwrap();
+    until(&events, |e| matches!(e, Event::Attached { .. }).then_some(()));
+    let pane = until(&events, |e| match e {
+        Event::Layout { layout, .. } => {
+            assert_eq!(layout.workspaces[0].title, "me@box");
+            layout.active_tab().map(|t| t.focused)
+        },
+        _ => None,
+    });
+    let size = TerminalSize { columns: 50, lines: 10, cell_width: 9, cell_height: 18 };
+    client.resize(pane, size).unwrap();
+    wait_for(&client, &events, pane, "$");
+
+    client.input(pane, b"hello there".to_vec()).unwrap();
+    client
+        .key(pane, &Key { key: "enter", shift: false, alt: false, control: false, platform: false })
+        .unwrap();
+    wait_for(&client, &events, pane, "hello there\n$");
+    assert!(shells.sizes.lock().unwrap().contains(&size), "the shell is told its size");
+
+    // Finding, selecting, links: as on a server.
+    let found = client.find(pane, "there", true, true).unwrap();
+    assert!(found.found && found.total == 1);
+    assert_eq!(client.selection_text(pane).unwrap().as_deref(), Some("there"));
+    client.end_find(pane).unwrap();
+    client.input(pane, b"see https://example.com/x\r".to_vec()).unwrap();
+    wait_for(&client, &events, pane, "example.com/x\n$");
+    let link = client.link_at(pane, 1, 10).unwrap();
+    assert_eq!(link.map(|l| l.0).as_deref(), Some("https://example.com/x"));
+    assert_eq!(client.search_output("hello").unwrap().len(), 1);
+    assert!(client.list_dir(pane, None, false).is_err(), "no files without artty there");
+
+    // A second tab, shown; then closed, the first is again.
+    client.new_tab(plain::WINDOW, None).unwrap();
+    let second = until(&events, |e| match e {
+        Event::Layout { layout, .. } if layout.workspaces[0].tabs.len() == 2 => {
+            assert_eq!(layout.workspaces[0].active, 1);
+            layout.active_tab().map(|t| t.focused)
+        },
+        _ => None,
+    });
+    assert_ne!(second, pane);
+    wait_for(&client, &events, second, "$");
+    client.close_tab(1, 1).unwrap();
+    until(&events, |e| match e {
+        Event::Layout { layout, .. } => (layout.workspaces[0].tabs.len() == 1
+            && layout.active_tab().unwrap().focused == pane)
+            .then_some(()),
+        _ => None,
+    });
+
+    // A shell ending at once is kept, for what it said.
+    client.new_tab(plain::WINDOW, None).unwrap();
+    let quick = until(&events, |e| match e {
+        Event::Layout { layout, .. } if layout.workspaces[0].tabs.len() == 2 => {
+            layout.active_tab().map(|t| t.focused)
+        },
+        _ => None,
+    });
+    client.input(quick, b"exit\r".to_vec()).unwrap();
+    wait_for(&client, &events, quick, "bye");
+    std::thread::sleep(Duration::from_millis(300));
+    client.list_windows().unwrap();
+    let tabs = until(&events, |e| match e {
+        Event::Windows(windows) => Some(windows[0].tabs),
+        _ => None,
+    });
+    assert_eq!(tabs, 2);
+
+    // The last tab closed closes the window.
+    client.close_tab(1, 1).unwrap();
+    client.close_tab(1, 0).unwrap();
+    until(&events, |e| matches!(e, Event::WindowClosed { .. }).then_some(()));
+
+    // The connection gone: so is the stand-in.
+    shells.closed.store(true, Ordering::Relaxed);
+    until(&events, |e| matches!(e, Event::Closed(_)).then_some(()));
+}
+
+/// Against a real machine: `ARTTY_PLAIN_TARGET=user@host[:port]`, logging
+/// in with the key in `ARTTY_PLAIN_KEY` (else the agent and `~/.ssh`'s), its
+/// key known in `ARTTY_PLAIN_KNOWN_HOSTS`.
+#[test]
+#[ignore]
+fn over_ssh() {
+    use artty_client::ssh::{self, Credentials, HostKey, KnownHosts, Login, Target};
+    struct Known;
+    impl Login for Known {
+        fn host_key(&self, _: &Target, _: &str, _: HostKey) -> bool {
+            false
+        }
+        fn said(&self, text: &str) {
+            eprintln!("said: {text}");
+        }
+        fn answer(&self, _: &str, _: &[(String, bool)]) -> Option<Vec<String>> {
+            None
+        }
+    }
+    let target = Target::parse(&std::env::var("ARTTY_PLAIN_TARGET").unwrap()).unwrap();
+    let known = KnownHosts(std::env::var("ARTTY_PLAIN_KNOWN_HOSTS").unwrap().into());
+    let credentials = match std::env::var("ARTTY_PLAIN_KEY") {
+        Ok(path) => Credentials {
+            keys: vec![(ssh::read_key(path.as_ref()).unwrap(), None)],
+            ..Default::default()
+        },
+        Err(_) => Credentials::usual(),
+    };
+    let link = ssh::shells(&target, &credentials, known, Arc::new(Known)).unwrap();
+    let (client, events) = Client::start(link, "test").unwrap();
+    client.attach(Some(plain::WINDOW), true).unwrap();
+    let pane = until(&events, |e| match e {
+        Event::Layout { layout, .. } => layout.active_tab().map(|t| t.focused),
+        _ => None,
+    });
+    let size = TerminalSize { columns: 70, lines: 12, cell_width: 9, cell_height: 18 };
+    client.resize(pane, size).unwrap();
+    client.input(pane, b"echo $TERM; stty size; echo d''one\r".to_vec()).unwrap();
+    wait_for(&client, &events, pane, "done");
+    let shown = text(&client, pane);
+    eprintln!("{shown}");
+    assert!(shown.contains("xterm-256color") && shown.contains("12 70"));
+    // Pings are answered by the machine.
+    std::thread::sleep(Duration::from_millis(500));
+    client.ping().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(client.silent_for() < Duration::from_millis(200), "no answer");
+    client.input(pane, b"exit\r".to_vec()).unwrap();
+}

@@ -5,6 +5,7 @@
 
 mod client;
 mod link;
+pub mod plain;
 pub mod ssh;
 
 pub use artty_core::keys::Key;

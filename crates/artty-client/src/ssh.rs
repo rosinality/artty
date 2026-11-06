@@ -272,6 +272,131 @@ pub fn connect(
     })
 }
 
+/// Log in to `target`, a machine without artty, for its shells: the link
+/// to a stand-in for an artty server, here ([`crate::plain`]), whose tabs
+/// are shells there, over this connection.
+pub fn shells(
+    target: &Target,
+    credentials: &Credentials,
+    known: KnownHosts,
+    login: Arc<dyn Login>,
+) -> Result<Link, String> {
+    let (runtime, handle) = log_in(target, credentials, known, login)?;
+    let shells = Shells { handle: Arc::new(handle), runtime: Some(runtime) };
+    crate::plain::serve(Box::new(shells), format!("{}@{}", target.user, target.host))
+}
+
+/// Shells over one ssh connection, for [`crate::plain`].
+struct Shells {
+    handle: Arc<Handle<Handler>>,
+    runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl crate::plain::Shells for Shells {
+    fn open(
+        &self,
+        size: artty_core::TerminalSize,
+        ends: artty_core::vt::tty::RemoteEnds,
+        mut sizes: tokio::sync::mpsc::UnboundedReceiver<artty_core::TerminalSize>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let Some(runtime) = &self.runtime else { return };
+        let handle = self.handle.clone();
+        runtime.spawn(async move {
+            let pixels = |s: artty_core::TerminalSize| {
+                (u32::from(s.columns) * u32::from(s.cell_width), u32::from(s.lines) * u32::from(s.cell_height))
+            };
+            let opened = async {
+                let channel = handle.channel_open_session().await?;
+                let (width, height) = pixels(size);
+                let (columns, lines) = (u32::from(size.columns), u32::from(size.lines));
+                channel.request_pty(true, "xterm-256color", columns, lines, width, height, &[]).await?;
+                // Most servers take only LANG and LC_*: asked, not insisted on.
+                channel.set_env(false, "COLORTERM", "truecolor").await?;
+                channel.request_shell(true).await?;
+                Ok::<_, russh::Error>(channel)
+            };
+            let mut channel = match opened.await {
+                Ok(channel) => channel,
+                Err(err) => return crate::plain::refuse(ends, &format!("No shell there: {err}")),
+            };
+            let artty_core::vt::tty::RemoteEnds { stream, mut ended } = ends;
+            let stream = stream.set_nonblocking(true).and_then(|()| tokio::net::UnixStream::from_std(stream));
+            let Ok(stream) = stream else { return };
+            let (mut from_terminal, mut to_terminal) = stream.into_split();
+            let mut typed = vec![0; 16 * 1024];
+            let mut exited = false;
+            loop {
+                tokio::select! {
+                    message = channel.wait() => match message {
+                        Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
+                            if to_terminal.write_all(&data).await.is_err() {
+                                break;
+                            }
+                        },
+                        Some(ChannelMsg::ExitStatus { .. } | ChannelMsg::ExitSignal { .. }) => exited = true,
+                        Some(ChannelMsg::Close) | None => break,
+                        Some(_) => {},
+                    },
+                    read = from_terminal.read(&mut typed) => match read {
+                        // The terminal let go (its tab closed): so does the shell.
+                        Ok(0) | Err(_) => {
+                            let _ = channel.close().await;
+                            return;
+                        },
+                        Ok(n) => {
+                            if channel.data(&typed[..n]).await.is_err() {
+                                break;
+                            }
+                        },
+                    },
+                    Some(size) = sizes.recv() => {
+                        let (width, height) = pixels(size);
+                        let (columns, lines) = (u32::from(size.columns), u32::from(size.lines));
+                        let _ = channel.window_change(columns, lines, width, height).await;
+                    },
+                }
+            }
+            // Ended without exiting: the connection is probably going, which
+            // ends the window (to be reached again), not this tab.
+            if !exited {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if handle.is_closed() {
+                    return;
+                }
+            }
+            use std::io::Write;
+            let _ = ended.write_all(&[1]);
+        });
+    }
+
+    fn ping(&self, answered: Box<dyn FnOnce() + Send>) {
+        let Some(runtime) = &self.runtime else { return };
+        let handle = self.handle.clone();
+        runtime.spawn(async move {
+            if handle.send_ping().await.is_ok() && !handle.is_closed() {
+                answered();
+            }
+        });
+    }
+
+    fn closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+}
+
+impl Drop for Shells {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.take() {
+            let handle = self.handle.clone();
+            runtime.block_on(async {
+                let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+            });
+            runtime.shutdown_timeout(Duration::from_secs(1));
+        }
+    }
+}
+
 /// Install artty on `target`, as the Mac app does
 /// ([`artty_core::remote::installing`]): `build` gives the build for Linux on
 /// a CPU (`x86_64` or `aarch64`), if there's one.

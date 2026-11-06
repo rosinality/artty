@@ -321,17 +321,8 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
             // Let the last of stderr arrive.
             std::thread::sleep(Duration::from_millis(100));
             let said = said.lock().unwrap().clone();
-            // zsh, bash: "command not found" (or for a path, "no such
-            // file"); fish: "Unknown command".
-            let missing = said.iter().find(|line| {
-                let line = line.to_lowercase();
-                line.contains("artty")
-                    && ["not found", "unknown command", "no such file"]
-                        .iter()
-                        .any(|missing| line.contains(missing))
-            });
-            if let Some(missing) = missing {
-                return Err(format!("{NOT_INSTALLED} ({missing})"));
+            if let Some(missing) = not_installed(&said) {
+                return Err(missing);
             }
             let timed_out = timed_out.load(std::sync::atomic::Ordering::SeqCst);
             match said.last() {
@@ -466,6 +457,21 @@ fn run_asking(
 /// The last thing a failed command said on stderr: its last line with words
 /// — not the source line a shell quotes under its error, with `^~~^`
 /// pointing into it (as fish does), nor an empty `fish:`.
+/// What failing to run artty there said (its stderr's lines), if it says
+/// artty isn't there: [`NOT_INSTALLED`], and the line.
+pub fn not_installed(said: &[String]) -> Option<String> {
+    // zsh, bash: "command not found" (or for a path, "no such file"); fish:
+    // "Unknown command".
+    let missing = said.iter().find(|line| {
+        let line = line.to_lowercase();
+        line.contains("artty")
+            && ["not found", "unknown command", "no such file"]
+                .iter()
+                .any(|missing| line.contains(missing))
+    })?;
+    Some(format!("{NOT_INSTALLED} ({missing})"))
+}
+
 pub fn last_said(stderr: &str) -> Option<String> {
     let mut lines: Vec<&str> =
         stderr.lines().map(str::trim).filter(|line| !line.is_empty()).collect();

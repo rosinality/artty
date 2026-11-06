@@ -46,6 +46,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
@@ -200,7 +201,7 @@ private fun ServersScreen(store: Store) {
                 ) {
                     Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
                         Text(server.name, fontWeight = FontWeight.Medium)
-                        Text(server.address, color = Faint, fontSize = 13.sp)
+                        Text(if (server.plain) "${server.address} · plain ssh" else server.address, color = Faint, fontSize = 13.sp)
                     }
                     Box {
                         TextButton(onClick = { menu = true }) { Text("⋯", fontSize = 20.sp, color = Faint) }
@@ -232,7 +233,7 @@ private fun ServersScreen(store: Store) {
             if (servers.isEmpty()) {
                 item {
                     Text(
-                        "Add a server: a machine running artty, reached by ssh. This phone logs in with its own key (see “This phone's key”).",
+                        "Add a server: a machine running artty, reached by ssh, or any other with plain ssh. This phone logs in with its own key (see “This phone's key”).",
                         color = Faint,
                         modifier = Modifier.padding(16.dp),
                     )
@@ -274,7 +275,8 @@ private fun ServerDialog(old: Server?, onDone: (Server?) -> Unit) {
     var name by remember { mutableStateOf(old?.name ?: "") }
     var address by remember { mutableStateOf(old?.address ?: "") }
     var artty by remember { mutableStateOf(old?.artty ?: "") }
-    val parsed = Server.parse(name, address.trim(), artty.trim())
+    var plain by remember { mutableStateOf(old?.plain ?: false) }
+    val parsed = Server.parse(name, address.trim(), artty.trim(), plain)
     val badAddress = address.isNotBlank() && parsed == null
     AlertDialog(
         onDismissRequest = { onDone(null) },
@@ -293,7 +295,20 @@ private fun ServerDialog(old: Server?, onDone: (Server?) -> Unit) {
                         null
                     },
                 )
-                OutlinedTextField(artty, { artty = it }, label = { Text("artty there (if not on its PATH)") }, singleLine = true)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("artty on it")
+                        Text(
+                            if (plain) "Plain ssh: its shells, in tabs, ending when the connection does" else "Tabs that keep running, its files, agents",
+                            color = Faint,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    Switch(checked = !plain, onCheckedChange = { plain = !it })
+                }
+                if (!plain) {
+                    OutlinedTextField(artty, { artty = it }, label = { Text("artty there (if not on its PATH)") }, singleLine = true)
+                }
             }
         },
         confirmButton = {
@@ -710,8 +725,26 @@ private fun FailedScreen(phase: Phase.Failed, store: Store) {
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Couldn't connect to ${phase.server.name}", fontWeight = FontWeight.SemiBold)
         Text(phase.reason, color = Faint, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+        // No artty there: its shells, with plain ssh, from now on.
+        val noArtty = !phase.server.plain && "artty isn't installed" in phase.reason
+        if (noArtty) {
+            Text(
+                "This app can still open its shells with plain ssh: tabs of shells that end when the " +
+                    "connection does, without its files or agents. Or install artty there, for tabs that keep running.",
+                color = Faint,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { Session.connect(phase.server) }) { Text("Try again") }
+            if (noArtty) {
+                Button(onClick = {
+                    val plain = phase.server.copy(artty = null, plain = true)
+                    store.saveServers(store.servers().map { if (it == phase.server) plain else it })
+                    Session.connect(plain)
+                }) { Text("Use plain ssh") }
+                TextButton(onClick = { Session.connect(phase.server) }) { Text("Try again") }
+            } else {
+                Button(onClick = { Session.connect(phase.server) }) { Text("Try again") }
+            }
             TextButton(onClick = { Session.disconnect() }) { Text("Back") }
         }
     }

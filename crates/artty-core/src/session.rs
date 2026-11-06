@@ -166,20 +166,7 @@ impl Session {
         sink: Arc<dyn Fn(SessionId, Event) + Send + Sync>,
     ) -> io::Result<Self> {
         let proxy = EventProxy { id, pty: Arc::new(OnceLock::new()), sink };
-
-        let mut config = term_config();
-        if let Some(scrollback) = options.scrollback {
-            config.scrolling_history = scrollback;
-        }
-        config.default_cursor_style.shape = options.cursor_shape;
-        let term_config = config.clone();
-        let mut term = Term::new(config, &size, proxy.clone());
-        term.set_cell_size(size.cell_width, size.cell_height);
-        if let Some(output) = &options.initial_output {
-            artty_vt::ansi::Processor::<artty_vt::ansi::StdSyncHandler>::new()
-                .advance(&mut term, output);
-        }
-        let term = Arc::new(FairMutex::new(term));
+        let (term, term_config) = new_term(&options, size, proxy.clone());
 
         let mut env = HashMap::from([
             ("TERM".to_owned(), "xterm-256color".to_owned()),
@@ -214,6 +201,48 @@ impl Session {
             search: None,
             term_config,
         })
+    }
+
+    /// A terminal whose program runs elsewhere (a shell over ssh) instead of
+    /// on a PTY here: its bytes go through the returned ends (see
+    /// [`tty::RemoteEnds`]), its sizes to `resize`. Of `options`, only what
+    /// the terminal takes counts (scrollback, cursor, output shown first).
+    pub fn remote(
+        id: SessionId,
+        options: SessionOptions,
+        size: TerminalSize,
+        theme: Arc<Theme>,
+        sink: Arc<dyn Fn(SessionId, Event) + Send + Sync>,
+        mut resize: Box<dyn FnMut(TerminalSize) + Send>,
+    ) -> io::Result<(Self, tty::RemoteEnds)> {
+        let proxy = EventProxy { id, pty: Arc::new(OnceLock::new()), sink };
+        let (term, term_config) = new_term(&options, size, proxy.clone());
+        let (remote, ends) = tty::Remote::new(Box::new(move |window: WindowSize| {
+            resize(TerminalSize {
+                columns: window.num_cols,
+                lines: window.num_lines,
+                cell_width: window.cell_width,
+                cell_height: window.cell_height,
+            })
+        }))?;
+        // What it said last (why it ended) is shown.
+        let event_loop = EventLoop::new(term.clone(), proxy.clone(), remote, true, false)?;
+        let sender = event_loop.channel();
+        let _ = proxy.pty.set(sender.clone());
+        event_loop.spawn();
+        let session = Self {
+            id,
+            term,
+            pty: sender,
+            probe: None,
+            size,
+            theme,
+            shell: ShellTracker::default(),
+            reported_cwd: None,
+            search: None,
+            term_config,
+        };
+        Ok((session, ends))
     }
 
     /// Stop reading the PTY for a hand-over. Returns when everything read so
@@ -806,6 +835,27 @@ impl Session {
             warn!("session {}: PTY is gone: {err}", self.id);
         }
     }
+}
+
+/// A terminal for a new session, as `options` say, and its options.
+fn new_term(
+    options: &SessionOptions,
+    size: TerminalSize,
+    proxy: EventProxy,
+) -> (Arc<FairMutex<Term<EventProxy>>>, Config) {
+    let mut config = term_config();
+    if let Some(scrollback) = options.scrollback {
+        config.scrolling_history = scrollback;
+    }
+    config.default_cursor_style.shape = options.cursor_shape;
+    let term_config = config.clone();
+    let mut term = Term::new(config, &size, proxy);
+    term.set_cell_size(size.cell_width, size.cell_height);
+    if let Some(output) = &options.initial_output {
+        artty_vt::ansi::Processor::<artty_vt::ansi::StdSyncHandler>::new()
+            .advance(&mut term, output);
+    }
+    (Arc::new(FairMutex::new(term)), term_config)
 }
 
 /// Terminal options for every session: programs can opt into the kitty

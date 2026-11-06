@@ -12,6 +12,10 @@ use polling::{Event, PollMode, Poller};
 mod unix;
 #[cfg(not(windows))]
 pub use self::unix::*;
+#[cfg(not(windows))]
+mod remote;
+#[cfg(not(windows))]
+pub use self::remote::{Remote, RemoteEnds};
 
 #[cfg(windows)]
 pub mod windows;

@@ -85,8 +85,8 @@ fun TabsDrawer(server: String, onSearch: () -> Unit, onFiles: () -> Unit, onChos
     ModalDrawerSheet(drawerContainerColor = Background, drawerContentColor = Ink) {
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(server, fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
-            // The shown pane's machine's files, from its folder.
-            TextButton(onClick = onFiles) { Text("Files") }
+            // The shown pane's machine's files, from its folder (artty there reads them).
+            if (!Session.plain) TextButton(onClick = onFiles) { Text("Files") }
             // The Mac's ⌘⇧F: every pane's output, and agents' conversations.
             TextButton(onClick = onSearch) { Text("Search") }
         }
@@ -110,7 +110,9 @@ fun TabsDrawer(server: String, onSearch: () -> Unit, onFiles: () -> Unit, onChos
                 Session.newTab()
                 onChosen()
             }, modifier = Modifier.weight(1f)) { Text("New tab") }
-            OutlinedButton(onClick = { asking = Asking.NewWorkspace }, modifier = Modifier.weight(1f)) { Text("New workspace") }
+            if (!Session.plain) {
+                OutlinedButton(onClick = { asking = Asking.NewWorkspace }, modifier = Modifier.weight(1f)) { Text("New workspace") }
+            }
         }
     }
     when (val a = asking) {
@@ -188,7 +190,8 @@ private fun WorkspaceHeading(first: TabItem, tabs: Int, ask: (Asking) -> Unit) {
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        Box {
+        // Plain ssh: one workspace, the machine's, with nothing to change about it.
+        if (!Session.plain) Box {
             TextButton(onClick = { menu = true }) { Text("⋯", color = Faint) }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 DropdownMenuItem(text = { Text("New tab here") }, onClick = {

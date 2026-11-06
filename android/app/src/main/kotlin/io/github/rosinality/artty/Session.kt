@@ -102,6 +102,9 @@ object Session : LoginAsker {
     /** Told when a window is shown again after reconnecting: sizes are sent again. */
     var onReattached: (() -> Unit)? = null
 
+    /** Connected with plain ssh: no artty there, so no files, workspaces or agents. */
+    val plain get() = server?.plain == true
+
     /** The tab shown, and the pane shown of it. */
     val activeTab get() = tabs.firstOrNull { it.active }
     val pane: ULong?
@@ -184,7 +187,7 @@ object Session : LoginAsker {
     private fun open() {
         val server = server ?: return
         val generation = ++generation
-        val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty)
+        val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty, server.plain)
         val oldKey = store.oldKey()
         val knownHosts = store.knownHosts
         Thread {
@@ -235,7 +238,7 @@ object Session : LoginAsker {
         if (shown.installing) return
         phase = shown.copy(installing = true, error = null)
         val server = shown.server
-        val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty)
+        val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty, false)
         val oldKey = store.oldKey()
         val knownHosts = store.knownHosts
         val builds = AppBuilds(context)
@@ -499,7 +502,8 @@ object Session : LoginAsker {
                         phase = Phase.Choosing(server, event.windows)
                     }
                 }
-                is Phase.Choosing -> phase = p.copy(windows = event.windows)
+                // Plain ssh: one window, its shells, shown at once.
+                is Phase.Choosing -> if (server.plain) show(event.windows.firstOrNull()?.window) else phase = p.copy(windows = event.windows)
                 else -> {}
             }
             is ClientEvent.Attached -> {
@@ -522,6 +526,8 @@ object Session : LoginAsker {
             is ClientEvent.WindowClosed -> {
                 val shown = phase as? Phase.Shown ?: return
                 if (shown.window == event.window) {
+                    // Plain ssh: the last shell ended, and with it the visit.
+                    if (server.plain) return disconnect()
                     tabs = emptyList()
                     phase = Phase.Choosing(server)
                     runCatching { connection?.listWindows() }

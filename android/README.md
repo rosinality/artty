@@ -35,6 +35,13 @@ in Android Keystore. The server needs this build of artty (the protocol must
 match): connecting to one that runs another build offers to install this one
 there.
 
+A machine without artty works too, with plain ssh: turn off "artty on it" for
+the server (connecting to one where artty isn't found offers to). Its tabs are
+shells there, each its own ssh channel, drawn by artty's terminal on the phone,
+so finding, selecting and links work as they do on an artty server. But they
+end with the connection: reconnecting (after the phone slept, say) opens a new
+shell, and there are no files, workspaces or agents.
+
 The keys row's Ctrl and Alt hold for the next key; a long press keeps them on
 until tapped again. The volume keys, held, add what a phone keyboard lacks:
 volume down is Ctrl, and volume up with W A S D gives the arrows, E Esc, T Tab,
