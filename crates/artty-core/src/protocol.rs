@@ -20,7 +20,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// message kinds); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -925,6 +925,9 @@ pub enum ServerMessage {
     Notify {
         title: String,
         body: String,
+        /// The pane it's about, and its window, for showing it.
+        window: Option<WindowId>,
+        pane: Option<PaneId>,
     },
     /// Something for the app to do, from the `artty` command.
     App(AppCommand),

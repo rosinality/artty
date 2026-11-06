@@ -24,7 +24,10 @@ fn scratch() -> Option<(Link, Scratch)> {
     if !artty.exists() {
         return None;
     }
-    let dir = std::env::temp_dir().join(format!("artty-client-{}", std::process::id()));
+    // One per test: tests run side by side.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("artty-client-{}-{n}", std::process::id()));
     std::fs::create_dir_all(dir.join("t")).unwrap();
     let d = dir.display();
     let command = [
@@ -100,6 +103,65 @@ fn shows_a_window_and_types_in_it() {
         _ => None,
     });
     assert_eq!(apps, 1);
+}
+
+/// The command an app connects with, for a second app on the same server.
+fn link_to(dir: &std::path::Path) -> Link {
+    let exe = std::env::current_exe().unwrap();
+    let artty = exe.parent().unwrap().parent().unwrap().join("artty");
+    let d = dir.display();
+    Link::command(&[
+        "env".to_owned(),
+        format!("HOME={d}"),
+        format!("XDG_STATE_HOME={d}/state"),
+        format!("TMPDIR={d}/t/"),
+        artty.display().to_string(),
+        "server".to_owned(),
+        "--stdio".to_owned(),
+    ])
+    .unwrap()
+}
+
+/// Shown a new window: it and its pane.
+fn new_window(client: &Client, events: &std::sync::mpsc::Receiver<Event>) -> (u64, u64) {
+    client.attach(None, false).unwrap();
+    let window = until(events, |e| match e {
+        Event::Attached { window } => Some(*window),
+        _ => None,
+    });
+    let pane = until(events, |e| match e {
+        Event::Layout { window: w, layout } if *w == window => {
+            layout.active_tab().map(|t| t.focused)
+        },
+        _ => None,
+    });
+    let size = TerminalSize { columns: 60, lines: 12, cell_width: 8, cell_height: 16 };
+    client.resize(pane, size).unwrap();
+    (window, pane)
+}
+
+#[test]
+fn notifications_go_to_the_app_in_use() {
+    let Some((link, scratch)) = scratch() else { return };
+    let (phone, phone_events) = Client::start(link, "test").unwrap();
+    new_window(&phone, &phone_events);
+    let (mac, mac_events) = Client::start(link_to(&scratch.0), "test").unwrap();
+    let (window, pane) = new_window(&mac, &mac_events);
+    // Typed at (so in use), then put away: a notification from it, a moment later.
+    mac.input(pane, b"sleep 1; printf '\\033]9;from-the-pane\\007'".to_vec()).unwrap();
+    assert!(mac.key(pane, &Key::parse("enter")).unwrap());
+    mac.focus(window, false).unwrap();
+    let (w, p) = until(&mac_events, |e| match e {
+        Event::Notify { body, window, pane, .. } if body == "from-the-pane" => Some((*window, *pane)),
+        _ => None,
+    });
+    assert_eq!((w, p), (Some(window), Some(pane)));
+    // Not the phone: its user is at the Mac.
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        let Ok(event) = phone_events.recv_timeout(left) else { break };
+        assert!(!matches!(event, Event::Notify { .. }), "told the phone too");
+    }
 }
 
 fn stop(dir: &std::path::Path) {

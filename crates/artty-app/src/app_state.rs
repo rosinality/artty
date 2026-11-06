@@ -734,7 +734,7 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                 let _ = std::process::Command::new("osascript").args(["-e", "beep"]).spawn();
             }
         },
-        ServerMessage::Notify { title, body } => {
+        ServerMessage::Notify { title, body, .. } => {
             // Another machine's: say which.
             let title = match cx.global::<Shared>().connections.get(server as usize) {
                 Some(connection) if server != LOCAL => format!("{} · {title}", connection.name),

@@ -52,6 +52,9 @@ pub enum Event {
     Notify {
         title: String,
         body: String,
+        /// The pane it's about, and its window.
+        window: Option<WindowId>,
+        pane: Option<PaneId>,
     },
     /// A program copied this.
     Clipboard {
@@ -154,7 +157,9 @@ impl Client {
                             },
                             ServerMessage::Panes { panes } => Event::Panes(panes),
                             ServerMessage::Bell { pane } => Event::Bell { pane },
-                            ServerMessage::Notify { title, body } => Event::Notify { title, body },
+                            ServerMessage::Notify { title, body, window, pane } => {
+                                Event::Notify { title, body, window, pane }
+                            },
                             ServerMessage::Clipboard { text } => Event::Clipboard { text },
                             ServerMessage::Reply { id, reply } => {
                                 // Waited for (Client::query), or the windows asked for.

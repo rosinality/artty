@@ -97,6 +97,14 @@ object Session : LoginAsker {
     private var failures = 0
     /** Reaching the server again, after a wait. */
     private val retry = Runnable { open() }
+    /** A pane to show once its window is (a notification tapped). */
+    private var revealing: ULong? = null
+    /** The app is in front: the pane shown is seen. */
+    var resumed = false
+        set(value) {
+            field = value
+            seeShown()
+        }
 
     /** Silent this long (seconds), the connection is taken for lost (pings go every 5). */
     private const val SILENCE = 20.0
@@ -134,6 +142,7 @@ object Session : LoginAsker {
         drop()
         tabs = emptyList()
         chosenPane = null
+        revealing = null
         question = null
         phase = Phase.Servers
         updateService()
@@ -247,6 +256,30 @@ object Session : LoginAsker {
         runCatching { connection?.selectTab(tab.workspace, tab.index) }
     }
 
+    /** Show `pane` of `window` (a notification about it tapped): its tab, its window first. */
+    fun reveal(window: ULong, pane: ULong) {
+        if (connection == null) return
+        val shown = phase as? Phase.Shown
+        if (shown?.window == window && tabs.isNotEmpty()) {
+            choose(pane)
+        } else {
+            revealing = pane
+            show(window)
+        }
+    }
+
+    private fun choose(pane: ULong) {
+        val tab = tabs.firstOrNull { pane in it.panes } ?: return
+        if (!tab.active) selectTab(tab)
+        chosenPane = pane.takeIf { it != tab.focused }
+        seeShown()
+    }
+
+    /** The pane shown, in front: its notification is done with. */
+    private fun seeShown() {
+        if (resumed && phase is Phase.Shown) pane?.let { Alerts.seen(context, it) }
+    }
+
     /** The window is in use here (or not): its panes take this phone's size while it is. */
     fun focus(focused: Boolean) {
         val shown = phase as? Phase.Shown ?: return
@@ -300,7 +333,14 @@ object Session : LoginAsker {
                 if (again) onReattached?.invoke()
             }
             is ClientEvent.Tabs -> {
-                if ((phase as? Phase.Shown)?.window == event.window) tabs = event.tabs
+                if ((phase as? Phase.Shown)?.window == event.window) {
+                    tabs = event.tabs
+                    revealing?.let {
+                        revealing = null
+                        choose(it)
+                    }
+                    seeShown()
+                }
             }
             is ClientEvent.WindowClosed -> {
                 val shown = phase as? Phase.Shown ?: return
@@ -313,7 +353,9 @@ object Session : LoginAsker {
             is ClientEvent.Screen -> onScreen?.invoke(event.pane)
             is ClientEvent.Clipboard -> copied?.invoke(event.text)
             is ClientEvent.Closed -> lost(event.reason)
-            is ClientEvent.Bell, is ClientEvent.Notify -> {}
+            is ClientEvent.Notify ->
+                Alerts.post(context, server.name, event.title, event.body, event.window, event.pane)
+            is ClientEvent.Bell -> {}
         }
     }
 

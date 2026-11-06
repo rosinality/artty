@@ -146,9 +146,12 @@ pub enum ClientEvent {
     Clipboard {
         text: String,
     },
+    /// Something needs the user: an agent waiting, say. On `pane` of `window`, if known.
     Notify {
         title: String,
         body: String,
+        window: Option<u64>,
+        pane: Option<u64>,
     },
     Closed {
         reason: String,
@@ -366,7 +369,9 @@ pub fn connect(
                     },
                     Event::Bell { pane } => ClientEvent::Bell { pane },
                     Event::Clipboard { text } => ClientEvent::Clipboard { text },
-                    Event::Notify { title, body } => ClientEvent::Notify { title, body },
+                    Event::Notify { title, body, window, pane } => {
+                        ClientEvent::Notify { title, body, window, pane }
+                    },
                     Event::Closed(reason) => ClientEvent::Closed { reason },
                     Event::Panes(_) | Event::Stopping { .. } => continue,
                 };

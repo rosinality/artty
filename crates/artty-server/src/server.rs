@@ -39,6 +39,8 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(8);
 /// Batches of screen updates an app may have unacknowledged; more wait, and
 /// it gets the newest screens once it catches up.
 const FRAMES_IN_FLIGHT: u64 = 2;
+/// Used within this long, an app is the one its user is at: notifications go to it alone.
+const IN_USE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 /// An app silent this long (it pings every 5 s) is taken as gone.
@@ -202,6 +204,8 @@ struct Client {
     /// few seconds), so its silence means it's gone.
     last_heard: Instant,
     pings: bool,
+    /// When its user last typed, scrolled or brought a window of it forward.
+    last_used: Option<Instant>,
 }
 
 impl Client {
@@ -1404,13 +1408,32 @@ impl Server {
         let body =
             if body.is_empty() { "Needs your attention".to_owned() } else { body.to_owned() };
         // Attached apps post native notifications; otherwise use osascript.
-        let client = self
-            .frontmost()
-            .and_then(|w| self.windows.get(&w)?.driver())
-            .or_else(|| self.clients.keys().next().copied());
-        match client {
-            Some(client) => self.send(client, ServerMessage::Notify { title, body }),
-            None => osascript_notify(&title, &body),
+        if self.clients.is_empty() {
+            return osascript_notify(&title, &body);
+        }
+        let window = self.window_of(pane);
+        for client in self.told_of(Instant::now()) {
+            self.send(client, ServerMessage::Notify {
+                title: title.clone(),
+                body: body.clone(),
+                window,
+                pane: Some(pane),
+            });
+        }
+    }
+
+    /// The apps to tell: the one used just now, so a phone in a pocket stays quiet while
+    /// its user is at the Mac (and the other way round); every one, when none is in use.
+    fn told_of(&self, now: Instant) -> Vec<ClientId> {
+        let in_use = self
+            .clients
+            .iter()
+            .filter_map(|(&id, c)| Some((id, c.last_used?)))
+            .filter(|&(_, at)| now.duration_since(at) < IN_USE)
+            .max_by_key(|&(_, at)| at);
+        match in_use {
+            Some((id, _)) => vec![id],
+            None => self.clients.keys().copied().collect(),
         }
     }
 
@@ -1458,6 +1481,7 @@ impl Server {
                         batches_sent: 0,
                         batches_acked: 0,
                         last_heard: Instant::now(),
+                        last_used: None,
                         pings: false,
                     },
                 );
@@ -2110,6 +2134,9 @@ impl Server {
     /// `client`'s user is at `window`: it's the one whose sizes its panes
     /// take now.
     fn drive(&mut self, client: ClientId, window: WindowId) {
+        if let Some(state) = self.clients.get_mut(&client) {
+            state.last_used = Some(Instant::now());
+        }
         let Some(state) = self.windows.get_mut(&window) else { return };
         if state.driver() == Some(client) || !state.clients.contains(&client) {
             return;

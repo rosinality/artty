@@ -84,6 +84,8 @@ class MainActivity : ComponentActivity() {
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
         }
+        // Started by a notification (the activity had gone; the connection may not have).
+        if (savedInstanceState == null) reveal(intent)
         Session.copied = { text ->
             getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("artty", text))
         }
@@ -104,9 +106,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // A notification tapped: the pane it's about.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        reveal(intent)
+    }
+
+    private fun reveal(intent: Intent?) {
+        if (intent?.action != Alerts.SHOW || !intent.hasExtra(Alerts.PANE)) return
+        Session.reveal(intent.getLongExtra(Alerts.WINDOW, 0).toULong(), intent.getLongExtra(Alerts.PANE, 0).toULong())
+    }
+
     // In front here, its window's panes take this phone's size; away, the other apps'.
     override fun onResume() {
         super.onResume()
+        Session.resumed = true
         Session.focus(true)
         // Back after a while (the phone slept, say): still there?
         Session.probe()
@@ -114,6 +128,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onPause() {
         super.onPause()
+        Session.resumed = false
         Session.focus(false)
     }
 }
