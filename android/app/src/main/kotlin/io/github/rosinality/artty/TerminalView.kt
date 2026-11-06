@@ -21,6 +21,7 @@ import kotlin.math.floor
 import uniffi.artty_android.MouseAction
 import uniffi.artty_android.MouseButton
 import uniffi.artty_android.Screen
+import uniffi.artty_android.SelectionKind
 
 /**
  * A pane's screen, drawn as the server sends it, and the keyboard into it.
@@ -204,6 +205,51 @@ class TerminalView(context: Context) : View(context) {
     /** A long press began a drag (the program takes the mouse): the cell it's at. */
     private var dragging: Pair<UInt, UInt>? = null
 
+    /** Touches select even where the program takes the mouse (the keys row's Select). */
+    var selectMode = false
+    /** A long press began selecting, and the finger is still down. */
+    private var selecting = false
+    /** Something is selected; told when that changes (for the Copy bar). */
+    var hasSelection = false
+        private set
+    var onSelection: ((Boolean) -> Unit)? = null
+
+    private fun selects() = selectMode || !wantsMouse()
+
+    /** In the right half of its cell (a selection ends after it). */
+    private fun rightHalf(x: Float) = (x / cellWidth) % 1f >= 0.5f
+
+    fun clearSelection() {
+        if (!hasSelection) return
+        hasSelection = false
+        pane?.let { runCatching { Session.connection?.selectClear(it) } }
+        onSelection?.invoke(false)
+    }
+
+    /** The selected text (asked of the server, off the main thread), then the selection goes. */
+    fun copy(done: (String?) -> Unit) {
+        val pane = pane ?: return done(null)
+        val connection = Session.connection ?: return done(null)
+        Thread {
+            val text = runCatching { connection.selectionText(pane) }.getOrNull()
+            post {
+                done(text)
+                clearSelection()
+            }
+        }.start()
+    }
+
+    /** Whether pasting `text` here could run several commands (worth asking first). */
+    fun pasteRunsLines(text: String): Boolean {
+        val pane = pane ?: return false
+        return text.trimEnd().contains('\n') && Session.connection?.pastesWhole(pane) == false
+    }
+
+    fun paste(text: String) {
+        val pane = pane ?: return
+        runCatching { Session.connection?.paste(pane, text) }
+    }
+
     private val gestures = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onDown(e: MotionEvent): Boolean {
             scrolled = 0f
@@ -211,7 +257,12 @@ class TerminalView(context: Context) : View(context) {
         }
 
         override fun onSingleTapUp(e: MotionEvent): Boolean {
-            if (wantsMouse()) {
+            // A tap puts a selection away.
+            if (hasSelection) {
+                clearSelection()
+                return true
+            }
+            if (!selectMode && wantsMouse()) {
                 mouse(MouseAction.PRESS, e.x, e.y)
                 mouse(MouseAction.RELEASE, e.x, e.y)
             } else {
@@ -221,7 +272,18 @@ class TerminalView(context: Context) : View(context) {
         }
 
         override fun onLongPress(e: MotionEvent) {
-            if (!wantsMouse() || scale.isInProgress) return
+            if (scale.isInProgress) return
+            // Selecting: the word pressed, then as far as the finger goes.
+            if (selects()) {
+                val pane = pane ?: return
+                val (line, column) = cellAt(e.x, e.y)
+                runCatching { Session.connection?.selectStart(pane, SelectionKind.WORDS, line, column, rightHalf(e.x)) }
+                selecting = true
+                hasSelection = true
+                onSelection?.invoke(true)
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                return
+            }
             if (mouse(MouseAction.PRESS, e.x, e.y)) {
                 dragging = cellAt(e.x, e.y)
                 performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
@@ -244,6 +306,18 @@ class TerminalView(context: Context) : View(context) {
     })
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // Selecting: the moves take it along.
+        if (selecting) {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_MOVE -> {
+                    val pane = pane
+                    val (line, column) = cellAt(event.x, event.y)
+                    if (pane != null) runCatching { Session.connection?.selectUpdate(pane, line, column, rightHalf(event.x)) }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> selecting = false
+            }
+            return true
+        }
         // Dragging: the moves and the lift are the program's.
         dragging?.let { at ->
             when (event.actionMasked) {

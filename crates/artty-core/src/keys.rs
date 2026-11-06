@@ -117,6 +117,18 @@ pub fn to_esc(keystroke: &Key, mode: TermMode, option_as_meta: bool) -> Option<V
     Some(bytes)
 }
 
+/// Bytes for pasting `text`: whole, between markers, for a program that
+/// asked for pastes so (bracketed paste); else its lines as if typed, each
+/// ending in Enter.
+pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        // Without an end marker of its own, the paste can't end early.
+        format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", "")).into_bytes()
+    } else {
+        text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+    }
+}
+
 /// The kitty keyboard protocol's `CSI code ; modifiers u` form, for keys the
 /// legacy encoding can't tell apart (Shift+Enter, Ctrl+I vs Tab, Escape).
 /// `None` means the legacy encoding is still right for this key.
@@ -181,6 +193,15 @@ mod tests {
 
     fn esc(key: &str) -> Option<Vec<u8>> {
         to_esc(&Key::parse(key), TermMode::empty(), true)
+    }
+
+    #[test]
+    fn pastes() {
+        assert_eq!(paste("a\nb", false), b"a\rb");
+        assert_eq!(paste("a\r\nb", false), b"a\rb");
+        assert_eq!(paste("a\nb", true), b"\x1b[200~a\nb\x1b[201~");
+        // An end marker inside can't end the paste early.
+        assert_eq!(paste("x\x1b[201~y", true), b"\x1b[200~xy\x1b[201~");
     }
 
     #[test]

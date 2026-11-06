@@ -72,6 +72,14 @@ pub trait LoginAsker: Send + Sync {
     fn answer(&self, instructions: String, prompts: Vec<Prompt>) -> Option<Vec<String>>;
 }
 
+/// What a selection takes.
+#[derive(uniffi::Enum)]
+pub enum SelectionKind {
+    Characters,
+    Words,
+    Lines,
+}
+
 #[derive(uniffi::Enum)]
 pub enum MouseButton {
     Left,
@@ -472,6 +480,55 @@ impl Connection {
     /// history.
     pub fn wheel(&self, pane: u64, lines: i32, line: u32, column: u32) -> Result<(), ConnectError> {
         Ok(self.client.wheel(pane, lines, line as usize, column as usize)?)
+    }
+
+    /// Start selecting at viewport cell (`line`, `column`); `right`: in its
+    /// right half.
+    pub fn select_start(
+        &self,
+        pane: u64,
+        kind: SelectionKind,
+        line: u32,
+        column: u32,
+        right: bool,
+    ) -> Result<(), ConnectError> {
+        let kind = match kind {
+            SelectionKind::Characters => artty_client::SelectionKind::Characters,
+            SelectionKind::Words => artty_client::SelectionKind::Words,
+            SelectionKind::Lines => artty_client::SelectionKind::Lines,
+        };
+        Ok(self.client.select_start(pane, kind, line as usize, column as usize, right)?)
+    }
+
+    /// Take the selection to a cell.
+    pub fn select_update(
+        &self,
+        pane: u64,
+        line: u32,
+        column: u32,
+        right: bool,
+    ) -> Result<(), ConnectError> {
+        Ok(self.client.select_update(pane, line as usize, column as usize, right)?)
+    }
+
+    pub fn select_clear(&self, pane: u64) -> Result<(), ConnectError> {
+        Ok(self.client.select_clear(pane)?)
+    }
+
+    /// The text selected, if any. Asks the server: call it off the main thread.
+    pub fn selection_text(&self, pane: u64) -> Result<Option<String>, ConnectError> {
+        Ok(self.client.selection_text(pane)?)
+    }
+
+    /// Whether the program takes pastes whole; else each line runs as it
+    /// arrives (worth asking before pasting several).
+    pub fn pastes_whole(&self, pane: u64) -> bool {
+        self.client.pastes_whole(pane)
+    }
+
+    /// Paste text, as the program takes pastes.
+    pub fn paste(&self, pane: u64, text: String) -> Result<(), ConnectError> {
+        Ok(self.client.paste(pane, &text)?)
     }
 
     /// The pane's size here: cells, and a cell's size in pixels.

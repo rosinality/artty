@@ -241,14 +241,9 @@ impl WindowView {
     }
 
     fn paste_now(&mut self, pane: PaneId, text: &str, bracketed: bool, cx: &mut Context<Self>) {
-        let bytes = if bracketed {
-            // Strip any embedded end marker so pasted text can't escape the bracket.
-            format!("\x1b[200~{}\x1b[201~", text.replace("\x1b[201~", ""))
-        } else {
-            text.replace("\r\n", "\r").replace('\n', "\r")
-        };
-        self.echo(pane, bytes.as_bytes(), cx);
-        self.send(ClientMessage::Input { pane, bytes: bytes.into_bytes() }, cx);
+        let bytes = artty_core::keys::paste(text, bracketed);
+        self.echo(pane, &bytes, cx);
+        self.send(ClientMessage::Input { pane, bytes }, cx);
         self.cursor_visible = true;
         self.blink_hold = true;
     }

@@ -8,6 +8,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -308,9 +309,21 @@ private fun TerminalScreen() {
     val view = remember { TerminalView(context) }
     var ctrl by remember { mutableStateOf(false) }
     var alt by remember { mutableStateOf(false) }
+    var selectMode by remember { mutableStateOf(false) }
+    var selected by remember { mutableStateOf(false) }
+    /** Text that would run line by line, waiting for a yes. */
+    var pasting by remember { mutableStateOf<String?>(null) }
+    val clipboard = context.getSystemService(ClipboardManager::class.java)
+    val paste = {
+        val text = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+        if (!text.isNullOrEmpty()) {
+            if (view.pasteRunsLines(text)) pasting = text else view.paste(text)
+        }
+    }
     DisposableEffect(view) {
         Session.onScreen = { pane -> if (pane == view.pane) view.refresh() }
         Session.onReattached = { view.reattached() }
+        view.onSelection = { selected = it }
         view.onModifiers = {
             ctrl = false
             alt = false
@@ -323,20 +336,45 @@ private fun TerminalScreen() {
     val tab = Session.activeTab
     val reconnecting = (Session.phase as? Phase.Shown)?.reconnecting
     Column(Modifier.fillMaxSize()) {
-        TabBar(tab)
-        // The last screen stays meanwhile; typing waits for the connection.
-        if (reconnecting != null) {
-            Row(
-                Modifier.fillMaxWidth().background(Color(0x33e0af68)).padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xffe0af68))
-                Spacer(Modifier.width(8.dp))
-                Text("Reconnecting… ($reconnecting)", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        TabBar(tab, onPaste = paste)
+        // Over the terminal (not above it): showing them mustn't resize the pane.
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            AndroidView(factory = { view.also { it.post { it.showKeyboard() } } }, modifier = Modifier.fillMaxSize()) {
+                it.pane = Session.pane
             }
-        }
-        AndroidView(factory = { view.also { it.post { it.showKeyboard() } } }, modifier = Modifier.weight(1f).fillMaxWidth()) {
-            it.pane = Session.pane
+            Column(Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+                // The last screen stays meanwhile; typing waits for the connection.
+                if (reconnecting != null) {
+                    Row(
+                        Modifier.fillMaxWidth().background(Color(0x33e0af68)).padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = Color(0xffe0af68))
+                        Spacer(Modifier.width(8.dp))
+                        Text("Reconnecting… ($reconnecting)", fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+                // Something selected: copy it, or let it go.
+                if (selected) {
+                    Row(
+                        Modifier.fillMaxWidth().background(Panel).padding(horizontal = 8.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Drag to select more", color = Faint, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                        KeyButton("Copy") {
+                            view.copy { text ->
+                                if (text != null) {
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("artty", text))
+                                    // Android 13 and later say so themselves.
+                                    if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                        KeyButton("Clear") { view.clearSelection() }
+                    }
+                }
+            }
         }
         Row(
             Modifier.fillMaxWidth().background(Panel).horizontalScroll(rememberScrollState()).padding(4.dp),
@@ -344,6 +382,11 @@ private fun TerminalScreen() {
         ) {
             // The keyboard (a tap on a program that takes the mouse clicks instead).
             KeyButton("⌨") { view.showKeyboard() }
+            // Touches select, even where the program takes the mouse.
+            KeyButton("Select", on = selectMode) {
+                selectMode = !selectMode
+                view.selectMode = selectMode
+            }
             KeyButton("Esc") { view.key("escape") }
             KeyButton("Tab") { view.key("tab") }
             KeyButton("Ctrl", on = ctrl) {
@@ -361,10 +404,24 @@ private fun TerminalScreen() {
             for (c in listOf("|", "-", "/", "~", "_")) KeyButton(c) { view.type(c) }
         }
     }
+    pasting?.let { text ->
+        AlertDialog(
+            onDismissRequest = { pasting = null },
+            title = { Text("Paste ${text.trimEnd().lines().size} lines?") },
+            text = { Text("The program here hasn't asked for pastes whole, so each line may run as a command as it arrives.", color = Faint) },
+            confirmButton = {
+                TextButton(onClick = {
+                    view.paste(text)
+                    pasting = null
+                }) { Text("Paste") }
+            },
+            dismissButton = { TextButton(onClick = { pasting = null }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable
-private fun TabBar(tab: TabItem?) {
+private fun TabBar(tab: TabItem?, onPaste: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         TextButton(onClick = { Session.disconnect() }) { Text("‹", fontSize = 20.sp) }
@@ -398,6 +455,8 @@ private fun TabBar(tab: TabItem?) {
                 KeyButton("${i + 1}", on = pane == Session.pane) { Session.chosenPane = pane }
             }
         }
+        // Here, not in the keys row: just after copying, Android's clipboard preview covers that.
+        TextButton(onClick = onPaste) { Text("Paste") }
     }
 }
 

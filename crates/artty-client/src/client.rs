@@ -16,8 +16,8 @@ use artty_core::keys::Key;
 use artty_core::layout::PaneId;
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
-    ClientMessage, Hello, PaneState, Query, Reply, ServerMessage, WindowId, WindowLayout,
-    WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
+    ClientMessage, Hello, PaneState, Query, Reply, SelectionOp, ServerMessage, WindowId,
+    WindowLayout, WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
 
@@ -67,6 +67,14 @@ pub enum Event {
     Closed(String),
 }
 
+/// What a selection takes: characters, or whole words or lines.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionKind {
+    Characters,
+    Words,
+    Lines,
+}
+
 /// A pane's screen, and the terminal's mode (for keys and the mouse).
 #[derive(Clone, Debug, Default)]
 pub struct Screen {
@@ -82,6 +90,8 @@ pub struct Client {
     pub server_version: String,
     /// When it last sent anything.
     heard: Arc<Mutex<Instant>>,
+    /// Queries waiting for their answers, by id.
+    pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Reply>>>>,
     next_id: AtomicU64,
     _keep: Mutex<Box<dyn Send>>,
 }
@@ -113,9 +123,11 @@ impl Client {
         let writer: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(writer));
         let screens = Arc::new(Mutex::new(HashMap::<PaneId, Screen>::new()));
         let heard = Arc::new(Mutex::new(Instant::now()));
+        let pending = Arc::new(Mutex::new(HashMap::<u64, mpsc::Sender<Reply>>::new()));
         let (events, received) = mpsc::channel();
         {
             let (writer, screens, heard) = (writer.clone(), screens.clone(), heard.clone());
+            let pending = pending.clone();
             std::thread::Builder::new()
                 .name("artty-client-reader".into())
                 .spawn(move || {
@@ -144,8 +156,16 @@ impl Client {
                             ServerMessage::Bell { pane } => Event::Bell { pane },
                             ServerMessage::Notify { title, body } => Event::Notify { title, body },
                             ServerMessage::Clipboard { text } => Event::Clipboard { text },
-                            ServerMessage::Reply { reply: Reply::Windows(windows), .. } => {
-                                Event::Windows(windows)
+                            ServerMessage::Reply { id, reply } => {
+                                // Waited for (Client::query), or the windows asked for.
+                                if let Some(waiting) = pending.lock().unwrap().remove(&id) {
+                                    let _ = waiting.send(reply);
+                                    continue;
+                                }
+                                match reply {
+                                    Reply::Windows(windows) => Event::Windows(windows),
+                                    _ => continue,
+                                }
                             },
                             ServerMessage::Stopping { restart } => Event::Stopping { restart },
                             // Screens are in: more may come.
@@ -191,6 +211,7 @@ impl Client {
             screens,
             server_version,
             heard,
+            pending,
             next_id: AtomicU64::new(1),
             _keep: Mutex::new(keep),
         };
@@ -213,6 +234,77 @@ impl Client {
     pub fn ping(&self) -> Result<(), String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.send(&ClientMessage::Ping { id })
+    }
+
+    /// Ask the server something, and wait (a while) for its answer.
+    fn query(&self, query: Query) -> Result<Reply, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        self.pending.lock().unwrap().insert(id, tx);
+        let sent = self.send(&ClientMessage::Query { id, query });
+        let answer = sent.and_then(|()| {
+            rx.recv_timeout(Duration::from_secs(10)).map_err(|_| "no answer".to_owned())
+        });
+        self.pending.lock().unwrap().remove(&id);
+        answer
+    }
+
+    /// Start selecting at viewport cell (`line`, `column`) (`right`: in its
+    /// right half): characters, words or lines.
+    pub fn select_start(
+        &self,
+        pane: PaneId,
+        kind: SelectionKind,
+        line: usize,
+        column: usize,
+        right: bool,
+    ) -> Result<(), String> {
+        let kind = match kind {
+            SelectionKind::Characters => 0,
+            SelectionKind::Words => 1,
+            SelectionKind::Lines => 2,
+        };
+        self.send(&ClientMessage::Selection {
+            pane,
+            op: SelectionOp::Start { kind, line, column, right },
+        })
+    }
+
+    /// Take the selection to cell (`line`, `column`).
+    pub fn select_update(
+        &self,
+        pane: PaneId,
+        line: usize,
+        column: usize,
+        right: bool,
+    ) -> Result<(), String> {
+        self.send(&ClientMessage::Selection {
+            pane,
+            op: SelectionOp::Update { line, column, right },
+        })
+    }
+
+    pub fn select_clear(&self, pane: PaneId) -> Result<(), String> {
+        self.send(&ClientMessage::Selection { pane, op: SelectionOp::Clear })
+    }
+
+    /// The text selected in the pane, if any (asks the server: blocks).
+    pub fn selection_text(&self, pane: PaneId) -> Result<Option<String>, String> {
+        match self.query(Query::SelectionText { pane })? {
+            Reply::Text(text) => Ok(text),
+            _ => Err("an unexpected answer".to_owned()),
+        }
+    }
+
+    /// Whether the pane's program takes pastes whole (bracketed paste);
+    /// else each line runs as it arrives (worth asking before pasting several).
+    pub fn pastes_whole(&self, pane: PaneId) -> bool {
+        self.mode(pane).contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// Paste `text` into the pane, as its program takes pastes.
+    pub fn paste(&self, pane: PaneId, text: &str) -> Result<(), String> {
+        self.input(pane, artty_core::keys::paste(text, self.pastes_whole(pane)))
     }
 
     /// Ask for the server's windows: [`Event::Windows`].
