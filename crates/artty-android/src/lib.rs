@@ -757,7 +757,11 @@ pub fn connect(
             return Err(err.into());
         },
     };
-    log::info!("artty there: {}", client.server_version);
+    if server.plain {
+        log::info!("plain ssh: its shells served from here");
+    } else {
+        log::info!("artty there: {}", client.server_version);
+    }
     std::thread::Builder::new()
         .name("artty-events".into())
         .spawn(move || {
