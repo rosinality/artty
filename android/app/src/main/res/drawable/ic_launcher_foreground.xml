@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The launcher icon's prompt, as the Mac app's (assets/icon.svg, whose 1024-unit grid this
+     draws in): ">" and a block cursor, centered in the adaptive icon's safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:scaleX="0.0875" android:scaleY="0.0875" android:translateX="9.2" android:translateY="9.2">
+        <group android:translateX="44">
+            <path
+                android:pathData="M292,392L432,512L292,632"
+                android:strokeColor="#FFE8EDF7"
+                android:strokeWidth="66"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round" />
+            <!-- The cursor's glow, then the cursor. -->
+            <path
+                android:pathData="M482,552h196a28,28 0 0 1 28,28v34a28,28 0 0 1 -28,28h-196a28,28 0 0 1 -28,-28v-34a28,28 0 0 1 28,-28z"
+                android:fillColor="#337AA2FF" />
+            <path android:pathData="M496,566h168a14,14 0 0 1 14,14v34a14,14 0 0 1 -14,14h-168a14,14 0 0 1 -14,-14v-34a14,14 0 0 1 14,-14z">
+                <aapt:attr name="android:fillColor">
+                    <gradient android:type="linear" android:startX="482" android:startY="0" android:endX="678" android:endY="0"
+                        android:startColor="#FF9DBBFF" android:endColor="#FF6F93FF" />
+                </aapt:attr>
+            </path>
+        </group>
+    </group>
+</vector>

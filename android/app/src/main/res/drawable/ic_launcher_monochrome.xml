@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The prompt in one color, for themed icons (the launcher tints it). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group android:scaleX="0.0875" android:scaleY="0.0875" android:translateX="9.2" android:translateY="9.2">
+        <group android:translateX="44">
+            <path
+                android:pathData="M292,392L432,512L292,632"
+                android:strokeColor="#FFFFFFFF"
+                android:strokeWidth="66"
+                android:strokeLineCap="round"
+                android:strokeLineJoin="round" />
+            <path
+                android:pathData="M496,566h168a14,14 0 0 1 14,14v34a14,14 0 0 1 -14,14h-168a14,14 0 0 1 -14,-14v-34a14,14 0 0 1 14,-14z"
+                android:fillColor="#FFFFFFFF" />
+        </group>
+    </group>
+</vector>

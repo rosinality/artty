@@ -32,9 +32,6 @@ android {
         targetSdk = 36
         versionCode = builtMinutes
         versionName = builtName
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
     }
 
     signingConfigs {
@@ -47,8 +44,16 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Phones, and emulators on either kind of Mac.
+            ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        }
         release {
-            isMinifyEnabled = false
+            // Phones are arm64: half the native code, and the rest shrunk (R8).
+            ndk { abiFilters += listOf("arm64-v8a") }
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             if (releaseKey.exists()) signingConfig = signingConfigs.getByName("release")
         }
     }
