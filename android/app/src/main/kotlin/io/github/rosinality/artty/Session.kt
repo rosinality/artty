@@ -15,6 +15,8 @@ import uniffi.artty_android.ConnectException
 import uniffi.artty_android.Connection
 import uniffi.artty_android.Events
 import uniffi.artty_android.FindResult
+import uniffi.artty_android.ForwardItem
+import uniffi.artty_android.ForwardKind
 import uniffi.artty_android.FoundLine
 import uniffi.artty_android.FoundSession
 import uniffi.artty_android.LoginAsker
@@ -63,6 +65,12 @@ sealed interface Question {
         val prompts: List<Prompt>,
         val reply: CompletableFuture<List<String>?>,
     ) : Question
+
+    /** A key's passphrase (`remember`: kept with the key). */
+    data class Passphrase(val key: String, val reply: CompletableFuture<Pair<String, Boolean>?>) : Question
+
+    /** May `host` sign with `key` (agent forwarding)? Yes (`always`: for the rest of the connection) or no. */
+    data class AgentSign(val key: String, val host: String, val reply: CompletableFuture<Pair<Boolean, Boolean>>) : Question
 }
 
 /**
@@ -82,6 +90,9 @@ object Session : LoginAsker {
         private set
     /** The shown window's tabs. */
     var tabs by mutableStateOf<List<TabItem>>(emptyList())
+        private set
+    /** The connection's port forwards. */
+    var forwards by mutableStateOf<List<ForwardItem>>(emptyList())
         private set
     /** What the shown window's panes are doing, by pane. */
     var panes by mutableStateOf<Map<ULong, PaneItem>>(emptyMap())
@@ -168,6 +179,9 @@ object Session : LoginAsker {
         drop()
         tabs = emptyList()
         panes = emptyMap()
+        forwards = emptyList()
+        added.clear()
+        agentAllowed.clear()
         chosenPane = null
         revealing = null
         question = null
@@ -179,6 +193,7 @@ object Session : LoginAsker {
     private fun drop() {
         val connection = connection ?: return
         this.connection = null
+        forwards = emptyList()
         (phase as? Phase.Shown)?.let { runCatching { connection.detach(it.window) } }
         Thread { connection.destroy() }.start()
     }
@@ -187,7 +202,7 @@ object Session : LoginAsker {
     private fun open() {
         val server = server ?: return
         val generation = ++generation
-        val address = ServerAddress(server.address, server.artty, server.plain)
+        val address = ServerAddress(server.destination, server.artty, server.plain)
         val setup = store.sshSetup()
         Thread {
             try {
@@ -200,6 +215,9 @@ object Session : LoginAsker {
                     }
                     this.connection = connection
                     failures = 0
+                    // Forwards added while connected before: again (the config's start by themselves).
+                    for (f in added) f.id = runCatching { connection.addForward(f.kind, f.bind, f.port.toUShort(), f.host, f.hostPort.toUShort()) }.getOrNull()
+                    forwards = runCatching { connection.forwards() }.getOrDefault(emptyList())
                     // Shown before: found again in the server's windows (WindowsListed).
                     if (phase !is Phase.Shown) phase = Phase.Choosing(server)
                     updateService()
@@ -235,7 +253,7 @@ object Session : LoginAsker {
         if (shown.installing) return
         phase = shown.copy(installing = true, error = null)
         val server = shown.server
-        val address = ServerAddress(server.address, server.artty, false)
+        val address = ServerAddress(server.destination, server.artty, false)
         val setup = store.sshSetup()
         val builds = AppBuilds(context)
         Thread {
@@ -537,9 +555,36 @@ object Session : LoginAsker {
             is ClientEvent.Closed -> lost(event.reason)
             is ClientEvent.Notify ->
                 Alerts.post(context, server.name, event.title, event.body, event.window, event.pane)
-            is ClientEvent.Bell -> {}
+            is ClientEvent.Bell -> if (store.bellVibrates) vibrate()
+            is ClientEvent.Forwards -> forwards = connection?.let { runCatching { it.forwards() }.getOrNull() } ?: emptyList()
         }
     }
+
+    /** A forward added while connected: started again when the connection is made again. */
+    private data class Added(val kind: ForwardKind, val bind: String?, val port: Int, val host: String?, val hostPort: Int, var id: ULong?)
+
+    private val added = mutableListOf<Added>()
+
+    /** Forward `port` (to `host`:`hostPort`; for a dynamic one, SOCKS says where). */
+    fun addForward(kind: ForwardKind, bind: String?, port: Int, host: String?, hostPort: Int) {
+        val connection = connection ?: return
+        val id = runCatching { connection.addForward(kind, bind, port.toUShort(), host, hostPort.toUShort()) }.getOrNull() ?: return
+        added += Added(kind, bind, port, host, hostPort, id)
+    }
+
+    fun stopForward(forward: ForwardItem) {
+        runCatching { connection?.stopForward(forward.id) }
+        // Not again, either.
+        added.removeAll { it.id == forward.id }
+    }
+
+    private fun vibrate() {
+        val vibrator = context.getSystemService(android.os.Vibrator::class.java) ?: return
+        vibrator.vibrate(android.os.VibrationEffect.createOneShot(40, android.os.VibrationEffect.DEFAULT_AMPLITUDE))
+    }
+
+    /** Keys the connection may sign with for the rest of it (agent forwarding). */
+    private val agentAllowed = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     // Logging in asks the user, from the Rust side (off the main thread).
 
@@ -554,6 +599,23 @@ object Session : LoginAsker {
             val connecting = phase as? Phase.Connecting ?: return@post
             phase = connecting.copy(said = connecting.said + text.trim().lines().filter { it.isNotBlank() })
         }
+    }
+
+    override fun passphrase(name: String): String? {
+        val reply = CompletableFuture<Pair<String, Boolean>?>()
+        main.post { question = Question.Passphrase(name, reply) }
+        val (passphrase, remember) = reply.get().also { main.post { question = null } } ?: return null
+        if (remember) store.keys.setPassphrase(name, passphrase)
+        return passphrase
+    }
+
+    override fun agentSign(name: String, host: String): Boolean {
+        if (name in agentAllowed) return true
+        val reply = CompletableFuture<Pair<Boolean, Boolean>>()
+        main.post { question = Question.AgentSign(name, host, reply) }
+        val (yes, always) = reply.get().also { main.post { question = null } }
+        if (yes && always) agentAllowed += name
+        return yes
     }
 
     override fun answer(instructions: String, prompts: List<Prompt>): List<String>? {

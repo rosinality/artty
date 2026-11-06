@@ -107,7 +107,7 @@ fn wait_for(client: &Client, events: &std::sync::mpsc::Receiver<Event>, pane: u6
 #[test]
 fn tabs_of_shells() {
     let shells = Echo::default();
-    let link = plain::serve(Box::new(shells.clone()), "me@box".into()).unwrap();
+    let link = plain::serve(Box::new(shells.clone()), "me@box".into(), 1000).unwrap();
     let (client, events) = Client::start(link, "test").unwrap();
     assert_eq!(client.server_version, plain::SERVER_VERSION);
 
@@ -241,7 +241,7 @@ fn over_ssh() {
         },
         Err(_) => Credentials::usual(),
     };
-    let (link, forwards) = ssh::shells(&plan, &credentials, known, Arc::new(Known)).unwrap();
+    let (link, forwards) = ssh::shells(&plan, &credentials, known, Arc::new(Known), 1000).unwrap();
     let (client, events) = Client::start(link, "test").unwrap();
     client.attach(Some(plain::WINDOW), true).unwrap();
     let pane = until(&events, |e| match e {
@@ -348,7 +348,7 @@ fn forwarding(forwards: &artty_client::ssh::Forwards) {
     echoes(socks, "through -D");
     echoes(TcpStream::connect(("127.0.0.1", listening(remote))).unwrap(), "through -R");
     let total: usize = forwards.list().iter().map(|s| s.total).sum();
-    assert_eq!(total, 2, "-L and -D count their connections");
+    assert_eq!(total, 3, "each counts its connections");
     eprintln!("{:?}", forwards.list().iter().map(|s| s.describe()).collect::<Vec<_>>());
     forwards.stop(local);
     assert!(TcpStream::connect(("127.0.0.1", listening(dynamic))).is_ok());

@@ -226,18 +226,20 @@ pub fn connect(
 
 /// Log in as `plan` says, to a machine without artty, for its shells: the
 /// link to a stand-in for an artty server, here ([`crate::plain`]), whose
-/// tabs are shells there, over this connection; and its forwards.
+/// tabs are shells there (keeping `scrollback` lines of history), over this
+/// connection; and its forwards.
 pub fn shells(
     plan: &Plan,
     credentials: &Credentials,
     known: KnownHosts,
     login: Arc<dyn Login>,
+    scrollback: usize,
 ) -> Result<(Link, Forwards), String> {
     let connection = Connection::open(plan, credentials, known, login)?;
     let forwards = connection.forwards.clone();
     let name = format!("{}@{}", connection.target.user, plan.target.alias);
     let shells = shells::Shells::new(connection, plan.target.clone());
-    Ok((crate::plain::serve(Box::new(shells), name)?, forwards))
+    Ok((crate::plain::serve(Box::new(shells), name, scrollback)?, forwards))
 }
 
 /// Install artty as `plan` says, as the Mac app does

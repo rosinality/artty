@@ -59,7 +59,16 @@ impl ForwardState {
 
 /// Where the server's connections to a remote forward's port go: by the
 /// port it listens on.
-pub(super) type RemoteTargets = Arc<Mutex<HashMap<u32, (u64, String, u16)>>>;
+pub(super) type RemoteTargets = Arc<Mutex<HashMap<u32, Remote>>>;
+
+/// A remote forward's: its forward, where to, and the forwards (for its counts).
+#[derive(Clone)]
+pub(super) struct Remote {
+    id: u64,
+    host: String,
+    port: u16,
+    forwards: Weak<Inner>,
+}
 
 /// A connection's forwards: what they're doing, and starting or stopping
 /// them. Lives as long as the connection, which it doesn't keep.
@@ -166,13 +175,27 @@ impl Forwards {
         port: u32,
         reply: ChannelOpenHandle,
     ) -> bool {
-        let Some((_, host, to)) = remote.lock().unwrap().get(&port).cloned() else { return false };
+        let Some(Remote { id, host, port: to, forwards }) =
+            remote.lock().unwrap().get(&port).cloned()
+        else {
+            return false;
+        };
         tokio::spawn(async move {
             match TcpStream::connect((host.as_str(), to)).await {
                 Ok(mut tcp) => {
                     reply.accept().await;
+                    let count = |change: fn(&mut ForwardState)| {
+                        if let Some(inner) = forwards.upgrade() {
+                            inner.update(id, change);
+                        }
+                    };
+                    count(|s| {
+                        s.open += 1;
+                        s.total += 1;
+                    });
                     let mut stream = channel.into_stream();
                     let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
+                    count(|s| s.open = s.open.saturating_sub(1));
                 },
                 Err(err) => {
                     log::warn!("forwarding to {host}:{to}: {err}");
@@ -291,7 +314,8 @@ async fn listen_there(inner: &Arc<Inner>, id: u64, forward: &Forward) -> Result<
         .map_err(|err| format!("the server won't listen on {}: {err}", forward.port))?;
     // Port 0: the server chose (and says); else it's the one asked for.
     let port = if forward.port == 0 { port } else { u32::from(forward.port) };
-    inner.remote.lock().unwrap().insert(port, (id, host, to));
+    let remote = Remote { id, host, port: to, forwards: Arc::downgrade(inner) };
+    inner.remote.lock().unwrap().insert(port, remote);
     inner.update(id, |s| s.listening = u16::try_from(port).ok());
     Ok(())
 }

@@ -60,9 +60,9 @@ pub trait Shells: Send + 'static {
     fn closed(&self) -> bool;
 }
 
-/// Serve the shells of `shells` (on `name`, `user@host`): the link to talk
-/// to it as to a server.
-pub fn serve(shells: Box<dyn Shells>, name: String) -> Result<Link, String> {
+/// Serve the shells of `shells` (on `name`, `user@host`), each keeping
+/// `scrollback` lines of history: the link to talk to it as to a server.
+pub fn serve(shells: Box<dyn Shells>, name: String, scrollback: usize) -> Result<Link, String> {
     let (ours, theirs) = UnixStream::pair().map_err(|err| err.to_string())?;
     let reader = ours.try_clone().map_err(|err| err.to_string())?;
     let (inbox, inputs) = mpsc::channel();
@@ -77,6 +77,7 @@ pub fn serve(shells: Box<dyn Shells>, name: String) -> Result<Link, String> {
         out: ours,
         shells,
         name,
+        scrollback,
         inbox,
         panes: HashMap::new(),
         tabs: Vec::new(),
@@ -149,6 +150,7 @@ struct Plain {
     out: UnixStream,
     shells: Box<dyn Shells>,
     name: String,
+    scrollback: usize,
     inbox: Sender<Input>,
     panes: HashMap<PaneId, Pane>,
     tabs: Vec<Tab>,
@@ -500,7 +502,11 @@ impl Plain {
         let resize = Box::new(move |size| {
             let _ = sizes.send(size);
         });
-        let options = SessionOptions { cursor_shape: self.cursor.shape(), ..Default::default() };
+        let options = SessionOptions {
+            cursor_shape: self.cursor.shape(),
+            scrollback: Some(self.scrollback),
+            ..Default::default()
+        };
         match Session::remote(id, options, self.size, self.theme.clone(), sink, resize) {
             Ok((session, ends)) => {
                 self.shells.open(self.size, ends, resized);

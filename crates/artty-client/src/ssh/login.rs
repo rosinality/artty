@@ -121,7 +121,7 @@ impl Connection {
         let (handle, jumps) = runtime.block_on(async {
             let mut jumps: Vec<Handle<Handler>> = Vec::new();
             let stages = plan.hops.iter().chain([&plan.target]);
-            let mut last = None;
+            let mut last: Option<Handle<Handler>> = None;
             for resolved in stages {
                 let mut handler =
                     Handler::new(resolved, login.clone(), known.clone(), remote.clone());
@@ -139,7 +139,8 @@ impl Connection {
                     .map_or(CONNECT_TIMEOUT, |s| Duration::from_secs(s.into()));
                 let name = &resolved.alias;
                 let connecting = async {
-                    match jumps.last() {
+                    // Through the one before (the last logged in to), if any.
+                    match last.as_ref() {
                         None => {
                             let address = (resolved.host_name.as_str(), resolved.port);
                             client::connect(config, address, handler).await

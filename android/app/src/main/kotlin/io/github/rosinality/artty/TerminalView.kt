@@ -668,7 +668,11 @@ class TerminalView(context: Context) : View(context) {
         return true
     }
 
+    /** The volume keys as keys (Settings); else they only turn the volume, as ever. */
+    private val volumeKeys get() = prefs.getBoolean("volume_keys", true)
+
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        if (!volumeKeys && keyCode in VOLUME_KEYS) return super.onKeyUp(keyCode, event)
         val direction = when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_DOWN -> volumeDown.also { volumeDown = null }?.let { used -> if (used) 0 else AudioManager.ADJUST_LOWER }
             KeyEvent.KEYCODE_VOLUME_UP -> volumeUp.also { volumeUp = null }?.let { used -> if (used) 0 else AudioManager.ADJUST_RAISE }
@@ -707,6 +711,7 @@ class TerminalView(context: Context) : View(context) {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (!volumeKeys && keyCode in VOLUME_KEYS) return super.onKeyDown(keyCode, event)
         when (keyCode) {
             KeyEvent.KEYCODE_VOLUME_DOWN -> {
                 if (volumeDown == null) volumeDown = false
@@ -760,6 +765,7 @@ class TerminalView(context: Context) : View(context) {
         /** How long a tap waits to hear of a link before bringing the keyboard. */
         const val LINK_WAIT_MS = 250L
         const val WHEEL_LINES = 3f
+        val VOLUME_KEYS = setOf(KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_UP)
     }
 }
 

@@ -40,12 +40,15 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import uniffi.artty_android.ForwardItem
+import uniffi.artty_android.ForwardKind
 import uniffi.artty_android.TabItem
 
 private val Waiting = Color(0xffe0af68)
@@ -72,6 +75,7 @@ private sealed interface Asking {
     data class RenameWorkspace(val workspace: ULong, val name: String, val named: Boolean) : Asking
     data class CloseWorkspace(val workspace: ULong, val name: String, val tabs: Int) : Asking
     data object NewWorkspace : Asking
+    data object AddForward : Asking
 }
 
 /**
@@ -104,6 +108,14 @@ fun TabsDrawer(server: String, onSearch: () -> Unit, onFiles: () -> Unit, onChos
                     }) { asking = it }
                 }
             }
+            // Ports forwarded over the connection: the ssh config's, and those added here.
+            item(key = "forwards") {
+                Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 4.dp, top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text("Forwards", color = Faint, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { asking = Asking.AddForward }) { Text("Add") }
+                }
+            }
+            items(Session.forwards, key = { "f${it.id}" }) { forward -> ForwardRow(forward) }
         }
         Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(onClick = {
@@ -117,6 +129,7 @@ fun TabsDrawer(server: String, onSearch: () -> Unit, onFiles: () -> Unit, onChos
     }
     when (val a = asking) {
         null -> {}
+        Asking.AddForward -> ForwardDialog { asking = null }
         is Asking.RenameTab -> NameDialog(
             title = "Name the tab",
             initial = a.tab.title,
@@ -168,6 +181,66 @@ fun TabsDrawer(server: String, onSearch: () -> Unit, onFiles: () -> Unit, onChos
             },
         )
     }
+}
+
+@Composable
+private fun ForwardRow(forward: ForwardItem) {
+    Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(forward.description, fontFamily = FontFamily.Monospace, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            val state = forward.error ?: when {
+                forward.listening == null -> "starting…"
+                forward.open > 0u -> "${forward.open} open, ${forward.total} in all"
+                forward.total > 0u -> "${forward.total} so far"
+                else -> "listening"
+            } + if (forward.configured) " · from the ssh config" else ""
+            Text(state, color = if (forward.error != null) Color(0xfff7768e) else Faint, fontSize = 12.sp, maxLines = 2)
+        }
+        TextButton(onClick = { Session.stopForward(forward) }) { Text("Stop", color = Faint) }
+    }
+}
+
+/** A forward to add: its kind, where it listens, where it goes. */
+@Composable
+private fun ForwardDialog(onDone: () -> Unit) {
+    var kind by remember { mutableStateOf(ForwardKind.LOCAL) }
+    var port by remember { mutableStateOf("") }
+    var to by remember { mutableStateOf("localhost:") }
+    val listen = port.toIntOrNull()?.takeIf { it in 0..65535 }
+    val (host, hostPort) = to.substringBeforeLast(':', "") to to.substringAfterLast(':', "").toIntOrNull()
+    val ready = listen != null && (kind == ForwardKind.DYNAMIC || host.isNotBlank() && hostPort != null && hostPort in 1..65535)
+    AlertDialog(
+        onDismissRequest = onDone,
+        title = { Text("Forward a port") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    for ((k, label) in listOf(ForwardKind.LOCAL to "Here → there", ForwardKind.REMOTE to "There → here", ForwardKind.DYNAMIC to "SOCKS")) {
+                        TextButton(onClick = { kind = k }) { Text(label, color = if (kind == k) Accent else Faint, fontSize = 13.sp) }
+                    }
+                }
+                Text(
+                    when (kind) {
+                        ForwardKind.LOCAL -> "Listens on this phone (its loopback); each connection goes to the address, as the machine reaches it. (ssh -L)"
+                        ForwardKind.REMOTE -> "The machine listens (on its loopback); each connection comes to the address, as this phone reaches it. (ssh -R)"
+                        ForwardKind.DYNAMIC -> "Listens on this phone as a SOCKS proxy: apps set to use it reach what the machine can. (ssh -D)"
+                    },
+                    color = Faint, fontSize = 12.sp,
+                )
+                OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text(if (kind == ForwardKind.REMOTE) "Port there" else "Port here") }, singleLine = true)
+                if (kind != ForwardKind.DYNAMIC) {
+                    OutlinedTextField(to, { to = it.trim() }, label = { Text(if (kind == ForwardKind.LOCAL) "To (host:port, from there)" else "To (host:port, from here)") }, singleLine = true)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = ready, onClick = {
+                Session.addForward(kind, null, listen ?: 0, host.takeIf { kind != ForwardKind.DYNAMIC }, hostPort ?: 0)
+                onDone()
+            }) { Text("Forward") }
+        },
+        dismissButton = { TextButton(onClick = onDone) { Text("Cancel") } },
+    )
 }
 
 @Composable

@@ -29,11 +29,33 @@ cargo-zigbuild, and the Rust target for each CPU (`x86_64-unknown-linux-gnu`,
 
 ## Using it
 
-"This phone's key" shows the key the phone made for itself: add it to
+Settings, Keys, shows the key the phone made for itself: add it to
 `~/.ssh/authorized_keys` on each server (Tailscale SSH needs nothing); it's kept
-in Android Keystore. The server needs this build of artty (the protocol must
-match): connecting to one that runs another build offers to install this one
-there.
+in Android Keystore and can't leave it. Other private keys can be added (from a
+file, or pasted), kept encrypted with a Keystore key; a passphrase is asked for
+when one is needed, and kept if you say so. The server needs this build of
+artty (the protocol must match): connecting to one that runs another build
+offers to install this one there.
+
+A server is a destination as `ssh` takes it: `user@host[:port]`, or a host of
+the app's ssh config (Settings, SSH config: as `~/.ssh/config`, typed in or
+imported), which says how to reach it. Read as OpenSSH reads it (Host and
+Match blocks, first value wins), it does HostName, User, Port, IdentityFile (a
+key added, by its file name; `~/.ssh/phone` is the phone's), IdentitiesOnly,
+ProxyJump (through each jump host in turn), LocalForward, RemoteForward,
+DynamicForward (SOCKS), ForwardAgent (each signature asked of you),
+ServerAliveInterval and -CountMax, ConnectTimeout, Compression, Ciphers,
+KexAlgorithms, HostKeyAlgorithms and MACs (with `+`, `-`, `^`),
+PreferredAuthentications and the *Authentication switches,
+StrictHostKeyChecking, HostKeyAlias, SetEnv, and, for plain ssh, RemoteCommand
+and RequestTTY. Adding a server shows what its destination resolves to, and
+the options not done here; ProxyCommand can't run on a phone (ProxyJump does
+the same). The drawer lists the connection's forwards, and adds more.
+
+Settings also has the machines' keys (to forget one that changed for a good
+reason), the terminal's (text size, the volume keys, the keys row's
+characters, a vibrating bell, a plain tab's history), and a backup of it all to
+a file (the added keys only if asked: whoever has the file can read them).
 
 A machine without artty works too, with plain ssh: turn off "artty on it" for
 the server (connecting to one where artty isn't found offers to). Its tabs are

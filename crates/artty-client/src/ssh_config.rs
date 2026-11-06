@@ -224,6 +224,11 @@ impl Config {
     pub fn read(path: &std::path::Path, home: &str) -> Result<Config, String> {
         let text =
             std::fs::read_to_string(path).map_err(|err| format!("{}: {err}", path.display()))?;
+        Ok(Config::parse_in(&text, home))
+    }
+
+    /// Read `text`, its `Include`s from disk, as [`Config::read`] does.
+    pub fn parse_in(text: &str, home: &str) -> Config {
         let ssh = std::path::Path::new(home).join(".ssh");
         let include = |pattern: &str| -> Vec<String> {
             let pattern = match pattern.strip_prefix("~/") {
@@ -244,7 +249,7 @@ impl Config {
             files.sort();
             files.iter().filter_map(|file| std::fs::read_to_string(file).ok()).collect()
         };
-        Ok(Config::parse(&text, &include))
+        Config::parse(text, &include)
     }
 
     /// Read `text`; `include` gives the texts of the files an `Include`'s

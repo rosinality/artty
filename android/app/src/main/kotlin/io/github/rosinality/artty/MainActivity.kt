@@ -72,7 +72,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.verticalScroll
 import uniffi.artty_android.LinkSpan
+import uniffi.artty_android.checkConfig
+import uniffi.artty_android.resolve
 import uniffi.artty_android.TabItem
 
 internal val Background = Color(0xff161a22)
@@ -149,7 +152,7 @@ private fun App(store: Store) {
         Phase.Servers -> ServersScreen(store)
         is Phase.Connecting -> ConnectingScreen(phase)
         is Phase.Choosing -> WindowsScreen(phase)
-        is Phase.Shown -> TerminalScreen()
+        is Phase.Shown -> TerminalScreen(store)
         is Phase.Failed -> FailedScreen(phase, store)
         is Phase.AnotherBuild -> AnotherBuildScreen(phase)
     }
@@ -173,7 +176,7 @@ private fun ServersScreen(store: Store) {
     val servers = remember { mutableStateListOf<Server>().apply { addAll(store.servers()) } }
     /** The dialog open: adding (`null` server) or editing one. */
     var editing by remember { mutableStateOf<Pair<Boolean, Server?>?>(null) }
-    var showingKey by remember { mutableStateOf(false) }
+    var settings by remember { mutableStateOf(false) }
     var removing by remember { mutableStateOf<Server?>(null) }
     fun save() = store.saveServers(servers)
     fun move(server: Server, by: Int) {
@@ -185,7 +188,7 @@ private fun ServersScreen(store: Store) {
         save()
     }
     Column(Modifier.fillMaxSize()) {
-        Heading("artty") { TextButton(onClick = { showingKey = true }) { Text("This phone's key") } }
+        Heading("artty") { TextButton(onClick = { settings = true }) { Text("Settings") } }
         LazyColumn(Modifier.weight(1f)) {
             itemsIndexed(servers) { index, server ->
                 var menu by remember { mutableStateOf(false) }
@@ -201,7 +204,7 @@ private fun ServersScreen(store: Store) {
                 ) {
                     Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
                         Text(server.name, fontWeight = FontWeight.Medium)
-                        Text(if (server.plain) "${server.address} · plain ssh" else server.address, color = Faint, fontSize = 13.sp)
+                        Text(if (server.plain) "${server.destination} · plain ssh" else server.destination, color = Faint, fontSize = 13.sp)
                     }
                     Box {
                         TextButton(onClick = { menu = true }) { Text("⋯", fontSize = 20.sp, color = Faint) }
@@ -233,7 +236,7 @@ private fun ServersScreen(store: Store) {
             if (servers.isEmpty()) {
                 item {
                     Text(
-                        "Add a server: a machine running artty, reached by ssh, or any other with plain ssh. This phone logs in with its own key (see “This phone's key”).",
+                        "Add a server: a machine running artty, reached by ssh, or any other with plain ssh. This phone logs in with its own key (Settings, Keys), or keys added; the ssh config (Settings) can say how to reach each.",
                         color = Faint,
                         modifier = Modifier.padding(16.dp),
                     )
@@ -243,7 +246,7 @@ private fun ServersScreen(store: Store) {
         Button(onClick = { editing = true to null }, modifier = Modifier.fillMaxWidth().padding(12.dp)) { Text("Add a server") }
     }
     editing?.let { (_, old) ->
-        ServerDialog(old, onDone = { server ->
+        ServerDialog(store, old, onDone = { server ->
             editing = null
             if (server != null) {
                 val at = old?.let { servers.indexOf(it) } ?: -1
@@ -252,7 +255,11 @@ private fun ServersScreen(store: Store) {
             }
         })
     }
-    if (showingKey) KeyDialog(store) { showingKey = false }
+    if (settings) {
+        Surface(Modifier.fillMaxSize(), color = Background, contentColor = Ink) {
+            SettingsScreen(store) { settings = false }
+        }
+    }
     removing?.let { server ->
         AlertDialog(
             onDismissRequest = { removing = null },
@@ -271,30 +278,60 @@ private fun ServersScreen(store: Store) {
 
 /** Adding a server (`old` null), or changing one. */
 @Composable
-private fun ServerDialog(old: Server?, onDone: (Server?) -> Unit) {
+private fun ServerDialog(store: Store, old: Server?, onDone: (Server?) -> Unit) {
     var name by remember { mutableStateOf(old?.name ?: "") }
-    var address by remember { mutableStateOf(old?.address ?: "") }
+    var destination by remember { mutableStateOf(old?.destination ?: "") }
     var artty by remember { mutableStateOf(old?.artty ?: "") }
     var plain by remember { mutableStateOf(old?.plain ?: false) }
-    val parsed = Server.parse(name, address.trim(), artty.trim(), plain)
-    val badAddress = address.isNotBlank() && parsed == null
+    var hostsShown by remember { mutableStateOf(false) }
+    val home = store.sshHome.path
+    val hosts = remember { checkConfig(store.sshConfig(), home).hosts }
+    val resolution = remember(destination) { destination.trim().takeIf { it.isNotEmpty() }?.let { resolve(it, home) } }
+    val server = Server(
+        name.trim().ifBlank { destination.trim() },
+        destination.trim(),
+        artty.trim().ifBlank { null }.takeUnless { plain },
+        plain,
+    ).takeIf { destination.isNotBlank() && resolution?.error == null }
     AlertDialog(
         onDismissRequest = { onDone(null) },
         title = { Text(if (old == null) "Add a server" else "Edit ${old.name}") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(name, { name = it }, label = { Text("Name") }, singleLine = true)
-                OutlinedTextField(
-                    address, { address = it },
-                    label = { Text("user@host or user@host:port") },
-                    singleLine = true,
-                    isError = badAddress,
-                    supportingText = if (badAddress) {
-                        { Text("Like me@devbox, or me@devbox:2222") }
-                    } else {
-                        null
-                    },
-                )
+                Box {
+                    OutlinedTextField(
+                        destination, { destination = it },
+                        label = { Text("Host from the ssh config, or user@host[:port]") },
+                        singleLine = true,
+                        isError = resolution?.error != null,
+                        trailingIcon = if (hosts.isNotEmpty()) {
+                            { TextButton(onClick = { hostsShown = true }) { Text("▾") } }
+                        } else {
+                            null
+                        },
+                    )
+                    DropdownMenu(expanded = hostsShown, onDismissRequest = { hostsShown = false }) {
+                        for (host in hosts) {
+                            DropdownMenuItem(text = { Text(host) }, onClick = {
+                                destination = host
+                                if (name.isBlank()) name = host
+                                hostsShown = false
+                            })
+                        }
+                    }
+                }
+                resolution?.let { r ->
+                    val lines = buildList {
+                        r.error?.let { add(it) }
+                        r.address?.let { add(if (r.through.isEmpty()) it else "$it, through ${r.through.joinToString(", ")}") }
+                        addAll(r.details)
+                        if (r.ignored.isNotEmpty()) add("Not done here: ${r.ignored.joinToString(", ")}")
+                    }
+                    for (line in lines) {
+                        Text(line, color = if (line == r.error) Color(0xfff7768e) else Faint, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    }
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text("artty on it")
@@ -312,63 +349,10 @@ private fun ServerDialog(old: Server?, onDone: (Server?) -> Unit) {
             }
         },
         confirmButton = {
-            TextButton(onClick = { onDone(parsed) }, enabled = parsed != null) { Text(if (old == null) "Add" else "Save") }
+            TextButton(onClick = { onDone(server) }, enabled = server != null) { Text(if (old == null) "Add" else "Save") }
         },
         dismissButton = { TextButton(onClick = { onDone(null) }) { Text("Cancel") } },
     )
-}
-
-@Composable
-private fun KeyDialog(store: Store, onDone: () -> Unit) {
-    val context = LocalContext.current
-    val key = remember { store.publicKey() }
-    val keptIn = remember { store.phoneKey.keptIn }
-    var oldKey by remember { mutableStateOf(store.oldPublicKey()) }
-    var forgetting by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDone,
-        title = { Text("This phone's key") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Add it to ~/.ssh/authorized_keys on each server, and this phone can log in.", color = Faint)
-                SelectionContainer { Text(key, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
-                val kept = if ("software" in keptIn) {
-                    "Its private half is kept in $keptIn: the app can't read it, and it isn't backed up. (This phone has no secure hardware for it.)"
-                } else {
-                    "Its private half is kept in $keptIn: it can't be read out, copied off the phone, or backed up."
-                }
-                Text(kept, color = Faint, fontSize = 13.sp)
-                oldKey?.let { old ->
-                    Spacer(Modifier.height(4.dp))
-                    Text("The key this app made before is still tried after it:", color = Faint, fontSize = 13.sp)
-                    Text(old, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Faint)
-                    TextButton(onClick = { forgetting = true }) { Text("Forget the old key") }
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = {
-                context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("key", key))
-                onDone()
-            }) { Text("Copy") }
-        },
-        dismissButton = { TextButton(onClick = onDone) { Text("Close") } },
-    )
-    if (forgetting) {
-        AlertDialog(
-            onDismissRequest = { forgetting = false },
-            title = { Text("Forget the old key?") },
-            text = { Text("Servers that have only the old key in authorized_keys won't let this phone in until the new one is added there. (Remove the old one there too.)") },
-            confirmButton = {
-                TextButton(onClick = {
-                    store.forgetOldKey()
-                    oldKey = null
-                    forgetting = false
-                }) { Text("Forget") }
-            },
-            dismissButton = { TextButton(onClick = { forgetting = false }) { Text("Cancel") } },
-        )
-    }
 }
 
 @Composable
@@ -428,9 +412,10 @@ private fun WindowsScreen(phase: Phase.Choosing) {
 private fun Modifier.combinedClickableCompat(onClick: () -> Unit) = combinedClickable(onClick = onClick)
 
 @Composable
-private fun TerminalScreen() {
+private fun TerminalScreen(store: Store) {
     val context = LocalContext.current
     val view = remember { TerminalView(context) }
+    val rowKeys = remember { store.rowKeys.split(' ').filter { it.isNotEmpty() } }
     var ctrl by remember { mutableStateOf(false) }
     var alt by remember { mutableStateOf(false) }
     /** Ctrl or Alt stays on (a long press) until tapped again. */
@@ -641,7 +626,8 @@ private fun TerminalScreen() {
                 KeyButton("End") { view.key("end") }
                 KeyButton("PgUp") { view.key("pageup") }
                 KeyButton("PgDn") { view.key("pagedown") }
-                for (c in listOf("|", "-", "/", "~", "_", "\\", "`", "*", "&", "$", ">", "<")) KeyButton(c) { view.type(c) }
+                // The row's end: the characters Settings gives (each a key).
+                for (c in rowKeys) KeyButton(c) { view.type(c) }
             }
         }
     }
@@ -814,6 +800,42 @@ private fun QuestionDialog(question: Question) {
                 if (!question.changed) TextButton(onClick = { question.reply.complete(true) }) { Text("Trust") }
             },
             dismissButton = { TextButton(onClick = { question.reply.complete(false) }) { Text("Cancel") } },
+        )
+        is Question.Passphrase -> {
+            var passphrase by remember(question) { mutableStateOf("") }
+            var remember by remember(question) { mutableStateOf(false) }
+            AlertDialog(
+                onDismissRequest = { question.reply.complete(null) },
+                title = { Text("The key ${question.key}") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(passphrase, { passphrase = it }, label = { Text("Its passphrase") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.material3.Checkbox(remember, { remember = it })
+                            Text("Keep it with the key", fontSize = 14.sp)
+                        }
+                    }
+                },
+                confirmButton = { TextButton(onClick = { question.reply.complete(passphrase to remember) }) { Text("Unlock") } },
+                dismissButton = { TextButton(onClick = { question.reply.complete(null) }) { Text("Skip the key") } },
+            )
+        }
+        is Question.AgentSign -> AlertDialog(
+            onDismissRequest = { question.reply.complete(false to false) },
+            title = { Text("Sign with ${question.key}?") },
+            text = {
+                Text(
+                    "A program on ${question.host} asks to use this key (agent forwarding): to log in onward, say, or for git. Allow it only if you started something there that needs it.",
+                    color = Faint,
+                )
+            },
+            confirmButton = {
+                Column(horizontalAlignment = Alignment.End) {
+                    TextButton(onClick = { question.reply.complete(true to false) }) { Text("Allow once") }
+                    TextButton(onClick = { question.reply.complete(true to true) }) { Text("Allow while connected") }
+                }
+            },
+            dismissButton = { TextButton(onClick = { question.reply.complete(false to false) }) { Text("Refuse") } },
         )
         is Question.Answers -> {
             val answers = remember(question) { mutableStateListOf(*Array(question.prompts.size) { "" }) }

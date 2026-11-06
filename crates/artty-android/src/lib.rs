@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use artty_client::ssh::{self, Credentials, HostKey, KnownHosts, Login, Target};
-use artty_client::ssh_config::{Config, Local};
+use artty_client::ssh_config::{self, Config, Local};
 use artty_client::{Client, Event, Key};
 use artty_core::TerminalSize;
 use artty_core::protocol::WindowLayout;
@@ -86,6 +86,11 @@ pub trait LoginAsker: Send + Sync {
     fn said(&self, text: String);
     /// Answers to its questions, or none to give up.
     fn answer(&self, instructions: String, prompts: Vec<Prompt>) -> Option<Vec<String>>;
+    /// The passphrase of the key `name`, or none to skip it.
+    fn passphrase(&self, name: String) -> Option<String>;
+    /// May `host` (`user@alias`, which `ForwardAgent` lends the keys to)
+    /// sign with the key `name`?
+    fn agent_sign(&self, name: String, host: String) -> bool;
 }
 
 /// What a selection takes.
@@ -303,6 +308,9 @@ pub enum ClientEvent {
     Closed {
         reason: String,
     },
+    /// A forward started, stopped, or its connections changed:
+    /// `Connection::forwards` has them.
+    Forwards,
 }
 
 /// Where what happens goes (called off the main thread).
@@ -545,6 +553,14 @@ impl Login for Asking {
             prompts.iter().map(|(text, echo)| Prompt { text: text.clone(), echo: *echo }).collect();
         self.0.answer(instructions.to_owned(), prompts)
     }
+
+    fn passphrase(&self, name: &str) -> Option<String> {
+        self.0.passphrase(name.to_owned())
+    }
+
+    fn agent_sign(&self, name: &str, host: &str) -> bool {
+        self.0.agent_sign(name.to_owned(), host.to_owned())
+    }
 }
 
 /// This phone's key in Android Keystore: it signs there, and its private half
@@ -586,6 +602,8 @@ pub struct SshSetup {
     pub home: String,
     /// Machines' keys, as OpenSSH records them.
     pub known_hosts: String,
+    /// Lines of history a plain ssh tab keeps.
+    pub scrollback: u32,
 }
 
 /// What `IdentityFile` names this phone's key by (`IdentityFile ~/.ssh/phone`).
@@ -675,6 +693,7 @@ pub fn install(
 #[derive(uniffi::Object)]
 pub struct Connection {
     client: Client,
+    forwards: ssh::Forwards,
 }
 
 /// Log in to `server` as the app's ssh config says (`setup`: through its
@@ -694,12 +713,16 @@ pub fn connect(
     let credentials = credentials(keystore, &setup)?;
     let known = KnownHosts(PathBuf::from(&setup.known_hosts));
     let asking = Asking::new(login);
-    let link = if server.plain {
-        ssh::shells(&plan, &credentials, known, asking.clone())?.0
+    let (link, forwards) = if server.plain {
+        ssh::shells(&plan, &credentials, known, asking.clone(), setup.scrollback as usize)?
     } else {
         let command = ssh::server_command(server.artty.as_deref());
-        ssh::connect(&plan, &command, &credentials, known, asking.clone())?.0
+        ssh::connect(&plan, &command, &credentials, known, asking.clone())?
     };
+    {
+        let events = events.clone();
+        forwards.on_change(move || events.event(ClientEvent::Forwards));
+    }
     let (client, received) = match Client::start(link, env!("CARGO_PKG_VERSION")) {
         Ok(started) => started,
         // Its shell saying there's no artty: say so (the app offers plain ssh).
@@ -759,11 +782,84 @@ pub fn connect(
             }
         })
         .map_err(|err| err.to_string())?;
-    Ok(Arc::new(Connection { client }))
+    Ok(Arc::new(Connection { client, forwards }))
+}
+
+/// A port forward over the connection, as it's doing.
+#[derive(uniffi::Record)]
+pub struct ForwardItem {
+    pub id: u64,
+    pub kind: ForwardKind,
+    /// As `ssh` writes it: `L 8080 → localhost:80`.
+    pub description: String,
+    /// From the ssh config (else added while connected).
+    pub configured: bool,
+    pub listening: Option<u16>,
+    /// Why it isn't listening.
+    pub error: Option<String>,
+    /// Connections through it now, and in all.
+    pub open: u32,
+    pub total: u32,
+}
+
+#[derive(uniffi::Enum, Clone, Copy)]
+pub enum ForwardKind {
+    /// Listening on this phone, to there.
+    Local,
+    /// Listening there, to here.
+    Remote,
+    /// Listening on this phone: SOCKS says where to there.
+    Dynamic,
 }
 
 #[uniffi::export]
 impl Connection {
+    /// Its port forwards.
+    pub fn forwards(&self) -> Vec<ForwardItem> {
+        self.forwards
+            .list()
+            .into_iter()
+            .map(|f| ForwardItem {
+                id: f.id,
+                kind: match f.kind {
+                    ssh::ForwardKind::Local => ForwardKind::Local,
+                    ssh::ForwardKind::Remote => ForwardKind::Remote,
+                    ssh::ForwardKind::Dynamic => ForwardKind::Dynamic,
+                },
+                description: f.describe(),
+                configured: f.configured,
+                listening: f.listening,
+                error: f.error,
+                open: f.open as u32,
+                total: f.total as u32,
+            })
+            .collect()
+    }
+
+    /// Forward `port` (on `bind`, if given; else the loopback) to `host`:`host_port`
+    /// (for a dynamic one, none: SOCKS says where), until stopped or disconnected.
+    pub fn add_forward(
+        &self,
+        kind: ForwardKind,
+        bind: Option<String>,
+        port: u16,
+        host: Option<String>,
+        host_port: u16,
+    ) -> u64 {
+        let kind = match kind {
+            ForwardKind::Local => ssh::ForwardKind::Local,
+            ForwardKind::Remote => ssh::ForwardKind::Remote,
+            ForwardKind::Dynamic => ssh::ForwardKind::Dynamic,
+        };
+        let to = host.filter(|_| kind != ssh::ForwardKind::Dynamic).map(|h| (h, host_port));
+        let bind = bind.filter(|b| !b.trim().is_empty());
+        self.forwards.add(kind, ssh_config::Forward { bind, port, to }, false)
+    }
+
+    pub fn stop_forward(&self, id: u64) {
+        self.forwards.stop(id);
+    }
+
     /// The server's build.
     pub fn server_version(&self) -> String {
         self.client.server_version.clone()
@@ -1152,6 +1248,104 @@ impl Connection {
     pub fn scroll(&self, pane: u64, lines: i32) -> Result<(), ConnectError> {
         Ok(self.client.scroll(pane, lines)?)
     }
+}
+
+/// How a destination resolves with the app's ssh config: shown while
+/// adding a server, and before connecting.
+#[derive(uniffi::Record)]
+pub struct Resolution {
+    /// `user@host:port` (the host's real name), if it resolves.
+    pub address: Option<String>,
+    /// The jump hosts on the way, by name.
+    pub through: Vec<String>,
+    /// Its forwards and other settings, as `ssh` would write them.
+    pub details: Vec<String>,
+    /// The config's options not done here.
+    pub ignored: Vec<String>,
+    /// Why it can't be reached as it is.
+    pub error: Option<String>,
+}
+
+/// How `destination` resolves with the ssh config in `home` (see [`SshSetup::home`]).
+#[uniffi::export]
+pub fn resolve(destination: String, home: String) -> Resolution {
+    match plan(&destination, &home) {
+        Ok(plan) => {
+            let t = &plan.target;
+            let mut details = Vec::new();
+            let forward = |f: &ssh_config::Forward| {
+                let bind = f.bind.as_ref().map(|b| format!("{b}:")).unwrap_or_default();
+                let to = f.to.as_ref().map(|(h, p)| format!(" → {h}:{p}")).unwrap_or_default();
+                format!("{bind}{}{to}", f.port)
+            };
+            details.extend(t.local_forwards.iter().map(|f| format!("LocalForward {}", forward(f))));
+            details
+                .extend(t.remote_forwards.iter().map(|f| format!("RemoteForward {}", forward(f))));
+            details.extend(
+                t.dynamic_forwards.iter().map(|f| format!("DynamicForward {}", forward(f))),
+            );
+            if !t.identity_files.is_empty() {
+                details.push(format!("IdentityFile {}", t.identity_files.join(", ")));
+            }
+            if t.forward_agent {
+                details.push("ForwardAgent yes".into());
+            }
+            if let Some(command) = &t.remote_command {
+                details.push(format!("RemoteCommand {command}"));
+            }
+            Resolution {
+                address: Some(format!(
+                    "{}@{}:{}",
+                    t.user.clone().unwrap_or_default(),
+                    t.host_name,
+                    t.port
+                )),
+                through: plan.hops.iter().map(|h| h.alias.clone()).collect(),
+                details,
+                ignored: plan.ignored.clone(),
+                error: None,
+            }
+        },
+        Err(err) => Resolution {
+            address: None,
+            through: Vec::new(),
+            details: Vec::new(),
+            ignored: Vec::new(),
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+/// The app's ssh config, read: its hosts (to offer as servers), and the
+/// lines it couldn't read.
+#[derive(uniffi::Record)]
+pub struct ConfigCheck {
+    pub hosts: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Read the ssh config `text` (its `Include`s from `home`'s `.ssh`).
+#[uniffi::export]
+pub fn check_config(text: String, home: String) -> ConfigCheck {
+    let config = Config::parse_in(&text, &home);
+    ConfigCheck {
+        hosts: config.hosts(),
+        errors: config.errors.iter().map(|(line, why)| format!("line {line}: {why}")).collect(),
+    }
+}
+
+/// A private key, read: its public half (as `authorized_keys` takes it),
+/// and whether it needs a passphrase.
+#[derive(uniffi::Record)]
+pub struct KeyInfo {
+    pub public: String,
+    pub encrypted: bool,
+}
+
+#[uniffi::export]
+pub fn key_info(text: String) -> Result<KeyInfo, ConnectError> {
+    let (public, encrypted) = ssh::key_info(&text)?;
+    Ok(KeyInfo { public, encrypted })
 }
 
 /// The Keystore key's public half (X.509 `SubjectPublicKeyInfo`) as
