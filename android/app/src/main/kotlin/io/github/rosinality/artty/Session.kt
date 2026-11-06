@@ -202,7 +202,7 @@ object Session : LoginAsker {
     private fun open() {
         val server = server ?: return
         val generation = ++generation
-        val address = ServerAddress(server.destination, server.artty, server.plain)
+        val address = ServerAddress(server.destination, server.artty, server.plain, server.tmux)
         val setup = store.sshSetup()
         Thread {
             try {
@@ -253,7 +253,7 @@ object Session : LoginAsker {
         if (shown.installing) return
         phase = shown.copy(installing = true, error = null)
         val server = shown.server
-        val address = ServerAddress(server.destination, server.artty, false)
+        val address = ServerAddress(server.destination, server.artty, false, false)
         val setup = store.sshSetup()
         val builds = AppBuilds(context)
         Thread {

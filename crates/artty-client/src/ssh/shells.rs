@@ -1,6 +1,8 @@
 //! Shells over one ssh connection, for [`crate::plain`]: each its own
 //! session channel, with a terminal (unless `RequestTTY no`), the config's
-//! `SetEnv`, and its `RemoteCommand` in place of the login shell.
+//! `SetEnv`, and its `RemoteCommand` in place of the login shell. Kept (if
+//! asked), each runs in a tmux session there, which outlives the connection
+//! and is taken up again by the next.
 
 use std::time::Duration;
 
@@ -14,12 +16,27 @@ use crate::ssh_config::{RequestTty, Resolved};
 pub(super) struct Shells {
     connection: Connection,
     target: Resolved,
+    /// Each shell in a tmux session there.
+    keep: bool,
 }
 
 impl Shells {
-    pub(super) fn new(connection: Connection, target: Resolved) -> Shells {
-        Shells { connection, target }
+    pub(super) fn new(connection: Connection, target: Resolved, keep: bool) -> Shells {
+        // A RemoteCommand is what runs, kept or not.
+        let keep = keep && target.remote_command.is_none();
+        Shells { connection, target, keep }
     }
+}
+
+/// What runs for a kept shell: tmux's session `name` (made, or taken up),
+/// its mouse on (swipes scroll its history); without tmux there, the login
+/// shell, saying so. In sh, whatever the login shell is (fish, say), and
+/// as a login one (for a PATH that finds tmux).
+fn in_tmux(name: &str) -> String {
+    format!(
+        "sh -lc 'if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s {name} \\; set-option mouse on; \
+         else echo \"(no tmux there: this shell ends with the connection)\"; exec \"$SHELL\" -l; fi'"
+    )
 }
 
 impl crate::plain::Shells for Shells {
@@ -28,6 +45,7 @@ impl crate::plain::Shells for Shells {
         size: TerminalSize,
         ends: RemoteEnds,
         mut sizes: tokio::sync::mpsc::UnboundedReceiver<TerminalSize>,
+        session: Option<String>,
     ) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let handle = self.connection.handle.clone();
@@ -54,9 +72,13 @@ impl crate::plain::Shells for Shells {
                 for (name, value) in &target.set_env {
                     channel.set_env(false, name.as_str(), value.as_str()).await?;
                 }
-                match &target.remote_command {
-                    Some(command) => channel.exec(true, command.as_str()).await?,
-                    None => channel.request_shell(true).await?,
+                match (&target.remote_command, &session) {
+                    (Some(command), _) => channel.exec(true, command.as_str()).await?,
+                    (None, Some(name)) => {
+                        log::info!("a shell in tmux's session {name}");
+                        channel.exec(true, in_tmux(name)).await?
+                    },
+                    (None, None) => channel.request_shell(true).await?,
                 }
                 Ok::<_, russh::Error>(channel)
             };
@@ -132,5 +154,43 @@ impl crate::plain::Shells for Shells {
 
     fn closed(&self) -> bool {
         self.connection.closed()
+    }
+
+    fn keeps(&self) -> bool {
+        self.keep
+    }
+
+    fn sessions(&self) -> Vec<String> {
+        let listed = self
+            .connection
+            .run("sh -lc 'tmux list-sessions -F \"#{session_name}\" 2>/dev/null; true'", None);
+        let mut names: Vec<String> = listed
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .filter(|name| {
+                name.strip_prefix(crate::plain::SESSION_PREFIX)
+                    .is_some_and(|n| n.parse::<u32>().is_ok())
+            })
+            .map(str::to_owned)
+            .collect();
+        // In the order they were made.
+        names.sort_by_key(|name| {
+            name[crate::plain::SESSION_PREFIX.len()..].parse::<u32>().unwrap_or(0)
+        });
+        if !names.is_empty() {
+            log::info!("taking up tmux's sessions {}", names.join(", "));
+        }
+        names
+    }
+
+    fn end(&self, session: &str) {
+        let handle = self.connection.handle.clone();
+        let command = format!("sh -lc 'tmux kill-session -t {session} 2>/dev/null; true'");
+        self.connection.spawn(async move {
+            if let Ok(channel) = handle.channel_open_session().await {
+                let _ = channel.exec(true, command).await;
+            }
+        });
     }
 }

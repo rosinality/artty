@@ -16,6 +16,10 @@ use artty_core::vt::tty::RemoteEnds;
 struct Echo {
     closed: Arc<AtomicBool>,
     sizes: Arc<Mutex<Vec<TerminalSize>>>,
+    /// Keeping sessions (as tmux would): those alive there, and each shell's.
+    keep: bool,
+    kept: Arc<Mutex<Vec<String>>>,
+    opened: Arc<Mutex<Vec<Option<String>>>>,
 }
 
 impl Shells for Echo {
@@ -24,8 +28,16 @@ impl Shells for Echo {
         size: TerminalSize,
         ends: RemoteEnds,
         mut sizes: tokio::sync::mpsc::UnboundedReceiver<TerminalSize>,
+        session: Option<String>,
     ) {
         self.sizes.lock().unwrap().push(size);
+        if let Some(name) = &session {
+            let mut kept = self.kept.lock().unwrap();
+            if !kept.contains(name) {
+                kept.push(name.clone());
+            }
+        }
+        self.opened.lock().unwrap().push(session);
         let seen = self.sizes.clone();
         std::thread::spawn(move || {
             while let Some(size) = sizes.blocking_recv() {
@@ -61,6 +73,18 @@ impl Shells for Echo {
 
     fn closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
+    }
+
+    fn keeps(&self) -> bool {
+        self.keep
+    }
+
+    fn sessions(&self) -> Vec<String> {
+        self.kept.lock().unwrap().clone()
+    }
+
+    fn end(&self, session: &str) {
+        self.kept.lock().unwrap().retain(|s| s != session);
     }
 }
 
@@ -241,7 +265,15 @@ fn over_ssh() {
         },
         Err(_) => Credentials::usual(),
     };
-    let (link, forwards) = ssh::shells(&plan, &credentials, known, Arc::new(Known), 1000).unwrap();
+    let (link, forwards) = ssh::shells(
+        &plan,
+        &credentials,
+        known,
+        Arc::new(Known),
+        1000,
+        std::env::var_os("ARTTY_PLAIN_TMUX").is_some(),
+    )
+    .unwrap();
     let (client, events) = Client::start(link, "test").unwrap();
     client.attach(Some(plain::WINDOW), true).unwrap();
     let pane = until(&events, |e| match e {
@@ -387,4 +419,110 @@ fn upload() {
             .unwrap();
     eprintln!("counted {} in {:?}", counted.trim(), started.elapsed());
     assert_eq!(counted.trim(), (5 * 1024 * 1024).to_string());
+}
+
+/// Kept shells (tmux there): each tab's session named, taken up again by the
+/// next connection, ended with its tab.
+#[test]
+fn kept_sessions() {
+    let shells = Echo { keep: true, ..Default::default() };
+    let attach = |shells: &Echo| {
+        let link = plain::serve(Box::new(shells.clone()), "me@box".into(), 1000).unwrap();
+        let (client, events) = Client::start(link, "test").unwrap();
+        client.attach(Some(plain::WINDOW), true).unwrap();
+        until(&events, |e| matches!(e, Event::Attached { .. }).then_some(()));
+        (client, events)
+    };
+    let tabs = |events: &std::sync::mpsc::Receiver<Event>, n: usize| {
+        until(events, |e| match e {
+            Event::Layout { layout, .. } if layout.workspaces[0].tabs.len() == n => Some(()),
+            _ => None,
+        })
+    };
+    let (client, events) = attach(&shells);
+    tabs(&events, 1);
+    client.new_tab(plain::WINDOW, None).unwrap();
+    tabs(&events, 2);
+    assert_eq!(*shells.kept.lock().unwrap(), ["artty-1", "artty-2"]);
+    // The connection gone (the app too): the sessions stay there.
+    drop((client, events));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(shells.kept.lock().unwrap().len(), 2);
+    shells.opened.lock().unwrap().clear();
+
+    // The next takes them up, a tab each, in order; a new one takes the next name.
+    let (client, events) = attach(&shells);
+    tabs(&events, 2);
+    assert_eq!(
+        *shells.opened.lock().unwrap(),
+        [Some("artty-1".to_owned()), Some("artty-2".to_owned())]
+    );
+    client.close_tab(1, 0).unwrap();
+    tabs(&events, 1);
+    assert_eq!(*shells.kept.lock().unwrap(), ["artty-2"]);
+    client.new_tab(plain::WINDOW, None).unwrap();
+    tabs(&events, 2);
+    assert_eq!(shells.opened.lock().unwrap().last().cloned().flatten().as_deref(), Some("artty-1"));
+}
+
+/// Kept shells on a real machine with tmux (`ARTTY_PLAIN_TARGET`, as
+/// `ARTTY_PLAIN_CONFIG` says): a tab's shell is in tmux's `artty-1`, outlives
+/// the connection, is taken up again, and ends with its tab.
+#[test]
+#[ignore]
+fn kept_over_ssh() {
+    use artty_client::ssh::{self, Credentials, HostKey, KnownHosts, Login, Target};
+    use artty_client::ssh_config::{Config, Local};
+    struct Known;
+    impl Login for Known {
+        fn host_key(&self, _: &Target, _: &str, _: HostKey) -> bool {
+            false
+        }
+        fn said(&self, text: &str) {
+            eprintln!("said: {text}");
+        }
+        fn answer(&self, _: &str, _: &[(String, bool)]) -> Option<Vec<String>> {
+            None
+        }
+    }
+    let destination = std::env::var("ARTTY_PLAIN_TARGET").unwrap();
+    let config = std::env::var("ARTTY_PLAIN_CONFIG")
+        .map(|path| Config::read(path.as_ref(), "/nowhere").unwrap())
+        .unwrap_or_default();
+    let plan = ssh::plan(&config, &Local::here(), &destination).unwrap();
+    let known = || KnownHosts(std::env::var("ARTTY_PLAIN_KNOWN_HOSTS").unwrap().into());
+    let connect = || {
+        let (link, _) =
+            ssh::shells(&plan, &Credentials::usual(), known(), Arc::new(Known), 1000, true).unwrap();
+        let (client, events) = Client::start(link, "test").unwrap();
+        client.attach(Some(plain::WINDOW), true).unwrap();
+        let pane = until(&events, |e| match e {
+            Event::Layout { layout, .. } => layout.active_tab().map(|t| t.focused),
+            _ => None,
+        });
+        let size = TerminalSize { columns: 70, lines: 12, cell_width: 9, cell_height: 18 };
+        client.resize(pane, size).unwrap();
+        (client, events, pane)
+    };
+    let (client, events, pane) = connect();
+    std::thread::sleep(Duration::from_secs(2));
+    client.input(pane, b"tmux display -p 'in #S'; echo k''ept-here\r".to_vec()).unwrap();
+    wait_for(&client, &events, pane, "kept-here");
+    let shown = text(&client, pane);
+    eprintln!("{shown}");
+    assert!(shown.contains("in artty-1"), "in tmux's artty-1");
+    // The connection gone: taken up again, as it was.
+    drop((client, events));
+    std::thread::sleep(Duration::from_secs(1));
+    let (client, events, pane) = connect();
+    wait_for(&client, &events, pane, "kept-here");
+    eprintln!("taken up:\n{}", text(&client, pane));
+    // Its tab closed: the session ends.
+    client.close_tab(1, 0).unwrap();
+    until(&events, |e| matches!(e, Event::WindowClosed { .. }).then_some(()));
+    std::thread::sleep(Duration::from_secs(2));
+    drop((client, events));
+    let left = ssh::run(&plan, &Credentials::usual(), known(), Arc::new(Known), "sh -lc 'tmux list-sessions -F \"#{session_name}\" 2>/dev/null; true'", None).unwrap();
+    eprintln!("sessions left: {left:?}");
+    assert!(!left.lines().any(|s| s.starts_with("artty-")), "no artty session left");
 }

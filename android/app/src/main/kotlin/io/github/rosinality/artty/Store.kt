@@ -21,6 +21,8 @@ data class Server(
     val destination: String,
     val artty: String? = null,
     val plain: Boolean = false,
+    /** Plain ssh: each shell in a tmux session there, outliving the connection. */
+    val tmux: Boolean = false,
 )
 
 /** A machine's key, as `known_hosts` records it. */
@@ -46,6 +48,7 @@ class Store(private val context: Context) {
         .put("destination", s.destination)
         .put("artty", s.artty ?: "")
         .put("plain", s.plain)
+        .put("tmux", s.tmux)
 
     private fun server(o: JSONObject): Server {
         // Saved by earlier builds as user, host and port.
@@ -53,7 +56,13 @@ class Store(private val context: Context) {
             val port = o.optInt("port", 22)
             "${o.optString("user")}@${o.optString("host")}" + if (port == 22) "" else ":$port"
         }
-        return Server(o.getString("name"), destination, o.optString("artty").ifBlank { null }, o.optBoolean("plain", false))
+        return Server(
+            o.getString("name"),
+            destination,
+            o.optString("artty").ifBlank { null },
+            o.optBoolean("plain", false),
+            o.optBoolean("tmux", false),
+        )
     }
 
     // Keys.

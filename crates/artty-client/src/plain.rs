@@ -48,17 +48,35 @@ const DEFAULT_SIZE: TerminalSize =
 pub trait Shells: Send + 'static {
     /// Start a shell `size` big: its bytes through `ends` (which it says the
     /// end of, see `RemoteEnds`), new sizes from `sizes`.
+    /// With `session`, the shell is kept there by that name (tmux), to be
+    /// taken up again after the connection goes.
     fn open(
         &self,
         size: TerminalSize,
         ends: RemoteEnds,
         sizes: tokio::sync::mpsc::UnboundedReceiver<TerminalSize>,
+        session: Option<String>,
     );
     /// Call `answered` once the machine answers: it's still there.
     fn ping(&self, answered: Box<dyn FnOnce() + Send>);
     /// The connection is gone.
     fn closed(&self) -> bool;
+    /// Shells are kept there (in sessions), outliving the connection.
+    fn keeps(&self) -> bool {
+        false
+    }
+    /// The sessions kept there, to take up again (asks: blocks).
+    fn sessions(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// End a session kept there (its tab closed).
+    fn end(&self, session: &str) {
+        let _ = session;
+    }
 }
+
+/// What the kept sessions are called: `artty-1`, `artty-2`…
+pub const SESSION_PREFIX: &str = "artty-";
 
 /// Serve the shells of `shells` (on `name`, `user@host`), each keeping
 /// `scrollback` lines of history: the link to talk to it as to a server.
@@ -144,6 +162,8 @@ struct Tab {
     pane: PaneId,
     /// The name given it.
     title: Option<String>,
+    /// The session its shell is kept in there, if kept.
+    session: Option<String>,
 }
 
 struct Plain {
@@ -295,8 +315,17 @@ impl Plain {
     fn message(&mut self, message: ClientMessage) {
         match message {
             ClientMessage::AttachWindow { .. } => {
+                // The sessions kept there (from before the connection went), else one.
                 if self.tabs.is_empty() {
-                    self.open_tab();
+                    let kept =
+                        if self.shells.keeps() { self.shells.sessions() } else { Vec::new() };
+                    for session in kept {
+                        self.open_tab(Some(session));
+                    }
+                }
+                if self.tabs.is_empty() {
+                    let session = self.new_session();
+                    self.open_tab(session);
                 }
                 self.attached = true;
                 // The app's copies are new.
@@ -312,7 +341,10 @@ impl Plain {
                     self.active = tab;
                 }
             },
-            ClientMessage::NewTab { .. } | ClientMessage::NewWorkspace { .. } => self.open_tab(),
+            ClientMessage::NewTab { .. } | ClientMessage::NewWorkspace { .. } => {
+                let session = self.new_session();
+                self.open_tab(session);
+            },
             ClientMessage::CloseTab { tab, .. } => {
                 if tab < self.tabs.len() {
                     self.close_tab(tab);
@@ -493,7 +525,17 @@ impl Plain {
     }
 
     /// A shell in a new tab, after the others, shown.
-    fn open_tab(&mut self) {
+    /// A name for a new tab's session there (if shells are kept): the first
+    /// `artty-N` not taken.
+    fn new_session(&self) -> Option<String> {
+        if !self.shells.keeps() {
+            return None;
+        }
+        let taken: HashSet<&str> = self.tabs.iter().filter_map(|t| t.session.as_deref()).collect();
+        (1..).map(|n| format!("{SESSION_PREFIX}{n}")).find(|name| !taken.contains(name.as_str()))
+    }
+
+    fn open_tab(&mut self, kept: Option<String>) {
         let id = self.next_pane;
         self.next_pane += 1;
         let inbox = self.inbox.clone();
@@ -509,7 +551,7 @@ impl Plain {
         };
         match Session::remote(id, options, self.size, self.theme.clone(), sink, resize) {
             Ok((session, ends)) => {
-                self.shells.open(self.size, ends, resized);
+                self.shells.open(self.size, ends, resized, kept.clone());
                 let pane = Pane {
                     session,
                     opened: Instant::now(),
@@ -518,7 +560,7 @@ impl Plain {
                     progress: None,
                 };
                 self.panes.insert(id, pane);
-                self.tabs.push(Tab { pane: id, title: None });
+                self.tabs.push(Tab { pane: id, title: None, session: kept });
                 self.active = self.tabs.len() - 1;
             },
             Err(err) => log::error!("no terminal for a shell: {err}"),
@@ -528,6 +570,10 @@ impl Plain {
     /// Close a tab: its shell ends. The last one closes the window.
     fn close_tab(&mut self, index: usize) {
         let tab = self.tabs.remove(index);
+        // Its session there ends too (gone already, if its shell exited).
+        if let Some(session) = &tab.session {
+            self.shells.end(session);
+        }
         // Dropped, its terminal lets go of the channel, which ends the shell.
         self.panes.remove(&tab.pane);
         self.sent.remove(&tab.pane);

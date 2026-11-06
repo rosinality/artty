@@ -231,18 +231,20 @@ pub fn connect(
 /// Log in as `plan` says, to a machine without artty, for its shells: the
 /// link to a stand-in for an artty server, here ([`crate::plain`]), whose
 /// tabs are shells there (keeping `scrollback` lines of history), over this
-/// connection; and its forwards.
+/// connection; and its forwards. With `keep`, each shell is in a tmux
+/// session there, outliving the connection (taken up by the next).
 pub fn shells(
     plan: &Plan,
     credentials: &Credentials,
     known: KnownHosts,
     login: Arc<dyn Login>,
     scrollback: usize,
+    keep: bool,
 ) -> Result<(Link, Forwards), String> {
     let connection = Connection::open(plan, credentials, known, login)?;
     let forwards = connection.forwards.clone();
     let name = format!("{}@{}", connection.target.user, plan.target.alias);
-    let shells = shells::Shells::new(connection, plan.target.clone());
+    let shells = shells::Shells::new(connection, plan.target.clone(), keep);
     Ok((crate::plain::serve(Box::new(shells), name, scrollback)?, forwards))
 }
 

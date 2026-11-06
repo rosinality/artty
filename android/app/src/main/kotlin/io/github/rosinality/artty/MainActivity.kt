@@ -212,7 +212,12 @@ private fun ServersScreen(store: Store) {
                 ) {
                     Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
                         Text(server.name, fontWeight = FontWeight.Medium)
-                        Text(if (server.plain) "${server.destination} · plain ssh" else server.destination, color = Faint, fontSize = 13.sp)
+                        val kind = when {
+                            server.plain && server.tmux -> " · plain ssh, tmux"
+                            server.plain -> " · plain ssh"
+                            else -> ""
+                        }
+                        Text(server.destination + kind, color = Faint, fontSize = 13.sp)
                     }
                     Box {
                         TextButton(onClick = { menu = true }) { Text("⋯", fontSize = 20.sp, color = Faint) }
@@ -291,6 +296,7 @@ private fun ServerDialog(store: Store, old: Server?, onDone: (Server?) -> Unit) 
     var destination by remember { mutableStateOf(old?.destination ?: "") }
     var artty by remember { mutableStateOf(old?.artty ?: "") }
     var plain by remember { mutableStateOf(old?.plain ?: false) }
+    var tmux by remember { mutableStateOf(old?.tmux ?: false) }
     var hostsShown by remember { mutableStateOf(false) }
     val home = store.sshHome.path
     val hosts = remember { checkConfig(store.sshConfig(), home).hosts }
@@ -300,6 +306,7 @@ private fun ServerDialog(store: Store, old: Server?, onDone: (Server?) -> Unit) 
         destination.trim(),
         artty.trim().ifBlank { null }.takeUnless { plain },
         plain,
+        tmux && plain,
     ).takeIf { destination.isNotBlank() && resolution?.error == null }
     AlertDialog(
         onDismissRequest = { onDone(null) },
@@ -353,6 +360,18 @@ private fun ServerDialog(store: Store, old: Server?, onDone: (Server?) -> Unit) 
                 }
                 if (!plain) {
                     OutlinedTextField(artty, { artty = it }, label = { Text("artty there (if not on its PATH)") }, singleLine = true)
+                } else {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Keep shells in tmux")
+                            Text(
+                                "Each tab's shell runs in a tmux session there: it keeps running when the connection drops, and connecting again takes it up. Closing the tab ends it.",
+                                color = Faint,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        Switch(checked = tmux, onCheckedChange = { tmux = it })
+                    }
                 }
             }
         },

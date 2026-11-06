@@ -28,6 +28,9 @@ pub struct ServerAddress {
     /// No artty there: its shells, reached with plain ssh (tabs of shells
     /// that end with the connection; no files or agents).
     pub plain: bool,
+    /// Plain ssh: each shell in a tmux session there, outliving the
+    /// connection (taken up again when connecting next).
+    pub tmux: bool,
 }
 
 /// What went wrong.
@@ -721,7 +724,14 @@ pub fn connect(
     let known = KnownHosts(PathBuf::from(&setup.known_hosts));
     let asking = Asking::new(login);
     let (link, forwards) = if server.plain {
-        ssh::shells(&plan, &credentials, known, asking.clone(), setup.scrollback as usize)?
+        ssh::shells(
+            &plan,
+            &credentials,
+            known,
+            asking.clone(),
+            setup.scrollback as usize,
+            server.tmux,
+        )?
     } else {
         let command = ssh::server_command(server.artty.as_deref());
         ssh::connect(&plan, &command, &credentials, known, asking.clone())?
