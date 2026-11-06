@@ -208,6 +208,7 @@ dependencies = [
  "artty-core",
  "libc",
  "log",
+ "p256",
  "russh",
  "serde_json",
  "tokio",

@@ -9,6 +9,8 @@
 
     <application
         android:label="artty"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:supportsRtl="true"
         android:theme="@style/Theme.Artty">
         <activity

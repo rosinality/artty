@@ -243,6 +243,9 @@ private fun AddServerDialog(onDone: (Server?) -> Unit) {
 private fun KeyDialog(store: Store, onDone: () -> Unit) {
     val context = LocalContext.current
     val key = remember { store.publicKey() }
+    val keptIn = remember { store.phoneKey.keptIn }
+    var oldKey by remember { mutableStateOf(store.oldPublicKey()) }
+    var forgetting by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDone,
         title = { Text("This phone's key") },
@@ -250,6 +253,18 @@ private fun KeyDialog(store: Store, onDone: () -> Unit) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("Add it to ~/.ssh/authorized_keys on each server, and this phone can log in.", color = Faint)
                 SelectionContainer { Text(key, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
+                val kept = if ("software" in keptIn) {
+                    "Its private half is kept in $keptIn: the app can't read it, and it isn't backed up. (This phone has no secure hardware for it.)"
+                } else {
+                    "Its private half is kept in $keptIn: it can't be read out, copied off the phone, or backed up."
+                }
+                Text(kept, color = Faint, fontSize = 13.sp)
+                oldKey?.let { old ->
+                    Spacer(Modifier.height(4.dp))
+                    Text("The key this app made before is still tried after it:", color = Faint, fontSize = 13.sp)
+                    Text(old, fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, color = Faint)
+                    TextButton(onClick = { forgetting = true }) { Text("Forget the old key") }
+                }
             }
         },
         confirmButton = {
@@ -260,6 +275,21 @@ private fun KeyDialog(store: Store, onDone: () -> Unit) {
         },
         dismissButton = { TextButton(onClick = onDone) { Text("Close") } },
     )
+    if (forgetting) {
+        AlertDialog(
+            onDismissRequest = { forgetting = false },
+            title = { Text("Forget the old key?") },
+            text = { Text("Servers that have only the old key in authorized_keys won't let this phone in until the new one is added there. (Remove the old one there too.)") },
+            confirmButton = {
+                TextButton(onClick = {
+                    store.forgetOldKey()
+                    oldKey = null
+                    forgetting = false
+                }) { Text("Forget") }
+            },
+            dismissButton = { TextButton(onClick = { forgetting = false }) { Text("Cancel") } },
+        )
+    }
 }
 
 @Composable

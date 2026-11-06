@@ -161,11 +161,14 @@ object Session : LoginAsker {
         val server = server ?: return
         val generation = ++generation
         val address = ServerAddress(server.user, server.host, server.port.toUShort(), server.artty)
-        val key = store.privateKey()
+        val oldKey = store.oldKey()
         val knownHosts = store.knownHosts
         Thread {
             try {
-                val connection = connect(address, key, knownHosts, this, ConnectionEvents(generation))
+                val phoneKey = store.phoneKey
+                val connection = connect(
+                    address, phoneKey, phoneKey.publicKey, oldKey, knownHosts, this, ConnectionEvents(generation),
+                )
                 main.post {
                     if (generation != this.generation) {
                         Thread { connection.destroy() }.start()

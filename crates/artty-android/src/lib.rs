@@ -3,7 +3,6 @@
 //! told to the app's [`Events`], what logging in needs asked of its
 //! [`LoginAsker`]; screens as plain records the app draws.
 
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,14 +21,6 @@ pub struct ServerAddress {
     pub port: u16,
     /// `artty` there, if not on its PATH.
     pub artty: Option<String>,
-}
-
-/// A key made on the phone: the private half (OpenSSH format, kept by the
-/// app) and the public one (for the server's `authorized_keys`).
-#[derive(uniffi::Record)]
-pub struct KeyPair {
-    pub private_openssh: String,
-    pub public_openssh: String,
 }
 
 /// What went wrong.
@@ -316,27 +307,57 @@ impl Login for Asking {
     }
 }
 
+/// This phone's key in Android Keystore: it signs there, and its private half
+/// never leaves (called off the main thread).
+#[uniffi::export(foreign)]
+pub trait KeystoreKey: Send + Sync {
+    /// ECDSA P-256 with SHA-256 (`SHA256withECDSA`): the signature in DER.
+    /// `None` if it couldn't.
+    fn sign(&self, data: Vec<u8>) -> Option<Vec<u8>>;
+}
+
+struct Keystore(Arc<dyn KeystoreKey>);
+
+impl ssh::HeldKey for Keystore {
+    fn sign(&self, data: &[u8]) -> Option<Vec<u8>> {
+        self.0.sign(data.to_vec())
+    }
+}
+
 /// A connection to a server.
 #[derive(uniffi::Object)]
 pub struct Connection {
     client: Client,
 }
 
-/// Log in to `server` with `private_key` (OpenSSH format; the server's own
-/// questions are asked too), and greet the artty server there. Machines'
-/// keys are recorded in `known_hosts` (a file of the app's). Blocks: call
-/// it off the main thread.
+/// Log in to `server` with the Keystore key (`public_key` is its X.509
+/// `SubjectPublicKeyInfo`, as Keystore gives it), then `private_key`
+/// (OpenSSH format) — the server's own questions are asked too — and greet
+/// the artty server there. Machines' keys are recorded in `known_hosts` (a
+/// file of the app's). Blocks: call it off the main thread.
 #[uniffi::export]
 pub fn connect(
     server: ServerAddress,
+    keystore: Option<Arc<dyn KeystoreKey>>,
+    public_key: Option<Vec<u8>>,
     private_key: Option<String>,
     known_hosts: String,
     login: Arc<dyn LoginAsker>,
     events: Arc<dyn Events>,
 ) -> Result<Arc<Connection>, ConnectError> {
     let target = Target { user: server.user, host: server.host, port: server.port };
-    let credentials =
-        Credentials { agent: false, keys: private_key.into_iter().map(|k| (k, None)).collect() };
+    let held = match (keystore, public_key) {
+        (Some(key), Some(public)) => vec![ssh::Held {
+            public: ssh::held_public_key(&public, "")?,
+            key: Arc::new(Keystore(key)),
+        }],
+        _ => Vec::new(),
+    };
+    let credentials = Credentials {
+        agent: false,
+        held,
+        keys: private_key.into_iter().map(|k| (k, None)).collect(),
+    };
     let link = ssh::connect(
         &target,
         &ssh::server_command(server.artty.as_deref()),
@@ -555,13 +576,10 @@ impl Connection {
     }
 }
 
-/// A new ed25519 key, for this phone to log in with.
+/// The Keystore key's public half (X.509 `SubjectPublicKeyInfo`) as
+/// `authorized_keys` takes it.
 #[uniffi::export]
-pub fn generate_key(comment: String) -> Result<KeyPair, ConnectError> {
-    let mut seed = [0u8; 32];
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut random| random.read_exact(&mut seed))
-        .map_err(|err| format!("no randomness: {err}"))?;
-    let (private_openssh, public_openssh) = ssh::new_ed25519(seed, &comment)?;
-    Ok(KeyPair { private_openssh, public_openssh })
+pub fn keystore_public_key(public_key: Vec<u8>, comment: String) -> Result<String, ConnectError> {
+    let key = ssh::held_public_key(&public_key, &comment)?;
+    Ok(key.to_openssh().map_err(|err| err.to_string())?)
 }

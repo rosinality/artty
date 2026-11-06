@@ -4,7 +4,7 @@ import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import uniffi.artty_android.generateKey
+import uniffi.artty_android.keystorePublicKey
 
 /** A server to connect to: `user@host:port`, and artty's path there if not on its PATH. */
 data class Server(
@@ -69,27 +69,25 @@ class Store(private val context: Context) {
     /** Machines' keys, recorded as OpenSSH does. */
     val knownHosts: String get() = File(context.filesDir, "known_hosts").path
 
-    private val privateKeyFile get() = File(context.filesDir, "id_ed25519")
-    private val publicKeyFile get() = File(context.filesDir, "id_ed25519.pub")
-
-    /** This phone's key (made the first time): its private half, kept in the app's own files. */
-    fun privateKey(): String {
-        ensureKey()
-        return privateKeyFile.readText()
-    }
+    /** This phone's key, in Keystore. */
+    val phoneKey = PhoneKey()
 
     /** Its public half, for the servers' `~/.ssh/authorized_keys`. */
-    fun publicKey(): String {
-        ensureKey()
-        return publicKeyFile.readText().trim()
-    }
+    fun publicKey(): String =
+        keystorePublicKey(phoneKey.publicKey, "artty@${android.os.Build.MODEL.replace(' ', '-')}")
 
-    private fun ensureKey() {
-        if (privateKeyFile.exists() && publicKeyFile.exists()) return
-        val pair = generateKey("artty@${android.os.Build.MODEL.replace(' ', '-')}")
-        privateKeyFile.writeText(pair.privateOpenssh)
-        privateKeyFile.setReadable(false, false)
-        privateKeyFile.setReadable(true, true)
-        publicKeyFile.writeText(pair.publicOpenssh + "\n")
+    // The key earlier builds made: a file of the app's. Still offered when logging in (after
+    // the Keystore one) until forgotten, so servers that have only it still let in.
+    private val oldKeyFile get() = File(context.filesDir, "id_ed25519")
+    private val oldPublicKeyFile get() = File(context.filesDir, "id_ed25519.pub")
+
+    /** The old key's private half, while it's kept. */
+    fun oldKey(): String? = oldKeyFile.takeIf { it.exists() }?.readText()
+
+    fun oldPublicKey(): String? = oldPublicKeyFile.takeIf { it.exists() }?.readText()?.trim()
+
+    fun forgetOldKey() {
+        oldKeyFile.delete()
+        oldPublicKeyFile.delete()
     }
 }
