@@ -137,6 +137,8 @@ class MainActivity : ComponentActivity() {
         Session.focus(true)
         // Back after a while (the phone slept, say): still there?
         Session.probe()
+        // A new build published? (Every few hours at most.)
+        Updates.check(this, store, unlessWithinMs = 6 * 60 * 60 * 1000L)
     }
 
     override fun onPause() {
@@ -189,6 +191,12 @@ private fun ServersScreen(store: Store) {
     }
     Column(Modifier.fillMaxSize()) {
         Heading("artty") { TextButton(onClick = { settings = true }) { Text("Settings") } }
+        // A new build published (Settings, Updates).
+        if (Updates.state is UpdateState.Available || Updates.state is UpdateState.Downloading || Updates.state is UpdateState.Installing) {
+            Box(Modifier.padding(horizontal = 12.dp, vertical = 4.dp).clip(RoundedCornerShape(10.dp)).background(Panel).padding(14.dp)) {
+                UpdateStatus(LocalContext.current)
+            }
+        }
         LazyColumn(Modifier.weight(1f)) {
             itemsIndexed(servers) { index, server ->
                 var menu by remember { mutableStateOf(false) }

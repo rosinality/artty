@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Installing its own updates (Settings, Updates), as the user agrees. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:label="artty"
@@ -33,6 +35,8 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/shared_files" />
         </provider>
+        <!-- The system installer's word on an update. -->
+        <receiver android:name=".Updates$Installed" android:exported="false" />
         <!-- Keeps a connection to a server open while the app is in the background. -->
         <service
             android:name=".ConnectionService"

@@ -148,6 +148,18 @@ class Store(private val context: Context) {
         get() = prefs.getInt("scrollback", 10_000)
         set(value) = prefs.edit().putInt("scrollback", value).apply()
 
+    // Updating.
+
+    /** Where new builds are published (publish.sh's folder: `version.json` and the APK). */
+    var updatesUrl: String?
+        get() = prefs.getString("updates_url", null)?.ifBlank { null }
+        set(value) = prefs.edit().putString("updates_url", value?.trim() ?: "").apply()
+
+    /** When it was last looked at. */
+    var updatesChecked: Long
+        get() = prefs.getLong("updates_checked", 0)
+        set(value) = prefs.edit().putLong("updates_checked", value).apply()
+
     // Backing up.
 
     /** Everything but the keys (unless `withKeys`: then them too, readable by whoever has the file). */
@@ -166,6 +178,7 @@ class Store(private val context: Context) {
                     .put("row_keys", rowKeys)
                     .put("scrollback", scrollback),
             )
+            .put("updates_url", updatesUrl ?: "")
         if (withKeys) {
             o.put(
                 "keys",
@@ -207,6 +220,7 @@ class Store(private val context: Context) {
             rowKeys = t.optString("row_keys", rowKeys)
             scrollback = t.optInt("scrollback", scrollback)
         }
+        o.optString("updates_url").takeIf { it.isNotBlank() }?.let { updatesUrl = it }
         var keysAdded = 0
         val existing = keys.list().map { it.name }.toSet()
         o.optJSONArray("keys")?.let { list ->

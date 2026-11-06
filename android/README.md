@@ -27,6 +27,25 @@ that runs another build, as the Mac app's bundle does: that needs zig and
 cargo-zigbuild, and the Rust target for each CPU (`x86_64-unknown-linux-gnu`,
 `aarch64-unknown-linux-gnu`); a CPU without its target is skipped.
 
+## Updating without USB
+
+`android/publish.sh DEST` builds the release APK and puts it, with a
+`version.json` naming it, in `DEST`: a folder here, or `user@host:path` (copied
+with scp). Serve that folder over HTTPS (any static host; a Cloudflare address
+in front of a server works) and give its address in the app's Settings,
+Updates. The app looks there when it opens (every few hours at most), offers a
+newer build, downloads it, checks its SHA-256 and hands it to the system
+installer; the first time, Android asks to let artty install apps.
+
+Android installs an update only over the app signed with the same key. Release
+builds are signed with `signing/artty.keystore`, a copy of this Mac's debug key
+(`~/.android/debug.keystore`) made the first time, so a release installs over
+the debug builds already on a phone. Keep that file: without it, a new build
+installs only after uninstalling the app, which loses its data (the phone's key
+included). Each build's versionCode is the minutes since 2025, so a newer
+build is always newer; its name says the commit. Debug builds may check a plain
+`http://` address (for trying it on the computer); releases only `https://`.
+
 ## Using it
 
 Settings, Keys, shows the key the phone made for itself: add it to

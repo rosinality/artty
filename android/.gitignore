@@ -3,3 +3,5 @@ build/
 local.properties
 # Built from the Rust crates (build-rust.sh).
 app/src/main/jniLibs/
+# The release signing key (a copy of the debug one, see publish.sh): never committed.
+signing/

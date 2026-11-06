@@ -63,6 +63,7 @@ private enum class Page(val title: String, val about: String) {
     Config("SSH config", "As ~/.ssh/config: hosts, users, keys, jump hosts, forwards"),
     KnownHosts("Known hosts", "The machines' keys this phone trusts"),
     Terminal("Terminal", "Text size, the volume keys, the keys row, the bell"),
+    Updates("Updates", "Installing new builds from where they're published"),
     Backup("Back up and restore", "Servers, the ssh config, machines' keys and settings, to a file"),
 }
 
@@ -93,6 +94,7 @@ fun SettingsScreen(store: Store, onClose: () -> Unit) {
             Page.Config -> ConfigPage(store)
             Page.KnownHosts -> KnownHostsPage(store)
             Page.Terminal -> TerminalPage(store)
+            Page.Updates -> UpdatesPage(store)
             Page.Backup -> BackupPage(store)
         }
     }
@@ -395,6 +397,63 @@ private fun Toggle(title: String, about: String, on: Boolean, change: (Boolean) 
             Text(about, color = Faint, fontSize = 12.sp)
         }
         Switch(on, change)
+    }
+}
+
+// Updates.
+
+@Composable
+private fun UpdatesPage(store: Store) {
+    val context = LocalContext.current
+    var url by remember { mutableStateOf(store.updatesUrl ?: "") }
+    var saved by remember { mutableStateOf(url) }
+    val (code, name) = remember { Updates.installed(context) }
+    Column(Modifier.fillMaxSize().padding(16.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("This is artty $name (build $code).", fontWeight = FontWeight.Medium)
+        Text(
+            "Where publish.sh puts new builds: a folder served over HTTPS, holding version.json and the APK. The app looks there when it opens (every few hours at most), and offers what's newer. Installing asks you each time; Android takes it only if it's signed with the same key as this one.",
+            color = Faint, fontSize = 13.sp,
+        )
+        OutlinedTextField(
+            url, { url = it.trim() },
+            label = { Text("Address (https://…/android/)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(enabled = url.isNotBlank(), onClick = {
+                store.updatesUrl = url
+                saved = url
+                Updates.check(context, store)
+            }) { Text("Check now") }
+            if (url != saved) {
+                OutlinedButton(onClick = {
+                    store.updatesUrl = url
+                    saved = url
+                }) { Text("Save") }
+            }
+        }
+        UpdateStatus(context)
+    }
+}
+
+/** What updating is doing, and Update when there's one. */
+@Composable
+fun UpdateStatus(context: Context) {
+    when (val s = Updates.state) {
+        UpdateState.Idle -> {}
+        UpdateState.Checking -> Text("Checking…", color = Faint)
+        is UpdateState.UpToDate -> Text("Up to date.", color = Faint)
+        is UpdateState.Available -> Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("artty ${s.release.versionName} is out.", modifier = Modifier.weight(1f))
+            Button(onClick = { Updates.install(context, s.release) }) { Text("Update") }
+        }
+        is UpdateState.Downloading -> Text(
+            "Downloading… " + if (s.release.size > 0) "${s.done * 100 / s.release.size}%" else "${s.done / 1024} KiB",
+            color = Faint,
+        )
+        is UpdateState.Installing -> Text("Installing ${s.release.versionName}: the system asks you to confirm.", color = Faint)
+        is UpdateState.Failed -> Text(s.reason, color = Warn, fontSize = 13.sp)
     }
 }
 
