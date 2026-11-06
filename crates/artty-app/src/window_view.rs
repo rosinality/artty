@@ -2258,7 +2258,9 @@ impl WindowView {
             .flex_col()
             .gap(px(1.))
             .py(px(3.))
-            .px_1()
+            // Without icons, titles off the box's edge.
+            .pl(px(if self.config.sidebar_icons { 4. } else { 8. }))
+            .pr_1()
             .rounded(px(7.))
             .when(selected, |d| match self.tab_color(index) {
                 // A colored workspace tints its selected tab.
@@ -2407,7 +2409,7 @@ impl WindowView {
             .text_size(px(11.))
             .text_color(ui(0xffffff70))
             .when_some(detail, |d, detail| {
-                d.child(Self::one_line(detail).min_w_0().when(controls, |d| {
+                d.child(Self::one_line(detail).min_w_0().pr(px(4.)).when(controls, |d| {
                     d.opacity(if self.command_held { 0. } else { 1. })
                         .group_hover(group.clone(), |s| s.opacity(0.))
                 }))
