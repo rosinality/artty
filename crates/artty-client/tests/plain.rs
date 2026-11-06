@@ -354,3 +354,37 @@ fn forwarding(forwards: &artty_client::ssh::Forwards) {
     assert!(TcpStream::connect(("127.0.0.1", listening(dynamic))).is_ok());
     assert_eq!(forwards.list().len(), 2);
 }
+
+/// Sending much to a machine (as installing does): `ARTTY_PLAIN_TARGET` (as
+/// `ARTTY_PLAIN_CONFIG` says) counts 5 MB of stdin.
+#[test]
+#[ignore]
+fn upload() {
+    use artty_client::ssh::{self, Credentials, HostKey, KnownHosts, Login, Target};
+    use artty_client::ssh_config::{Config, Local};
+    struct Known;
+    impl Login for Known {
+        fn host_key(&self, _: &Target, _: &str, _: HostKey) -> bool {
+            false
+        }
+        fn said(&self, text: &str) {
+            eprintln!("said: {text}");
+        }
+        fn answer(&self, _: &str, _: &[(String, bool)]) -> Option<Vec<String>> {
+            None
+        }
+    }
+    let destination = std::env::var("ARTTY_PLAIN_TARGET").unwrap();
+    let config = std::env::var("ARTTY_PLAIN_CONFIG")
+        .map(|path| Config::read(path.as_ref(), "/nowhere").unwrap())
+        .unwrap_or_default();
+    let plan = ssh::plan(&config, &Local::here(), &destination).unwrap();
+    let known = KnownHosts(std::env::var("ARTTY_PLAIN_KNOWN_HOSTS").unwrap().into());
+    let data: Vec<u8> = (0..5 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let started = std::time::Instant::now();
+    let counted =
+        ssh::run(&plan, &Credentials::usual(), known, Arc::new(Known), "wc -c", Some(data))
+            .unwrap();
+    eprintln!("counted {} in {:?}", counted.trim(), started.elapsed());
+    assert_eq!(counted.trim(), (5 * 1024 * 1024).to_string());
+}

@@ -14,6 +14,9 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use crate::ssh_config::{Local, Resolved};
 
+/// The most sent in one WebSocket message.
+const MESSAGE: usize = 4 * 1024;
+
 /// Where a `cloudflared access ssh` command goes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tunnel {
@@ -123,7 +126,10 @@ pub(super) async fn open(tunnel: &Tunnel) -> Result<DuplexStream, String> {
     tokio::spawn(async move {
         let (mut sink, mut source) = socket.split();
         let (mut from_ssh, mut to_ssh) = tokio::io::split(theirs);
-        let mut buffer = vec![0; 32 * 1024];
+        // Messages of cloudflared's size (its WebSocket's 4 KiB frames): the
+        // tunnel stalls on bigger ones once a few hundred KiB are in flight
+        // (an upload stopped after its first 8 KiB arrived).
+        let mut buffer = vec![0; MESSAGE];
         loop {
             tokio::select! {
                 message = source.next() => match message {

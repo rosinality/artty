@@ -244,6 +244,19 @@ pub fn shells(
     Ok((crate::plain::serve(Box::new(shells), name, scrollback)?, forwards))
 }
 
+/// Log in as `plan` says and run `command` there with `stdin`: what it
+/// printed, or why it failed.
+pub fn run(
+    plan: &Plan,
+    credentials: &Credentials,
+    known: KnownHosts,
+    login: Arc<dyn Login>,
+    command: &str,
+    stdin: Option<Vec<u8>>,
+) -> Result<String, String> {
+    Connection::open(plan, credentials, known, login)?.run(command, stdin)
+}
+
 /// Install artty as `plan` says, as the Mac app does
 /// ([`artty_core::remote::installing`]): `build` gives the build for Linux on
 /// a CPU (`x86_64` or `aarch64`), if there's one.

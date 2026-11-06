@@ -94,6 +94,9 @@ fn hops(
     Ok(out)
 }
 
+/// How long a command [`Connection::run`] runs may take.
+const RUN_LIMIT: Duration = Duration::from_secs(5 * 60);
+
 /// A session, the ones it's carried through, and the runtime they run on:
 /// ended (the last first) when dropped.
 pub(super) struct Connection {
@@ -224,7 +227,18 @@ impl Connection {
     /// Run `command` there, with `stdin`: what it printed, or why it failed
     /// (the last thing it said on stderr).
     pub(super) fn run(&self, command: &str, stdin: Option<Vec<u8>>) -> Result<String, String> {
-        self.block_on(async {
+        // A stalled link is said, not waited on for ever (uploading a build
+        // takes seconds).
+        let running = self.block_on(async {
+            tokio::time::timeout(RUN_LIMIT, self.run_waiting(command, stdin)).await
+        });
+        running.unwrap_or_else(|_| {
+            Err(format!("no answer in {} minutes: the link stalled", RUN_LIMIT.as_secs() / 60))
+        })
+    }
+
+    async fn run_waiting(&self, command: &str, stdin: Option<Vec<u8>>) -> Result<String, String> {
+        {
             let failed = |err: russh::Error| err.to_string();
             let mut channel = self.handle.channel_open_session().await.map_err(failed)?;
             channel.exec(true, command).await.map_err(failed)?;
@@ -246,7 +260,7 @@ impl Connection {
                 return Err(said.unwrap_or("failed".into()));
             }
             Ok(String::from_utf8_lossy(&stdout).into_owned())
-        })
+        }
     }
 
     /// The machine's session, and every jump host's, still there.
