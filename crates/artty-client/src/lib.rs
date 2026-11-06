@@ -6,6 +6,7 @@
 mod client;
 mod link;
 pub mod plain;
+mod plain_files;
 pub mod ssh;
 pub mod ssh_config;
 

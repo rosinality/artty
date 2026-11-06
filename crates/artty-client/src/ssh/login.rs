@@ -260,6 +260,10 @@ impl Connection {
         self.runtime.as_ref().expect("running until dropped").block_on(future)
     }
 
+    pub(super) fn runtime_handle(&self) -> tokio::runtime::Handle {
+        self.runtime.as_ref().expect("running until dropped").handle().clone()
+    }
+
     pub(super) fn spawn<F: Future<Output = ()> + Send + 'static>(&self, future: F) {
         if let Some(runtime) = &self.runtime {
             runtime.spawn(future);

@@ -73,7 +73,13 @@ pub trait Shells: Send + 'static {
     fn end(&self, session: &str) {
         let _ = session;
     }
+    /// The machine's files, for the files browser, if they can be reached.
+    fn files(&self) -> Option<Arc<dyn Files>> {
+        None
+    }
 }
+
+pub use crate::plain_files::Files;
 
 /// What the kept sessions are called: `artty-1`, `artty-2`…
 pub const SESSION_PREFIX: &str = "artty-";
@@ -91,9 +97,12 @@ pub fn serve(shells: Box<dyn Shells>, name: String, scrollback: usize) -> Result
             .spawn(move || read_app(reader, inbox))
             .map_err(|err| err.to_string())?;
     }
+    let files = shells.files();
     let plain = Plain {
         out: ours,
         shells,
+        files,
+        uploads: Default::default(),
         name,
         scrollback,
         inbox,
@@ -130,6 +139,8 @@ enum Input {
     Pane(PaneId, TermEvent),
     /// The machine answered ping `id`.
     Pong(u64),
+    /// An answer worked out off this thread (the files browser's).
+    Reply(u64, Reply),
 }
 
 /// The app's greeting (a line), then its messages.
@@ -169,6 +180,10 @@ struct Tab {
 struct Plain {
     out: UnixStream,
     shells: Box<dyn Shells>,
+    /// The machine's files (SFTP), if reachable.
+    files: Option<Arc<dyn Files>>,
+    /// Files being sent there, part by part.
+    uploads: crate::plain_files::Uploads,
     name: String,
     scrollback: usize,
     inbox: Sender<Input>,
@@ -256,6 +271,7 @@ impl Plain {
             Input::App(message) => self.message(message),
             Input::AppGone => return false,
             Input::Pong(id) => self.send(ServerMessage::Pong { id }),
+            Input::Reply(id, reply) => self.send(ServerMessage::Reply { id, reply }),
             Input::Pane(id, event) => {
                 let Some(pane) = self.panes.get_mut(&id) else { return true };
                 match pane.session.handle(event) {
@@ -466,6 +482,26 @@ impl Plain {
                 let inbox = self.inbox.clone();
                 self.shells.ping(Box::new(move || drop(inbox.send(Input::Pong(id)))));
             },
+            // The files browser's: through the machine's files, off this thread.
+            ClientMessage::Query {
+                id,
+                query:
+                    query @ (Query::ListDir { .. } | Query::ReadFile { .. } | Query::Upload { .. }),
+            } if self.files.is_some() => {
+                let files = self.files.clone().expect("there");
+                let cwd = match &query {
+                    Query::ListDir { pane, .. } => {
+                        self.panes.get(pane).and_then(|p| p.session.cwd())
+                    },
+                    _ => None,
+                };
+                let cwd = cwd.map(|cwd| cwd.to_string_lossy().into_owned());
+                let (inbox, uploads) = (self.inbox.clone(), self.uploads.clone());
+                std::thread::spawn(move || {
+                    let reply = crate::plain_files::answer(&*files, query, cwd, &uploads);
+                    let _ = inbox.send(Input::Reply(id, reply));
+                });
+            },
             ClientMessage::Query { id, query } => {
                 let reply = self.answer(query);
                 self.send(ServerMessage::Reply { id, reply });
@@ -476,7 +512,7 @@ impl Plain {
     }
 
     fn answer(&self, query: Query) -> Reply {
-        const NO_FILES: &str = "plain ssh: no files here (artty on the machine has them)";
+        const NO_FILES: &str = "plain ssh: its files can't be reached (no SFTP there)";
         match query {
             Query::AllWindows | Query::DetachedWindows => Reply::Windows(vec![WindowSummary {
                 window: WINDOW,

@@ -89,8 +89,9 @@ the server (connecting to one where artty isn't found offers to). Its tabs are
 shells there, each its own ssh channel, drawn by artty's terminal on the phone,
 so finding, selecting and links work as they do on an artty server. But they
 end with the connection: reconnecting (after the phone slept, say) opens a new
-shell, and there are no workspaces or agents. Unless "Keep shells in tmux" is
-on: then each tab's shell is a tmux session there (`artty-1`, `artty-2`…, its
+shell, and there are no workspaces or agents. Its files are there, through
+SFTP (browsing, viewing, sending files to it, as with artty). Unless "Keep
+shells in tmux" is on: then each tab's shell is a tmux session there (`artty-1`, `artty-2`…, its
 mouse on, so swiping scrolls its history), which keeps running when the
 connection drops; connecting again takes up each of them in a tab, and
 closing a tab ends its session.

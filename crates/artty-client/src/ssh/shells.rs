@@ -4,6 +4,7 @@
 //! asked), each runs in a tmux session there, which outlives the connection
 //! and is taken up again by the next.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use artty_core::TerminalSize;
@@ -15,6 +16,7 @@ use crate::ssh_config::{RequestTty, Resolved};
 
 pub(super) struct Shells {
     connection: Connection,
+    files: Arc<super::files::Sftp>,
     target: Resolved,
     /// Each shell in a tmux session there.
     keep: bool,
@@ -24,7 +26,11 @@ impl Shells {
     pub(super) fn new(connection: Connection, target: Resolved, keep: bool) -> Shells {
         // A RemoteCommand is what runs, kept or not.
         let keep = keep && target.remote_command.is_none();
-        Shells { connection, target, keep }
+        let files = Arc::new(super::files::Sftp::new(
+            connection.handle.clone(),
+            connection.runtime_handle(),
+        ));
+        Shells { connection, files, target, keep }
     }
 }
 
@@ -154,6 +160,10 @@ impl crate::plain::Shells for Shells {
 
     fn closed(&self) -> bool {
         self.connection.closed()
+    }
+
+    fn files(&self) -> Option<Arc<dyn crate::plain::Files>> {
+        Some(self.files.clone())
     }
 
     fn keeps(&self) -> bool {

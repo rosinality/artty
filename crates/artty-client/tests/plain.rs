@@ -493,7 +493,8 @@ fn kept_over_ssh() {
     let known = || KnownHosts(std::env::var("ARTTY_PLAIN_KNOWN_HOSTS").unwrap().into());
     let connect = || {
         let (link, _) =
-            ssh::shells(&plan, &Credentials::usual(), known(), Arc::new(Known), 1000, true).unwrap();
+            ssh::shells(&plan, &Credentials::usual(), known(), Arc::new(Known), 1000, true)
+                .unwrap();
         let (client, events) = Client::start(link, "test").unwrap();
         client.attach(Some(plain::WINDOW), true).unwrap();
         let pane = until(&events, |e| match e {
@@ -522,7 +523,105 @@ fn kept_over_ssh() {
     until(&events, |e| matches!(e, Event::WindowClosed { .. }).then_some(()));
     std::thread::sleep(Duration::from_secs(2));
     drop((client, events));
-    let left = ssh::run(&plan, &Credentials::usual(), known(), Arc::new(Known), "sh -lc 'tmux list-sessions -F \"#{session_name}\" 2>/dev/null; true'", None).unwrap();
+    let left = ssh::run(
+        &plan,
+        &Credentials::usual(),
+        known(),
+        Arc::new(Known),
+        "sh -lc 'tmux list-sessions -F \"#{session_name}\" 2>/dev/null; true'",
+        None,
+    )
+    .unwrap();
     eprintln!("sessions left: {left:?}");
     assert!(!left.lines().any(|s| s.starts_with("artty-")), "no artty session left");
+}
+
+/// Files on a real machine through SFTP (`ARTTY_PLAIN_TARGET`, logging in
+/// with `ARTTY_PLAIN_KEY`): listing home, and in `ARTTY_PLAIN_FILES_DIR`
+/// (a scratch folder there) uploading, reading back and replacing.
+#[test]
+#[ignore]
+fn files_over_ssh() {
+    use artty_client::ssh::{self, Credentials, HostKey, Key, KnownHosts, Login, Target};
+    use artty_client::ssh_config::{Config, Local};
+    use artty_core::protocol::{Existing, UploadError, UploadTo};
+    struct Known;
+    impl Login for Known {
+        fn host_key(&self, _: &Target, _: &str, _: HostKey) -> bool {
+            false
+        }
+        fn said(&self, _: &str) {}
+        fn answer(&self, _: &str, _: &[(String, bool)]) -> Option<Vec<String>> {
+            None
+        }
+    }
+    let destination = std::env::var("ARTTY_PLAIN_TARGET").unwrap();
+    let config = std::env::var("ARTTY_PLAIN_CONFIG")
+        .map(|path| Config::read(path.as_ref(), "/nowhere").unwrap())
+        .unwrap_or_default();
+    let plan = ssh::plan(&config, &Local::here(), &destination).unwrap();
+    let credentials = match std::env::var("ARTTY_PLAIN_KEY") {
+        Ok(path) => Credentials {
+            keys: vec![Key {
+                name: "user".into(),
+                text: ssh::read_key(path.as_ref()).unwrap(),
+                passphrase: None,
+            }],
+            ..Default::default()
+        },
+        Err(_) => Credentials::usual(),
+    };
+    let known = KnownHosts(std::env::var("ARTTY_PLAIN_KNOWN_HOSTS").unwrap().into());
+    let (link, _) = ssh::shells(&plan, &credentials, known, Arc::new(Known), 1000, false).unwrap();
+    let (client, events) = Client::start(link, "test").unwrap();
+    client.attach(Some(plain::WINDOW), true).unwrap();
+    let pane = until(&events, |e| match e {
+        Event::Layout { layout, .. } => layout.active_tab().map(|t| t.focused),
+        _ => None,
+    });
+    let home = client.list_dir(pane, None, true).unwrap();
+    eprintln!(
+        "home: {} ({} entries)",
+        home.path.display(),
+        home.entries.as_ref().map_or(0, Vec::len)
+    );
+    assert!(home.path.is_absolute());
+    let Ok(dir) = std::env::var("ARTTY_PLAIN_FILES_DIR") else { return };
+    let to = |existing| UploadTo::Folder { dir: dir.clone().into(), existing };
+    // 600 KB in three parts: in place when whole, as sent.
+    let data: Vec<u8> = (0..600_000).map(|i| (i % 253) as u8).collect();
+    for (i, part) in data.chunks(256 * 1024).enumerate() {
+        let last = (i + 1) * 256 * 1024 >= data.len();
+        let done = client
+            .upload_part(pane, 7, "sent.bin", part.to_vec(), last, to(Existing::Refuse))
+            .unwrap();
+        assert_eq!(done.is_some(), last);
+    }
+    let path = std::path::PathBuf::from(format!("{dir}/sent.bin"));
+    let mut back = Vec::new();
+    while back.len() < data.len() {
+        let chunk = client.read_file(pane, path.clone(), back.len() as u64).unwrap();
+        assert_eq!(chunk.length, data.len() as u64);
+        back.extend(chunk.data);
+    }
+    assert!(back == data, "read back as sent");
+    // Taken: refused, kept beside, or replaced.
+    assert_eq!(
+        client.upload_part(pane, 8, "sent.bin", b"x".to_vec(), true, to(Existing::Refuse)),
+        Err(UploadError::Exists)
+    );
+    let beside = client
+        .upload_part(pane, 9, "sent.bin", b"x".to_vec(), true, to(Existing::Rename))
+        .unwrap()
+        .unwrap();
+    assert_eq!(beside.path.file_name().unwrap(), "sent (1).bin");
+    client
+        .upload_part(pane, 10, "sent.bin", b"new".to_vec(), true, to(Existing::Replace))
+        .unwrap()
+        .unwrap();
+    assert_eq!(client.read_file(pane, path, 0).unwrap().data, b"new");
+    let listed = client.list_dir(pane, Some(dir.clone().into()), false).unwrap();
+    let names: Vec<String> = listed.entries.unwrap().into_iter().map(|e| e.name).collect();
+    eprintln!("{dir}: {names:?}");
+    assert_eq!(names, ["sent (1).bin", "sent.bin"]);
 }

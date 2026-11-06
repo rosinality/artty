@@ -89,8 +89,8 @@ fun TabsDrawer(server: String, onSearch: () -> Unit, onFiles: () -> Unit, onChos
     ModalDrawerSheet(drawerContainerColor = Background, drawerContentColor = Ink) {
         Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 8.dp, top = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(server, fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
-            // The shown pane's machine's files, from its folder (artty there reads them).
-            if (!Session.plain) TextButton(onClick = onFiles) { Text("Files") }
+            // The shown pane's machine's files, from its folder (artty there reads them; else SFTP).
+            TextButton(onClick = onFiles) { Text("Files") }
             // The Mac's ⌘⇧F: every pane's output, and agents' conversations.
             TextButton(onClick = onSearch) { Text("Search") }
         }

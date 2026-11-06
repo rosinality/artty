@@ -9,6 +9,7 @@
 
 mod agent;
 mod cloudflare;
+mod files;
 mod forward;
 mod held;
 mod login;

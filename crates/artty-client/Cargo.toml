@@ -12,6 +12,8 @@ log = "0.4"
 serde_json = "1"
 libc = "0.2"
 russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
+# Files on a plain ssh machine (the files browser), as SFTP.
+russh-sftp = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 # Reaching hosts behind a Cloudflare Tunnel (`ProxyCommand cloudflared access ssh`): ssh in a
 # WebSocket over TLS. rustls on ring (as russh), with Mozilla's roots.
