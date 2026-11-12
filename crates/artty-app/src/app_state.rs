@@ -1006,20 +1006,22 @@ pub fn open_window(
         Ok(handle) => {
             if let Ok(entity) = handle.entity(cx) {
                 let server = window.map_or(LOCAL, ids::server_of);
-                attach(server, &entity, window, spec, bounds, cx);
+                attach(server, &entity, window, spec, bounds, false, cx);
             }
         },
         Err(err) => log::error!("opening a window: {err}"),
     }
 }
 
-/// Ask `server` to show its `window` (or a new one) in `view`.
+/// Ask `server` to show its `window` (or a new one) in `view`; with
+/// `share`, even while another app shows it.
 fn attach(
     server: ServerId,
     view: &gpui::Entity<WindowView>,
     window: Option<WindowId>,
     spec: PaneSpec,
     bounds: Option<SavedWindow>,
+    share: bool,
     cx: &mut App,
 ) {
     let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize) else {
@@ -1029,13 +1031,13 @@ fn attach(
         return;
     }
     connection.attaching.push_back(view.downgrade());
-    send_to(server, ClientMessage::AttachWindow { window, spec, bounds, share: false }, cx);
+    send_to(server, ClientMessage::AttachWindow { window, spec, bounds, share }, cx);
 }
 
 /// Show a new window of `server` in `view`: a workspace there, for the +
 /// beside a server with nothing in this window yet.
 pub fn attach_new(server: ServerId, view: &gpui::Entity<WindowView>, cx: &mut App) {
-    attach(server, view, None, PaneSpec::default(), None, cx);
+    attach(server, view, None, PaneSpec::default(), None, false, cx);
 }
 
 // Other machines' servers.
@@ -1738,22 +1740,28 @@ fn remote_lost(server: ServerId, cx: &mut App) {
 /// one it showed before (after a reconnect), or a detached one, in order.
 /// If it has none for any view, the first view gets a new one.
 fn attach_remote(server: ServerId, cx: &mut App) {
-    let detached = query_on(server, Query::DetachedWindows, cx);
+    let all = query_on(server, Query::AllWindows, cx);
     cx.spawn(async move |cx| {
-        let windows = match detached.await {
+        let windows = match all.await {
             Ok(Reply::Windows(windows)) => windows,
             _ => return,
         };
         let _ = cx.update(|cx| {
             let views = app_views(cx);
-            let mut free: VecDeque<WindowId> = windows.iter().map(|w| w.window).collect();
+            let mut free: VecDeque<WindowId> =
+                windows.iter().filter(|w| w.apps == 0).map(|w| w.window).collect();
             let mut waiting = Vec::new();
             let mut attached = false;
             for view in views.iter() {
-                match view.read(cx).remembered(server).filter(|w| free.contains(w)) {
+                let remembered = view.read(cx).remembered(server);
+                match remembered.filter(|&r| windows.iter().any(|w| w.window == r)) {
+                    // Its own window back, even if the server still counts
+                    // it shown: by this app's lost connection, which the
+                    // server only lets go after a minute's silence (it
+                    // would otherwise get a new window, a fresh shell).
                     Some(window) => {
                         free.retain(|&w| w != window);
-                        attach(server, view, Some(window), PaneSpec::default(), None, cx);
+                        attach(server, view, Some(window), PaneSpec::default(), None, true, cx);
                         attached = true;
                     },
                     None => waiting.push(view.clone()),
@@ -1761,7 +1769,7 @@ fn attach_remote(server: ServerId, cx: &mut App) {
             }
             for view in &waiting {
                 let Some(window) = free.pop_front() else { break };
-                attach(server, view, Some(window), PaneSpec::default(), None, cx);
+                attach(server, view, Some(window), PaneSpec::default(), None, false, cx);
                 attached = true;
             }
             if !attached && let Some(view) = views.first() {
