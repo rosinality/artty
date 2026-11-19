@@ -133,7 +133,7 @@ struct Reading {
 }
 
 /// Whether a process name is an interactive shell (login shells start with `-`).
-fn is_shell(name: &str) -> bool {
+pub fn is_shell(name: &str) -> bool {
     const SHELLS: &[&str] = &[
         "fish", "zsh", "bash", "sh", "dash", "ksh", "tcsh", "csh", "nu", "elvish", "xonsh", "login",
     ];
@@ -242,6 +242,11 @@ impl Pane {
 
     pub fn set_agents(&mut self, agents: Arc<[String]>) {
         self.agents = agents;
+    }
+
+    /// Its agent's hooks report its state (`artty status`).
+    pub fn hooks_reported(&self) -> bool {
+        self.reported.is_some()
     }
 
     pub fn agent_name(&self) -> Option<String> {

@@ -281,7 +281,213 @@ pub enum Request {
         /// Which agent is reporting (`claude`, `codex`, ...).
         #[serde(default)]
         agent: Option<String>,
+        /// The hook event behind the report (with `--hook`), which tells
+        /// turns apart: the state alone doesn't (a waiting agent may be in
+        /// a turn, asking to use a tool, or out of one, idle).
+        #[serde(default)]
+        hook: Option<HookEvent>,
     },
+    /// Give an agent a message as if typed, once it's between turns, and
+    /// (with `wait`) answer with its reply when its turn ends.
+    Ask {
+        tab: SessionId,
+        text: String,
+        /// Allow text the agent would take as a command (`/...`, `!...`).
+        #[serde(default)]
+        raw: bool,
+        wait: bool,
+        /// Answer with how far it got after this long (it carries on).
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+    /// Where an ask is; with `wait`, once it's over.
+    AskResult {
+        id: u64,
+        wait: bool,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+    /// Take back an ask not yet given to its agent; with `abandon`, stop
+    /// waiting for one that's with it.
+    AskCancel {
+        id: u64,
+        #[serde(default)]
+        abandon: bool,
+    },
+    /// The asks not yet over (all, or a pane's).
+    AskList {
+        #[serde(default)]
+        tab: Option<SessionId>,
+    },
+    /// Take back every ask not yet given to its agent (all, or a pane's).
+    AskCancelQueued {
+        #[serde(default)]
+        tab: Option<SessionId>,
+    },
+    /// An agent asks permission to use a tool (its `PermissionRequest`
+    /// hook). Answered once someone decides, or with no decision when the
+    /// agent's own prompt was answered, or its turn ended. The agent shows
+    /// its prompt meanwhile; the request is over when this connection
+    /// closes (the agent ending the hook: its prompt was dismissed).
+    Approve {
+        tab: Option<SessionId>,
+        #[serde(default)]
+        agent: Option<String>,
+        tool_name: String,
+        #[serde(default)]
+        tool_input: serde_json::Value,
+    },
+    /// Permission requests (all, or a pane's), pending first.
+    Approvals {
+        #[serde(default)]
+        tab: Option<SessionId>,
+    },
+    /// Answer a permission request. Not from programs running in artty's
+    /// panes (an agent mustn't approve its own requests).
+    Decide {
+        id: u64,
+        allow: bool,
+        /// Why, for the agent (a denial).
+        #[serde(default)]
+        message: Option<String>,
+    },
+}
+
+/// Someone's answer to a permission request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Decision {
+    pub allow: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// A permission request, as `artty approvals` lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalInfo {
+    pub id: u64,
+    pub pane: SessionId,
+    #[serde(default)]
+    pub agent: Option<String>,
+    pub tool_name: String,
+    /// What it would do, in a line: the command, the file, ...
+    pub summary: String,
+    #[serde(default)]
+    pub tool_input: serde_json::Value,
+    pub state: ApprovalState,
+    /// How long ago it was asked.
+    pub age_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalState {
+    Pending,
+    Allowed,
+    Denied,
+    /// Allowed at the agent's own prompt (the tool ran).
+    AllowedThere,
+    /// The agent's prompt was dismissed: denied there, or the turn stopped.
+    Dismissed,
+    /// The turn or session ended first.
+    Ended,
+    /// Nobody answered in artty for a while: left to the agent's prompt
+    /// (or, an agent that can't show one, denied).
+    Expired,
+}
+
+/// What an agent's hook said, beyond the state: the event's name and, for
+/// the events that start and end a turn, the prompt and the reply.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookEvent {
+    /// `UserPromptSubmit`, `Stop`, `SessionStart`, ... (Gemini CLI's
+    /// `BeforeAgent`, `AfterAgent`).
+    pub event: String,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// The turn's id (Claude Code), the same in its prompt and its end.
+    #[serde(default)]
+    pub prompt_id: Option<String>,
+    /// The agent's last message of the turn, when it ends.
+    #[serde(default)]
+    pub reply: Option<String>,
+    /// Why a session started: `startup`, `resume`, `clear`, or `compact`
+    /// (Claude Code compacting its context, which may be mid-turn).
+    #[serde(default)]
+    pub source: Option<String>,
+    /// The tool used (`PostToolUse`), to tell which permission request it
+    /// answers.
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub tool_input: Option<serde_json::Value>,
+    /// What a notification is about (Claude Code): `permission_prompt`,
+    /// `idle_prompt`, ...
+    #[serde(default)]
+    pub notification_type: Option<String>,
+}
+
+impl HookEvent {
+    /// Whether this event starts a turn (`Some(true)`), ends one or the
+    /// session (`Some(false)`), or neither.
+    pub fn turn(&self) -> Option<bool> {
+        match self.event.as_str() {
+            "UserPromptSubmit" | "BeforeAgent" => Some(true),
+            _ if self.compacting() => None,
+            "Stop" | "AfterAgent" | "SessionStart" | "SessionEnd" => Some(false),
+            _ => None,
+        }
+    }
+
+    /// The agent's session began or ended: what was under way is gone.
+    pub fn session_boundary(&self) -> bool {
+        matches!(self.event.as_str(), "SessionStart" | "SessionEnd") && !self.compacting()
+    }
+
+    /// A session "starting" as the agent compacts its context: the same
+    /// session going on, maybe mid-turn.
+    fn compacting(&self) -> bool {
+        self.event == "SessionStart" && self.source.as_deref() == Some("compact")
+    }
+}
+
+/// An ask, as `artty ask` reports it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskInfo {
+    pub id: u64,
+    pub pane: SessionId,
+    pub state: AskState,
+    /// The agent's reply, once answered.
+    #[serde(default)]
+    pub reply: Option<String>,
+    /// Why it failed.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Something not quite right, though it went on.
+    #[serde(default)]
+    pub warning: Option<String>,
+    /// The message's start, for listing.
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskState {
+    /// Waiting for the agent to be between turns.
+    Queued,
+    /// Typed in; waiting for the agent to take it.
+    Delivering,
+    /// The agent took it and is at work on it.
+    Running,
+    Answered,
+    Failed,
+    Cancelled,
+}
+
+impl AskState {
+    pub fn finished(self) -> bool {
+        matches!(self, AskState::Answered | AskState::Failed | AskState::Cancelled)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -351,6 +557,20 @@ pub enum Response {
     },
     Workspace {
         id: u64,
+    },
+    Ask {
+        ask: AskInfo,
+    },
+    Asks {
+        asks: Vec<AskInfo>,
+    },
+    /// The answer to a permission request: none means the agent's own
+    /// prompt decides.
+    Decision {
+        decision: Option<Decision>,
+    },
+    Approvals {
+        approvals: Vec<ApprovalInfo>,
     },
 }
 

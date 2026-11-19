@@ -267,9 +267,48 @@ artty run --tab 3 -- cargo test             # prints output, exits with its code
 artty read --tab 3 --lines 50               # last 50 lines
 artty read --tab 3 --last                   # last command's output
 artty send --tab 3 "q"                      # type into a tab
+artty ask --tab 4 "Review the diff in api/"  # the agent's reply, once its turn ends
+artty ask --tab 4 --no-wait - < task.md     # prints the ask's id; carries on
+artty ask --result 7 --timeout 60           # wait for ask 7's reply
 artty notify "Build finished"
 artty status waiting --message "Need a decision on the API"
 ```
+
+`artty ask` gives an agent a message as if you typed it, but only once it's
+between turns (by its hooks' events), nobody has typed in its pane for a few
+seconds, and never into a shell: whether the agent is still in the
+foreground is checked again just before the paste and before the Enter. The
+reply is what its `Stop` hook reports as its last message (an interrupted
+turn's reply is what it got to). A message the agent doesn't take fails
+rather than being typed again; one queued behind a turn waits for it
+(`--cancel ID` takes it back). An agent just started is waited for, up to
+30 seconds, until its hooks report (Claude Code runs none while it asks
+whether to trust a folder). It needs the agent's hooks (`artty hooks
+install`). Asks under way don't survive a server restart.
+
+### Permission requests
+
+With its hooks installed, Claude Code's permission prompts come to artty
+too: its `PermissionRequest` hook (`artty approve`) hands artty the
+request while Claude Code shows its prompt as usual, so either answers it.
+
+```sh
+artty approvals                       # pending first: id, pane, state, command
+artty approval allow 1795129609022
+artty approval deny 1795129609022 --message "Use the staging database"
+```
+
+An agent mustn't approve its own requests: these (and `artty send` into a
+pane asking permission) are refused from programs running in artty's panes,
+apps attached from one included. Answer from a terminal outside artty (or
+over ssh), or at the agent's prompt. (A program that left its parent,
+daemonized, can't be told apart.) artty knows a request answered at the
+prompt: allowed (the tool's use is reported, once the tool has run), or
+dismissed (Claude Code ends the hook), and an `artty ask` whose turn
+stopped there fails as interrupted. One nobody answers in artty for 10
+minutes is left to the prompt; an agent that can't show one (`claude -p`)
+then denies it, as it would have at once. Codex's permission requests are
+shown, not answered.
 
 Outside artty, `artty` talks to the running server. `artty help` lists
 everything.

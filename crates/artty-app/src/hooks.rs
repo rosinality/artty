@@ -1,6 +1,7 @@
 //! Status hooks in coding agents' settings: what's installed, installing,
 //! updating and removing them. artty's hooks are recognized by running
-//! `artty status`; everything else in the files is left alone.
+//! `artty status` or `artty approve`; everything else in the files is left
+//! alone.
 
 use std::path::{Path, PathBuf};
 
@@ -18,6 +19,9 @@ pub struct Agent {
     events: &'static [(&'static str, &'static str)],
     /// The agent parses hook output as JSON (Gemini CLI).
     json_output: bool,
+    /// The event whose hook may answer a permission request
+    /// (`artty approve`), for agents that show their own prompt meanwhile.
+    approve: Option<&'static str>,
     /// Shown after installing.
     pub note: Option<&'static str>,
 }
@@ -36,6 +40,7 @@ pub const AGENTS: &[Agent] = &[
             ("SessionEnd", "idle"),
         ],
         json_output: false,
+        approve: Some("PermissionRequest"),
         note: None,
     },
     Agent {
@@ -51,6 +56,7 @@ pub const AGENTS: &[Agent] = &[
             ("SessionEnd", "idle"),
         ],
         json_output: false,
+        approve: None,
         note: Some("Approve the new hooks once with /hooks in Codex."),
     },
     Agent {
@@ -66,6 +72,7 @@ pub const AGENTS: &[Agent] = &[
             ("SessionEnd", "idle"),
         ],
         json_output: true,
+        approve: None,
         note: None,
     },
 ];
@@ -107,8 +114,14 @@ fn home() -> Result<PathBuf, String> {
 
 /// Whether a hook entry is one of artty's.
 fn ours(entry: &Value) -> bool {
-    entry.to_string().contains("artty status")
+    let entry = entry.to_string();
+    entry.contains("artty status") || entry.contains("artty approve")
 }
+
+/// How long an agent lets `artty approve` wait (seconds): as long as its
+/// prompt may stay up. artty answers well before: when someone decides, or
+/// the prompt is answered, or the turn ends.
+const APPROVE_TIMEOUT: u64 = 86_400;
 
 impl Agent {
     /// The hooks to add, keyed by event. They do nothing outside artty.
@@ -130,6 +143,15 @@ impl Agent {
                 (*event).to_owned(),
                 json!([{ "hooks": [{ "type": "command", "command": command(state) }] }]),
             );
+        }
+        if let Some(event) = self.approve {
+            let approve = format!(
+                "[ -n \"$ARTTY_SOCKET\" ] && artty approve --hook --agent {} || true",
+                self.id
+            );
+            let entry =
+                json!({ "type": "command", "command": approve, "timeout": APPROVE_TIMEOUT });
+            hooks.insert(event.to_owned(), json!([{ "hooks": [entry] }]));
         }
         Value::Object(hooks)
     }
@@ -336,6 +358,19 @@ mod tests {
         assert_eq!(
             command,
             "[ -n \"$ARTTY_SOCKET\" ] && artty status waiting --hook --agent claude || true"
+        );
+        let approve = &claude["PermissionRequest"][0]["hooks"][0];
+        assert_eq!(
+            approve["command"].as_str().unwrap(),
+            "[ -n \"$ARTTY_SOCKET\" ] && artty approve --hook --agent claude || true"
+        );
+        assert_eq!(approve["timeout"], APPROVE_TIMEOUT);
+        assert!(
+            agent("codex")
+                .unwrap()
+                .entries()
+                .get("PermissionRequest")
+                .is_some_and(|e| { e.to_string().contains("artty status waiting") })
         );
         let gemini = agent("gemini").unwrap().entries();
         let command = gemini["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap();

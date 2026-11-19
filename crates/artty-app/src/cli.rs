@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use artty_core::SessionId;
 use artty_core::control::{
-    AgentState, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV, SplitDirection,
-    live_sockets,
+    AgentState, ApprovalInfo, AskInfo, AskState, HookEvent, ReadSource, Request, Response,
+    SESSION_ENV, SOCKET_ENV, SplitDirection, live_sockets,
 };
 use serde_json::{Value, json};
 
@@ -20,6 +20,10 @@ pub const COMMANDS: &[&str] = &[
     "send",
     "new",
     "run",
+    "ask",
+    "approve",
+    "approvals",
+    "approval",
     "notify",
     "status",
     "focus",
@@ -70,6 +74,27 @@ artty, your own pane is found automatically:
   artty run [--tab N] [--timeout S] -- COMMAND
                                          run COMMAND in a tab's shell, print its
                                          output, and exit with its exit code
+  artty ask --tab N [--timeout S] [--no-wait] [--raw] TEXT | -
+                                         give the agent in pane N a message (- reads
+                                         it from stdin) once it's between turns, as
+                                         if typed, and print its reply. Needs its
+                                         hooks (artty hooks install). After
+                                         --timeout or with --no-wait, prints the
+                                         ask's id (exit 3 if not over); --raw allows
+                                         text it takes as a command (/, !, #)
+  artty ask --result ID [--timeout S]    wait for that ask's reply (--timeout 0:
+                                         say where it is now)
+  artty ask --cancel ID                  take back an ask not yet given to its agent
+  artty ask --cancel all [--tab N]       ... every one (of pane N's), printing them
+  artty ask --list [--tab N] [--json]    asks not yet over: id, pane, state, text
+  artty ask --cancel ID --abandon        stop waiting for one with its agent
+  artty approvals [--tab N] [--json]     agents' permission requests (pending
+                                         first): id, pane, state, what they'd do
+  artty approval allow|deny ID [--message M]
+                                         answer one (not from inside artty's
+                                         panes: an agent mustn't approve its own);
+                                         the agent's own prompt answers it too
+  artty approve --hook --agent NAME      (an agent's PermissionRequest hook)
   artty new [--split right|down] [--tab N] [--cwd DIR] [--title T]
             [--workspace NAME] [--background] [-- COMMAND...]
                                          open a tab, or split pane N (default:
@@ -230,6 +255,16 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--agent" => _ = flags.insert("agent", args.value("--agent")?),
             "--signal" => _ = flags.insert("signal", args.value("--signal")?),
             "--root" => _ = flags.insert("root", args.value("--root")?),
+            "--result" => _ = flags.insert("result", args.value("--result")?),
+            "--cancel" => _ = flags.insert("cancel", args.value("--cancel")?),
+            "--raw" | "--no-wait" | "--list" | "--abandon" => {
+                switches.insert(match arg.as_str() {
+                    "--raw" => "raw",
+                    "--list" => "list",
+                    "--abandon" => "abandon",
+                    _ => "no-wait",
+                });
+            },
             "--color" => _ = flags.insert("color", args.value("--color")?),
             "--env" => {
                 let pair = args.value("--env")?;
@@ -367,6 +402,43 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 .transpose()?;
             Request::Run { tab, command: rest.join(" "), timeout_secs }
         },
+        "ask" => {
+            let number = |name: &str| -> Result<Option<u64>, String> {
+                flags
+                    .get(name)
+                    .map(|v| v.parse().map_err(|_| format!("--{name}: not a number")))
+                    .transpose()
+            };
+            let timeout_secs = number("timeout")?;
+            if switches.contains("list") {
+                Request::AskList { tab }
+            } else if flags.get("cancel").map(String::as_str) == Some("all") {
+                Request::AskCancelQueued { tab }
+            } else if let Some(id) = number("cancel")? {
+                Request::AskCancel { id, abandon: switches.contains("abandon") }
+            } else if let Some(id) = number("result")? {
+                Request::AskResult { id, wait: timeout_secs != Some(0), timeout_secs }
+            } else {
+                let tab = tab.ok_or("ask: which agent? (--tab N)")?;
+                if Some(tab) == own_tab() {
+                    return Err("ask: that's your own pane".into());
+                }
+                let text = if rest == ["-"] {
+                    let mut text = String::new();
+                    std::io::stdin().read_to_string(&mut text).map_err(|err| err.to_string())?;
+                    text
+                } else {
+                    rest.join(" ")
+                };
+                Request::Ask {
+                    tab,
+                    text,
+                    raw: switches.contains("raw"),
+                    wait: !switches.contains("no-wait"),
+                    timeout_secs,
+                }
+            }
+        },
         "new" => {
             let split = match flags.get("split").map(String::as_str) {
                 None => None,
@@ -415,18 +487,40 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 Some("idle") => AgentState::Idle,
                 _ => return Err("status: expected working, waiting, done or idle".into()),
             };
-            let (message, agent_session) = if switches.contains("hook") {
+            let (message, agent_session, hook) = if switches.contains("hook") {
                 hook_event()
             } else {
-                (flags.get("message").cloned(), None)
+                (flags.get("message").cloned(), None, None)
             };
+            // Claude Code notifies for more than needing you: not "waiting"
+            // for those that don't (idle, it has said "done" already).
+            if hook.as_ref().is_some_and(|h| h.event == "Notification")
+                && !needs_you(hook.as_ref().and_then(|h| h.notification_type.as_deref()))
+            {
+                return Ok(0);
+            }
             Request::Status {
                 tab: tab.or_else(own_tab),
                 state,
                 message,
                 agent_session,
                 agent: flags.get("agent").cloned(),
+                hook,
             }
+        },
+        "approve" => return approve(flags.get("agent").cloned()),
+        "approvals" => Request::Approvals { tab },
+        "approval" => {
+            let allow = match rest.first().map(String::as_str) {
+                Some("allow") => true,
+                Some("deny") => false,
+                _ => return Err("approval: allow or deny? (artty approval allow ID)".into()),
+            };
+            let id = rest
+                .get(1)
+                .and_then(|id| id.parse().ok())
+                .ok_or("approval: which request? (its id, from artty approvals)")?;
+            Request::Decide { id, allow, message: flags.get("message").cloned() }
         },
         "hooks" => return hooks(&rest),
         "server" => match rest.first().map(String::as_str) {
@@ -471,9 +565,41 @@ fn run(args: Vec<String>) -> Result<i32, String> {
 
     let timeout = match &request {
         Request::Run { timeout_secs, .. } => timeout_secs.map(|s| Duration::from_secs(s + 5)),
+        Request::Ask { wait: true, timeout_secs, .. }
+        | Request::AskResult { wait: true, timeout_secs, .. } => {
+            timeout_secs.map(|s| Duration::from_secs(s + 5))
+        },
         _ => Some(Duration::from_secs(10)),
     };
+    // A waiting ask: first its id, on stderr, so a caller cut short (a shell
+    // tool's timeout) can pick the reply up rather than ask again.
+    if let Request::Ask { tab, text, raw, wait: true, timeout_secs } = &request {
+        let add = Request::Ask {
+            tab: *tab,
+            text: text.clone(),
+            raw: *raw,
+            wait: false,
+            timeout_secs: None,
+        };
+        let response = send(&add, Some(Duration::from_secs(10)))?;
+        let Response::Ask { ask } = &response else {
+            return print_response(response, switches.contains("json"));
+        };
+        if ask.state.finished() {
+            return print_response(response, switches.contains("json"));
+        }
+        eprintln!("artty: ask {} (artty ask --result {} if this is cut short)", ask.id, ask.id);
+        let wait = Request::AskResult { id: ask.id, wait: true, timeout_secs: *timeout_secs };
+        let response = send(&wait, timeout)?;
+        return print_response(response, switches.contains("json"));
+    }
     let response = send(&request, timeout)?;
+    if let (Request::AskCancel { .. }, Response::Ask { ask }) = (&request, &response)
+        && ask.state == AskState::Cancelled
+    {
+        println!("cancelled");
+        return Ok(0);
+    }
     print_response(response, switches.contains("json"))
 }
 
@@ -526,6 +652,38 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         },
         Response::Text { text } => {
             println!("{text}");
+            Ok(0)
+        },
+        Response::Ask { ask } => print_ask(&ask, json),
+        Response::Approvals { approvals } if json => {
+            println!("{}", serde_json::to_string_pretty(&approvals).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Approvals { approvals } => {
+            for approval in &approvals {
+                print_approval(approval);
+            }
+            Ok(0)
+        },
+        Response::Decision { decision } => {
+            println!("{}", serde_json::to_string(&decision).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Asks { asks } if json => {
+            println!("{}", serde_json::to_string_pretty(&asks).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Asks { asks } => {
+            for ask in asks {
+                let state = serde_json::to_value(ask.state).unwrap_or_default();
+                let text = ask.text.replace('\n', " ");
+                println!(
+                    "{:>14}  pane {:<3} {:<10} {text}",
+                    ask.id,
+                    ask.pane,
+                    state.as_str().unwrap_or("")
+                );
+            }
             Ok(0)
         },
         Response::Server { info } => {
@@ -759,13 +917,123 @@ pub fn duration(secs: u64) -> String {
     }
 }
 
-/// The message and session id of an agent's hook event on stdin (Claude
-/// Code, Codex and Gemini CLI all send `session_id`).
-fn hook_event() -> (Option<String>, Option<String>) {
+/// An ask's reply (exit 0), why it failed (exit 1), or its id while it's not
+/// over (exit 3: `artty ask --result ID` waits on).
+fn print_ask(ask: &AskInfo, json: bool) -> Result<i32, String> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(ask).unwrap_or_default());
+    }
+    match ask.state {
+        AskState::Answered => {
+            if let Some(warning) = &ask.warning {
+                eprintln!("artty: ask {}: {warning}", ask.id);
+            }
+            if !json {
+                println!("{}", ask.reply.as_deref().unwrap_or_default());
+            }
+            Ok(0)
+        },
+        AskState::Failed => {
+            Err(format!("ask {}: {}", ask.id, ask.error.as_deref().unwrap_or("failed")))
+        },
+        AskState::Cancelled => Err(format!("ask {}: cancelled", ask.id)),
+        state => {
+            if !json {
+                println!("{}", ask.id);
+                let state = serde_json::to_value(state).unwrap_or_default();
+                eprintln!(
+                    "artty: ask {} is {}; artty ask --result {} waits for its reply",
+                    ask.id,
+                    state.as_str().unwrap_or("under way"),
+                    ask.id
+                );
+            }
+            Ok(3)
+        },
+    }
+}
+
+fn print_approval(approval: &ApprovalInfo) {
+    let state = serde_json::to_value(approval.state).unwrap_or_default();
+    println!(
+        "{:>14}  pane {:<3} {:<14} {:>5}  {}",
+        approval.id,
+        approval.pane,
+        state.as_str().unwrap_or(""),
+        duration(approval.age_secs),
+        approval.summary
+    );
+}
+
+/// An agent's hook event, as JSON on stdin.
+fn hook_input() -> Option<Value> {
     let mut input = String::new();
-    let _ = std::io::stdin().take(1 << 20).read_to_string(&mut input);
-    let Ok(event) = serde_json::from_str::<Value>(&input) else { return (None, None) };
-    (hook_message(&event), event.get("session_id").and_then(Value::as_str).map(str::to_owned))
+    // Big enough for a file's worth of tool input.
+    let _ = std::io::stdin().take(16 << 20).read_to_string(&mut input);
+    serde_json::from_str(&input).ok()
+}
+
+/// Notifications that mean the agent needs you: all but those (Claude
+/// Code's) known not to, so a new kind still shows.
+fn needs_you(kind: Option<&str>) -> bool {
+    !matches!(
+        kind,
+        Some(
+            "idle_prompt"
+                | "auth_success"
+                | "agent_completed"
+                | "elicitation_complete"
+                | "elicitation_response"
+        )
+    )
+}
+
+/// `artty approve --hook`: an agent's permission request, put to artty
+/// while the agent shows its own prompt. Prints a decision only when
+/// someone made one in artty; anything else (the prompt answered there,
+/// artty not running, an error) prints nothing, and the agent's prompt
+/// decides. Exits 0 regardless: a failing hook mustn't decide either.
+fn approve(agent: Option<String>) -> Result<i32, String> {
+    let Some(event) = hook_input() else { return Ok(0) };
+    let tool_name = event.get("tool_name").and_then(Value::as_str).unwrap_or("a tool").to_owned();
+    let tool_input = event.get("tool_input").cloned().unwrap_or(Value::Null);
+    let request = Request::Approve { tab: own_tab(), agent, tool_name, tool_input };
+    let Ok(Response::Decision { decision: Some(decision) }) = send(&request, None) else {
+        return Ok(0);
+    };
+    let decision = if decision.allow {
+        json!({ "behavior": "allow" })
+    } else {
+        let message = decision.message.unwrap_or_else(|| "Denied in artty".to_owned());
+        json!({ "behavior": "deny", "message": message })
+    };
+    let output = json!({
+        "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": decision }
+    });
+    println!("{output}");
+    Ok(0)
+}
+
+/// The message and session id of an agent's hook event on stdin (Claude
+/// Code, Codex and Gemini CLI all send `session_id`), and what tells its
+/// turns apart.
+fn hook_event() -> (Option<String>, Option<String>, Option<HookEvent>) {
+    let Some(event) = hook_input() else { return (None, None, None) };
+    let text = |key: &str| event.get(key).and_then(Value::as_str).map(str::to_owned);
+    let used = text("hook_event_name").as_deref() == Some("PostToolUse");
+    let hook = text("hook_event_name").map(|name| HookEvent {
+        event: name,
+        prompt: text("prompt"),
+        prompt_id: text("prompt_id"),
+        // Claude Code's Stop, and Codex's.
+        reply: text("last_assistant_message"),
+        source: text("source"),
+        // Which permission request a tool's use answers.
+        tool_name: used.then(|| text("tool_name")).flatten(),
+        tool_input: used.then(|| event.get("tool_input").cloned()).flatten(),
+        notification_type: text("notification_type"),
+    });
+    (hook_message(&event), text("session_id"), hook)
 }
 
 /// What to show for a hook event: its message, or for a permission request
@@ -808,6 +1076,9 @@ fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => "timed out".to_owned(),
         _ => err.to_string(),
     })?;
+    if reply.is_empty() {
+        return Err("the server closed the connection (stopped, or restarted)".into());
+    }
     serde_json::from_str(&reply).map_err(|err| format!("bad reply: {err}"))
 }
 

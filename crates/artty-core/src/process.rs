@@ -81,6 +81,23 @@ impl ProcessProbe {
     }
 }
 
+/// Whether `pid` is one of `ancestors` or runs under one of them (its
+/// parent's parent's ...). A process that left its parent (daemonized, or
+/// its parent gone) can't be told.
+pub fn descends_from(pid: i32, ancestors: &std::collections::HashSet<i32>) -> bool {
+    let mut pid = pid;
+    for _ in 0..64 {
+        if ancestors.contains(&pid) {
+            return true;
+        }
+        match parent_pid(pid) {
+            Some(parent) if parent > 1 && parent != pid => pid = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
 #[cfg(target_os = "macos")]
 fn parent_pid(pid: i32) -> Option<i32> {
     use std::mem::{MaybeUninit, size_of};

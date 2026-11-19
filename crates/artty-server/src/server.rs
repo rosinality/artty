@@ -8,8 +8,8 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
 use artty_core::control::{
-    AgentState, PaneProcesses, ProcessRow, ReadSource, Request, Response, SESSION_ENV, SOCKET_ENV,
-    ServerInfo, ServerUsage, SplitDirection, TabInfo, WorkspaceInfo,
+    AgentState, Decision, PaneProcesses, ProcessRow, ReadSource, Request, Response, SESSION_ENV,
+    SOCKET_ENV, ServerInfo, ServerUsage, SplitDirection, TabInfo, WorkspaceInfo,
 };
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
@@ -32,7 +32,7 @@ use artty_core::{
 
 use crate::handover::{self, HandedPane};
 use crate::inbox::{Inbox, PaneEvents};
-use crate::{ClientId, Input};
+use crate::{ClientId, Input, Peer};
 
 /// Each visible pane gets at most one screen update per frame at 120 Hz.
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
@@ -191,6 +191,9 @@ impl Window {
 
 struct Client {
     tx: Sender<ServerMessage>,
+    /// Its process at the other end of the socket (for `artty attach`, or
+    /// `artty server --stdio` relaying a remote app), if the system says.
+    pid: Option<i32>,
     /// Last screen sent per visible pane, for sending only changes.
     sent: HashMap<PaneId, (Frame, Instant)>,
     dirty: HashSet<PaneId>,
@@ -236,6 +239,14 @@ struct PendingRun {
     deadline: Option<Instant>,
 }
 
+/// Who's waiting for an ask to be over; at `deadline`, they're told how
+/// far it got (it carries on).
+struct AskWaiter {
+    ask: u64,
+    waiter: Waiter,
+    deadline: Option<Instant>,
+}
+
 pub(crate) struct Server {
     socket: PathBuf,
     sink: Arc<dyn Fn(PaneId, Event) + Send + Sync>,
@@ -256,6 +267,12 @@ pub(crate) struct Server {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
     clients: HashMap<ClientId, Client>,
     runs: Vec<PendingRun>,
+    /// `artty ask`s, and who waits for them.
+    asks: crate::asks::Asks,
+    ask_waiters: Vec<AskWaiter>,
+    /// Agents' permission requests, and their hooks waiting for answers.
+    approvals: crate::approvals::Approvals,
+    approval_waiters: HashMap<crate::approvals::Conn, Waiter>,
     next_pane: PaneId,
     next_window: WindowId,
     next_workspace: WorkspaceId,
@@ -531,6 +548,10 @@ impl Server {
             workspaces: BTreeMap::new(),
             clients: HashMap::new(),
             runs: Vec::new(),
+            asks: crate::asks::Asks::new(),
+            ask_waiters: Vec::new(),
+            approvals: crate::approvals::Approvals::new(),
+            approval_waiters: HashMap::new(),
             next_pane: 1,
             next_window: 1,
             sizes: HashMap::new(),
@@ -1390,6 +1411,10 @@ impl Server {
         for run in self.runs.extract_if(.., |run| run.pane == pane) {
             Self::answer(&self.clients, run.waiter, Response::error(message));
         }
+        self.asks.fail_pane(pane, message, Instant::now());
+        for release in self.approvals.pane_closed(pane, Instant::now()) {
+            self.release_approval(release);
+        }
     }
 
     fn answer(clients: &HashMap<ClientId, Client>, waiter: Waiter, response: Response) {
@@ -1465,28 +1490,11 @@ impl Server {
 
     pub(crate) fn handle(&mut self, input: Input) {
         match input {
-            Input::Control(request, reply) => match request {
-                Request::Run { tab, command, timeout_secs } => {
-                    match self.start_run(tab, &command) {
-                        Ok(pane) => {
-                            let deadline =
-                                timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
-                            self.runs.push(PendingRun {
-                                pane,
-                                waiter: Waiter::Command(reply),
-                                deadline,
-                            });
-                        },
-                        Err(message) => {
-                            let _ = reply.send(Response::error(message));
-                        },
-                    }
-                },
-                request => {
-                    let _ = reply.send(self.respond(request).unwrap_or_else(Response::error));
-                },
+            Input::Control(peer, request, reply) => {
+                self.control(*request, Waiter::Command(reply), Some(peer))
             },
-            Input::Connected(id, tx, extensions) => {
+            Input::ControlClosed(conn) => self.control_closed(conn),
+            Input::Connected(id, pid, tx, extensions) => {
                 let build = std::env::current_exe()
                     .map(|exe| artty_core::protocol::build_id(&exe))
                     .unwrap_or_default();
@@ -1500,6 +1508,7 @@ impl Server {
                     id,
                     Client {
                         tx,
+                        pid,
                         sent: HashMap::new(),
                         dirty: HashSet::new(),
                         panes_sent: Vec::new(),
@@ -1552,6 +1561,9 @@ impl Server {
                 ) {
                     drop(run);
                 }
+                // (Their asks carry on.)
+                self.ask_waiters
+                    .retain(|w| !matches!(w.waiter, Waiter::App(client, _) if client == id));
             },
         }
     }
@@ -1838,9 +1850,11 @@ impl Server {
                     .map(|(workspace, tab)| &self.workspaces[&workspace].tabs[tab])
                     .filter(|tab| tab.broadcast)
                     .map_or_else(|| vec![pane], |tab| tab.root.panes());
+                let now = Instant::now();
                 for target in targets {
-                    if let Some(target) = self.panes.get(&target) {
-                        target.session.write(bytes.clone());
+                    if let Some(pane) = self.panes.get(&target) {
+                        pane.session.write(bytes.clone());
+                        self.asks.typed(target, now);
                     }
                 }
             },
@@ -2082,35 +2096,226 @@ impl Server {
                         return;
                     },
                 };
-                match request {
-                    Request::Run { tab, command, timeout_secs } => {
-                        match self.start_run(tab, &command) {
-                            Ok(pane) => {
-                                let deadline =
-                                    timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
-                                self.runs.push(PendingRun {
-                                    pane,
-                                    waiter: Waiter::App(client, id),
-                                    deadline,
-                                });
-                            },
-                            Err(message) => Self::answer(
-                                &self.clients,
-                                Waiter::App(client, id),
-                                Response::error(message),
-                            ),
-                        }
-                    },
-                    request => {
-                        let response = self.respond(request).unwrap_or_else(Response::error);
-                        Self::answer(&self.clients, Waiter::App(client, id), response);
-                    },
-                }
+                // Apps are programs on the socket too: one started in a pane
+                // (`artty attach`, a relay) is held to what the pane's are.
+                let pid = self.clients.get(&client).and_then(|c| c.pid);
+                let peer = Peer { conn: client, pid };
+                self.control(request, Waiter::App(client, id), Some(peer));
             },
         }
     }
 
     // Control requests (the `artty` command and agent hooks).
+
+    /// A control request, answered now or (`artty run`, `ask`, `approve`)
+    /// once what it waits for happens. `peer`: from the `artty` command
+    /// (else from an app).
+    fn control(&mut self, request: Request, waiter: Waiter, peer: Option<Peer>) {
+        let deadline = |secs: Option<u64>| secs.map(|s| Instant::now() + Duration::from_secs(s));
+        match request {
+            Request::Approve { tab, agent, tool_name, tool_input } => {
+                let Some(peer) = peer.filter(|_| matches!(waiter, Waiter::Command(_))) else {
+                    let error = Response::error("permission requests come from agents' hooks");
+                    return Self::answer(&self.clients, waiter, error);
+                };
+                match self.open_approval(tab, peer, agent, tool_name, tool_input) {
+                    Ok(()) => {
+                        self.approval_waiters.insert(peer.conn, waiter);
+                    },
+                    Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
+                }
+            },
+            Request::Decide { id, allow, message } => {
+                let response = self.decide(id, Decision { allow, message }, peer);
+                Self::answer(&self.clients, waiter, response.unwrap_or_else(Response::error));
+            },
+            // Not keys from a program in a pane (an agent answering its own
+            // prompt) while asking permission.
+            Request::Send { tab, .. } if self.in_a_pane(peer) && self.asking_permission(tab) => {
+                let error = Response::error(
+                    "the pane's agent is asking for permission, which can't be answered from \
+                     inside artty's panes: answer it in the pane, or in the artty app",
+                );
+                Self::answer(&self.clients, waiter, error);
+            },
+            Request::Run { tab, command, timeout_secs } => match self.start_run(tab, &command) {
+                Ok(pane) => {
+                    self.runs.push(PendingRun { pane, waiter, deadline: deadline(timeout_secs) })
+                },
+                Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
+            },
+            Request::Ask { tab, text, raw, wait, timeout_secs } => {
+                match self.add_ask(tab, text, raw) {
+                    Ok(ask) if wait => self.ask_waiters.push(AskWaiter {
+                        ask,
+                        waiter,
+                        deadline: deadline(timeout_secs),
+                    }),
+                    Ok(ask) => {
+                        let info = self.asks.info(ask).expect("just added");
+                        Self::answer(&self.clients, waiter, Response::Ask { ask: info });
+                    },
+                    Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
+                }
+                self.pump_asks(Instant::now());
+            },
+            Request::AskResult { id, wait, timeout_secs } => match self.asks.info(id) {
+                None => Self::answer(
+                    &self.clients,
+                    waiter,
+                    Response::error(format!("no ask {id} (asks are kept an hour once over)")),
+                ),
+                Some(info) if !wait || info.state.finished() => {
+                    Self::answer(&self.clients, waiter, Response::Ask { ask: info })
+                },
+                Some(_) => self.ask_waiters.push(AskWaiter {
+                    ask: id,
+                    waiter,
+                    deadline: deadline(timeout_secs),
+                }),
+            },
+            request => {
+                let response = self.respond(request).unwrap_or_else(Response::error);
+                Self::answer(&self.clients, waiter, response);
+            },
+        }
+    }
+
+    /// A request from a program running in one of artty's panes (or one
+    /// that can't be told apart from one). Apps' requests aren't.
+    fn in_a_pane(&self, peer: Option<Peer>) -> bool {
+        let Some(peer) = peer else { return false };
+        let Some(pid) = peer.pid else { return true };
+        let panes: HashSet<i32> =
+            self.panes.values().filter_map(|p| p.session.shell_pid()).collect();
+        artty_core::descends_from(pid, &panes)
+    }
+
+    fn asking_permission(&self, tab: Option<PaneId>) -> bool {
+        self.resolve(tab).is_ok_and(|pane| self.approvals.pending_in(pane))
+    }
+
+    fn open_approval(
+        &mut self,
+        tab: Option<PaneId>,
+        peer: Peer,
+        agent: Option<String>,
+        tool_name: String,
+        tool_input: serde_json::Value,
+    ) -> Result<(), String> {
+        let pane_id = tab.ok_or("which pane? (permission requests come from agents in artty)")?;
+        let pane = self.panes.get_mut(&pane_id).ok_or(format!("no pane {pane_id}"))?;
+        let now = Instant::now();
+        let id = self.approvals.open(pane_id, peer.conn, agent.clone(), tool_name, tool_input, now);
+        let info = self.approvals.info(id, now).expect("just opened");
+        let message = format!("Allow {}?", info.summary);
+        pane.process = pane.session.process();
+        pane.report(AgentState::Waiting, Some(message.clone()), None, agent);
+        self.notify_user(pane_id, Some("Needs permission"), &message);
+        Ok(())
+    }
+
+    /// Answer a permission request: from an app, or the `artty` command
+    /// run outside artty's panes (not by an agent, nor what it started).
+    fn decide(
+        &mut self,
+        id: u64,
+        decision: Decision,
+        peer: Option<Peer>,
+    ) -> Result<Response, String> {
+        if self.in_a_pane(peer) {
+            return Err("permission requests can't be answered from inside artty's panes (an \
+                        agent mustn't approve its own): answer in the artty app, or from a \
+                        terminal outside artty"
+                .into());
+        }
+        let release = self.approvals.decide(id, decision, Instant::now())?;
+        self.release_approval(release);
+        Ok(Response::Approvals {
+            approvals: self.approvals.info(id, Instant::now()).into_iter().collect(),
+        })
+    }
+
+    fn release_approval(&mut self, release: crate::approvals::Release) {
+        if let Some(waiter) = self.approval_waiters.remove(&release.conn) {
+            let response = Response::Decision { decision: release.decision };
+            Self::answer(&self.clients, waiter, response);
+        }
+    }
+
+    /// A control connection closed while waiting: a permission hook ended
+    /// by its agent (its prompt dismissed, the turn stopped).
+    fn control_closed(&mut self, conn: ClientId) {
+        self.approval_waiters.remove(&conn);
+        let now = Instant::now();
+        if let Some(pane) = self.approvals.hangup(conn, now) {
+            self.asks.interrupted(pane, now);
+            if let Some(pane) = self.panes.get_mut(&pane) {
+                let message = Some("Permission prompt dismissed".to_owned());
+                pane.report(AgentState::Done, message, None, None);
+            }
+        }
+    }
+
+    fn add_ask(&mut self, tab: PaneId, text: String, raw: bool) -> Result<u64, String> {
+        let pane = self.panes.get(&tab).ok_or(format!("no pane {tab}"))?;
+        let text = text.trim_end_matches(['\r', '\n']).to_owned();
+        if text.trim().is_empty() {
+            return Err("nothing to ask".into());
+        }
+        if !raw && crate::asks::commandlike(&text) {
+            return Err(
+                "the agent would take this as a command (/, ! or #); pass --raw to send it anyway"
+                    .into(),
+            );
+        }
+        // An agent, or a pane just opened (its program not yet seen: maybe
+        // one starting). Nothing's typed until it's an agent.
+        let starting = pane.process.foreground.is_none();
+        if !matches!(pane.status, Status::Agent { .. }) && !starting {
+            return Err(format!("no agent is running in pane {tab}"));
+        }
+        Ok(self.asks.add(tab, text, Instant::now()))
+    }
+
+    /// Type asks into panes ready for them; tell whoever waits for asks now
+    /// over, or waited long enough.
+    fn pump_asks(&mut self, now: Instant) {
+        let panes = &self.panes;
+        // Asked just before typing: the status may be a second old, from
+        // before the agent exited.
+        let view = |id: PaneId| {
+            let pane = panes.get(&id)?;
+            let state = match &pane.status {
+                Status::Agent { state, .. } => Some(*state),
+                _ => None,
+            };
+            let now = pane.session.process();
+            let still = pane.process.foreground_group.is_some()
+                && now.foreground_group == pane.process.foreground_group;
+            Some(crate::asks::PaneView {
+                agent: state.is_some() && still,
+                shell: now.foreground.as_deref().is_some_and(artty_core::pane::is_shell),
+                hooks: pane.hooks_reported(),
+                state,
+                bracketed: pane.session.mode().contains(TermMode::BRACKETED_PASTE),
+            })
+        };
+        for write in self.asks.pump(now, view) {
+            if let Some(pane) = self.panes.get(&write.pane) {
+                pane.session.write(write.bytes);
+            }
+        }
+        let asks = &self.asks;
+        let over = |w: &mut AskWaiter| asks.finished(w.ask) || w.deadline.is_some_and(|d| d <= now);
+        for waiter in self.ask_waiters.extract_if(.., over) {
+            let response = match self.asks.info(waiter.ask) {
+                Some(ask) => Response::Ask { ask },
+                None => Response::error(format!("ask {} is gone", waiter.ask)),
+            };
+            Self::answer(&self.clients, waiter.waiter, response);
+        }
+    }
 
     fn resolve(&self, pane: Option<PaneId>) -> Result<PaneId, String> {
         match pane {
@@ -2444,7 +2649,9 @@ impl Server {
                 Response::Text { text }
             },
             Request::Send { tab, text, enter } => {
-                let session = &self.panes[&self.resolve(tab)?].session;
+                let id = self.resolve(tab)?;
+                self.asks.typed(id, Instant::now());
+                let session = &self.panes[&id].session;
                 let mut bytes = text.into_bytes();
                 if enter {
                     bytes.push(b'\r');
@@ -2522,7 +2729,34 @@ impl Server {
                     (!title.is_empty()).then(|| title.to_owned());
                 Response::Ok
             },
-            Request::Run { .. } => unreachable!("handled before"),
+            Request::Run { .. }
+            | Request::Ask { .. }
+            | Request::AskResult { .. }
+            | Request::Approve { .. }
+            | Request::Decide { .. } => unreachable!("handled before"),
+            Request::Approvals { tab } => {
+                Response::Approvals { approvals: self.approvals.list(tab, Instant::now()) }
+            },
+            Request::AskList { tab } => {
+                let ids = self.asks.pending_ids(tab);
+                Response::Asks {
+                    asks: ids.into_iter().filter_map(|id| self.asks.info(id)).collect(),
+                }
+            },
+            Request::AskCancelQueued { tab } => {
+                let now = Instant::now();
+                let mut cancelled = Vec::new();
+                for id in self.asks.pending_ids(tab) {
+                    if self.asks.cancel(id, false, now).is_ok() {
+                        cancelled.extend(self.asks.info(id));
+                    }
+                }
+                Response::Asks { asks: cancelled }
+            },
+            Request::AskCancel { id, abandon } => {
+                self.asks.cancel(id, abandon, Instant::now())?;
+                Response::Ask { ask: self.asks.info(id).ok_or("no such ask")? }
+            },
             Request::Notify { tab, title, body } => {
                 let id = self.resolve(tab)?;
                 if let Some(pane) = self.panes.get_mut(&id) {
@@ -2531,12 +2765,23 @@ impl Server {
                 self.notify_user(id, title.as_deref(), &body);
                 Response::Ok
             },
-            Request::Status { tab, state, message, agent_session, agent } => {
+            Request::Status { tab, state, message, agent_session, agent, hook } => {
                 let id = self.resolve(tab)?;
                 let pane = self.panes.get_mut(&id).ok_or("the pane closed")?;
                 let was_waiting =
                     matches!(pane.status, Status::Agent { state: AgentState::Waiting, .. });
+                // The agent's in the foreground now, though the last sample
+                // (once a second) may be from before it started: without
+                // it, its first report would be taken for an agent gone.
+                pane.process = pane.session.process();
                 pane.report(state, message.clone(), agent_session, agent);
+                if let Some(hook) = &hook {
+                    let now = Instant::now();
+                    self.asks.hook(id, hook, now);
+                    for release in self.approvals.hook(id, hook, now) {
+                        self.release_approval(release);
+                    }
+                }
                 match state {
                     AgentState::Waiting if !was_waiting => {
                         self.notify_user(id, Some("Needs input"), message.as_deref().unwrap_or(""));
@@ -2850,6 +3095,12 @@ impl Server {
     /// When the main loop must wake up next.
     pub(crate) fn next_deadline(&self) -> Instant {
         let mut deadline = (self.last_poll + POLL_INTERVAL).min(self.last_save + SAVE_INTERVAL);
+        let now = Instant::now();
+        let asks = self.asks.next_due(now).into_iter();
+        let waiters = self.ask_waiters.iter().filter_map(|w| w.deadline);
+        if let Some(due) = asks.chain(waiters).min() {
+            deadline = deadline.min(due);
+        }
         // (One that's behind wakes the loop when its acknowledgment comes.)
         for client in self.clients.values().filter(|c| !c.behind()) {
             for pane in &client.dirty {
@@ -2866,6 +3117,9 @@ impl Server {
         if now.duration_since(self.last_poll) >= POLL_INTERVAL {
             self.last_poll = now;
             self.poll();
+        }
+        if self.asks.pending() || !self.ask_waiters.is_empty() {
+            self.pump_asks(now);
         }
         self.clear_seen();
         self.push_updates(now);
@@ -2916,6 +3170,9 @@ impl Server {
             self.refresh_title(workspace);
         }
         self.sample_usage();
+        for release in self.approvals.expire(Instant::now()) {
+            self.release_approval(release);
+        }
         let windows = &self.windows;
         self.status.retain(|window| windows.contains_key(&window));
         let now = Instant::now();

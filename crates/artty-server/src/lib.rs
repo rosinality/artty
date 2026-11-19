@@ -5,6 +5,8 @@
 //! [`Input`] over a channel. The app attaches windows over the same socket the
 //! `artty` command and agent hooks use (see `artty_core::protocol`).
 
+mod approvals;
+mod asks;
 mod handover;
 mod inbox;
 mod server;
@@ -30,12 +32,24 @@ use server::Server;
 
 pub type ClientId = u64;
 
+/// Who sent a control request: its connection, and the process at the
+/// other end (if the system says).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Peer {
+    pub conn: ClientId,
+    pub pid: Option<i32>,
+}
+
 /// Everything the server reacts to.
 pub(crate) enum Input {
     /// A one-off request from the `artty` command; answer on the sender.
-    Control(Request, Sender<Response>),
-    /// An app, with the extension kinds it reads.
-    Connected(ClientId, Sender<ServerMessage>, Vec<String>),
+    Control(Peer, Box<Request>, Sender<Response>),
+    /// A control connection waiting for its answer closed (the program
+    /// that asked ended: an agent ending its permission hook).
+    ControlClosed(ClientId),
+    /// An app, with its process (if the system says) and the extension
+    /// kinds it reads.
+    Connected(ClientId, Option<i32>, Sender<ServerMessage>, Vec<String>),
     Client(ClientId, ClientMessage),
     Disconnected(ClientId),
     /// Folders watched for apps changed (see `watch`).
@@ -188,11 +202,27 @@ fn serve(stream: UnixStream, id: ClientId, tx: Arc<Inbox>) {
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
                 let (reply, answer) = mpsc::channel();
-                if tx.send(Input::Control(request, reply)).is_err() {
+                let peer = Peer { conn: id, pid: peer_pid(reader.get_ref()) };
+                if tx.send(Input::Control(peer, Box::new(request), reply)).is_err() {
                     return;
                 }
-                // Long-running requests (`artty run`) wait here.
-                answer.recv().unwrap_or_else(|_| Response::error("the server stopped"))
+                // Long-running requests (`artty run`, `ask`, `approve`)
+                // wait here, watching for the asker going away.
+                let mut told = false;
+                loop {
+                    match answer.recv_timeout(Duration::from_millis(250)) {
+                        Ok(response) => break response,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            break Response::error("the server stopped");
+                        },
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            if !told && hung_up(reader.get_ref()) {
+                                told = true;
+                                let _ = tx.send(Input::ControlClosed(id));
+                            }
+                        },
+                    }
+                }
             },
             Err(err) => Response::error(format!("bad request: {err}")),
         };
@@ -204,6 +234,68 @@ fn serve(stream: UnixStream, id: ClientId, tx: Arc<Inbox>) {
     }
 }
 
+/// The process at the other end of a Unix socket.
+fn peer_pid(stream: &UnixStream) -> Option<i32> {
+    let fd = stream.as_raw_fd();
+    #[cfg(target_os = "macos")]
+    {
+        let mut pid: libc::pid_t = 0;
+        let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
+        // SAFETY: `pid` is valid for `len` bytes.
+        let ok = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&raw mut pid).cast(),
+                &mut len,
+            )
+        } == 0;
+        ok.then_some(pid)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `cred` is valid for `len` bytes.
+        let ok = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&raw mut cred).cast(),
+                &mut len,
+            )
+        } == 0;
+        ok.then_some(cred.pid)
+    }
+}
+
+/// Whether the other end closed (a waiting request's asker ended). Sends
+/// nothing more while waiting, so anything readable is the end.
+fn hung_up(stream: &UnixStream) -> bool {
+    let mut poll = libc::pollfd { fd: stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    // SAFETY: one valid pollfd; no waiting.
+    let ready = unsafe { libc::poll(&mut poll, 1, 0) };
+    if ready <= 0 {
+        return false;
+    }
+    if poll.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+        return true;
+    }
+    let mut byte = 0u8;
+    // SAFETY: peeks at most one byte into `byte`.
+    let read = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            (&raw mut byte).cast(),
+            1,
+            libc::MSG_PEEK | libc::MSG_DONTWAIT,
+        )
+    };
+    read == 0
+}
+
 /// An attached app: binary messages both ways until it disconnects.
 fn serve_app(
     mut reader: BufReader<UnixStream>,
@@ -213,7 +305,8 @@ fn serve_app(
     tx: Arc<Inbox>,
 ) {
     let (outgoing, messages) = mpsc::channel::<ServerMessage>();
-    if tx.send(Input::Connected(id, outgoing, extensions)).is_err() {
+    let pid = peer_pid(reader.get_ref());
+    if tx.send(Input::Connected(id, pid, outgoing, extensions)).is_err() {
         return;
     }
     WRITERS.fetch_add(1, Ordering::Relaxed);

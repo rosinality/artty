@@ -33,8 +33,8 @@ pub use frame::{
     Frame, FrameCursor, FrameImage, FrameLine, FrameRect, FrameRun, FrameUnderline, UnderlineStyle,
 };
 pub use process::{
-    ProcessInfo, ProcessSample, listening_ports, path_from_file_url, process_tree, processes,
-    tool_path, warm_tool_path,
+    ProcessInfo, ProcessSample, descends_from, listening_ports, path_from_file_url, process_tree,
+    processes, tool_path, warm_tool_path,
 };
 pub use session::{Notice, Session, SessionHandover, SessionId, SessionOptions, TerminalSize};
 pub use shell::{CommandRecord, ShellPhase};
