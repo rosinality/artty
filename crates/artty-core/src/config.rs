@@ -75,6 +75,9 @@ pub struct Config {
     pub resume_agents: bool,
     /// How to resume each agent, by process name.
     pub resume: BTreeMap<String, ResumeCommand>,
+    /// Agents run without their terminal UI (`artty acp AGENT`): the
+    /// command of each one's Agent Client Protocol adapter.
+    pub acp: BTreeMap<String, String>,
     /// How many agents deep agents may start agents (`artty new --task`
     /// from an agent's pane); 0: no limit.
     pub max_agent_depth: usize,
@@ -393,7 +396,18 @@ impl Default for Config {
             restore_scrollback: 1000,
             resume_agents: true,
             max_agent_depth: 2,
+            acp: BTreeMap::from([(
+                "claude".to_owned(),
+                "npx -y @agentclientprotocol/claude-agent-acp@0.109.0".to_owned(),
+            )]),
             resume: BTreeMap::from([
+                (
+                    "claude-acp".to_owned(),
+                    ResumeCommand {
+                        session: Some("artty acp claude --resume {session}".to_owned()),
+                        latest: None,
+                    },
+                ),
                 (
                     "claude".to_owned(),
                     ResumeCommand {

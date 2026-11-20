@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
     "attach",
+    "acp",
     "list",
     "read",
     "send",
@@ -130,6 +131,12 @@ artty, your own pane is found automatically:
                                          every agent's thread (or pane N's)
                                          searched: newest matches first
   artty approve --hook --agent NAME      (an agent's PermissionRequest hook)
+  artty acp [AGENT] [--resume ID] [--model M]
+                                         run AGENT (claude) without its terminal
+                                         UI, through its Agent Client Protocol
+                                         adapter (the acp.AGENT setting), in
+                                         this tab: Esc interrupts, ^T opens the
+                                         conversation in its terminal UI
   artty new [--split right|down] [--tab N] [--cwd DIR] [--title T]
             [--workspace NAME] [--background] [-- COMMAND...]
                                          open a tab, or split pane N (default:
@@ -252,7 +259,7 @@ impl Args {
     }
 }
 
-fn own_tab() -> Option<SessionId> {
+pub(crate) fn own_tab() -> Option<SessionId> {
     std::env::var(SESSION_ENV).ok()?.parse().ok()
 }
 
@@ -270,6 +277,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             return Ok(0);
         },
         (Some("remote"), _, _) => return remote(&args[1..]),
+        (Some("acp"), _, _) => return crate::acp_host::run(&args[1..]),
         (Some("attach"), _, _) => return attach(&args[1..]),
         (Some("server"), Some("--stdio"), _) => {
             let exe = std::env::current_exe().map_err(|err| err.to_string())?;
@@ -582,6 +590,10 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 Some("idle") => AgentState::Idle,
                 _ => return Err("status: expected working, waiting, done or idle".into()),
             };
+            // An agent run by `artty acp`: that reports, not its hooks.
+            if switches.contains("hook") && std::env::var_os(crate::acp_host::HOST_ENV).is_some() {
+                return Ok(0);
+            }
             let (message, agent_session, hook) = if switches.contains("hook") {
                 hook_event()
             } else {
@@ -1327,6 +1339,10 @@ fn needs_you(kind: Option<&str>) -> bool {
 /// artty not running, an error) prints nothing, and the agent's prompt
 /// decides. Exits 0 regardless: a failing hook mustn't decide either.
 fn approve(agent: Option<String>) -> Result<i32, String> {
+    // An agent run by `artty acp`: its requests come from that.
+    if std::env::var_os(crate::acp_host::HOST_ENV).is_some() {
+        return Ok(0);
+    }
     let Some(event) = hook_input() else { return Ok(0) };
     let tool_name = event.get("tool_name").and_then(Value::as_str).unwrap_or("a tool").to_owned();
     let tool_input = event.get("tool_input").cloned().unwrap_or(Value::Null);
@@ -1388,7 +1404,7 @@ fn hook_message(event: &Value) -> Option<String> {
     None
 }
 
-fn socket() -> Result<PathBuf, String> {
+pub(crate) fn socket() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os(SOCKET_ENV) {
         return Ok(PathBuf::from(path));
     }
@@ -1537,7 +1553,7 @@ fn events(
     }
 }
 
-fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String> {
+pub(crate) fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String> {
     let path = socket()?;
     let mut stream =
         UnixStream::connect(&path).map_err(|err| format!("{}: {err}", path.display()))?;

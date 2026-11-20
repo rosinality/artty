@@ -2214,6 +2214,7 @@ impl Server {
     /// once what it waits for happens. `peer`: from the `artty` command
     /// (else from an app).
     fn control(&mut self, request: Request, waiter: Waiter, peer: Option<Peer>) {
+        let request = self.acp_agents(request);
         let deadline = |secs: Option<u64>| secs.map(|s| Instant::now() + Duration::from_secs(s));
         match request {
             Request::Approve { tab, agent, tool_name, tool_input, suggestions } => {
@@ -2376,6 +2377,22 @@ impl Server {
             }
         }
         depth
+    }
+
+    /// An agent named `AGENT-acp` (`artty new --agent claude-acp`, `/new
+    /// claude-acp`) is run by `artty acp AGENT`, if it has an adapter.
+    fn acp_agents(&self, mut request: Request) -> Request {
+        if let Request::New { command, .. } = &mut request
+            && let [name] = command.as_slice()
+            && let Some(agent) = name.strip_suffix("-acp")
+            && self.config.acp.contains_key(agent)
+        {
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "artty".to_owned());
+            *command = vec![exe, "acp".to_owned(), agent.to_owned()];
+        }
+        request
     }
 
     /// Open a tab with its first message: the tab as asked, then the task
@@ -3334,6 +3351,15 @@ impl Server {
                 pane.process = pane.session.process();
                 pane.report(state, message.clone(), agent_session, agent);
                 Self::title_session(pane);
+                // A turn cut short (`artty acp`: the agent said it was
+                // cancelled): no answer for its ask.
+                if let Some(hook) = hook.as_ref().filter(|h| h.event == "Interrupt") {
+                    let now = Instant::now();
+                    let how = hook.reply.clone().unwrap_or_else(|| "interrupted".to_owned());
+                    self.cut_short(id, &how, now);
+                    self.keep(now);
+                    return Ok(Response::Ok);
+                }
                 if let Some(hook) = &hook {
                     let now = Instant::now();
                     self.asks.hook(id, hook, now);
@@ -3768,20 +3794,31 @@ impl Server {
             .map(|(&id, _)| id)
             .collect();
         for pane in cut {
-            let why = "the agent's turn was interrupted in its terminal (no answer)";
-            self.asks.turn_cut_short(pane, why, now);
-            let files = self.edits.take_turn(pane);
-            if !files.is_empty() {
-                self.threads.add(pane, ThreadItem::Edited { files });
-            }
-            let reason = "interrupted in its terminal".to_owned();
-            self.threads.add(pane, ThreadItem::Interrupted { reason });
-            if let Some(prompt) = self.threads.last_prompt_id(pane) {
-                self.check_rewinds(pane, prompt);
-            }
+            self.cut_short(pane, "interrupted in its terminal", now);
             if let Some(pane) = self.panes.get_mut(&pane) {
                 pane.report(AgentState::Idle, None, None, None);
             }
+        }
+    }
+
+    /// `pane`'s agent's turn ended without an answer (interrupted: `how`):
+    /// its ask fails, the queued ones go on, the thread says so.
+    fn cut_short(&mut self, pane: PaneId, how: &str, now: Instant) {
+        self.asks.turn_cut_short(pane, &format!("the agent's turn was {how} (no answer)"), now);
+        let files = self.edits.take_turn(pane);
+        if !files.is_empty() {
+            self.threads.add(pane, ThreadItem::Edited { files });
+        }
+        self.threads.add(pane, ThreadItem::Interrupted { reason: how.to_owned() });
+        if let Some(prompt) = self.threads.last_prompt_id(pane) {
+            self.check_rewinds(pane, prompt);
+        }
+        for release in self.approvals.hook(
+            pane,
+            &artty_core::control::HookEvent { event: "Stop".into(), ..Default::default() },
+            now,
+        ) {
+            self.release_approval(release);
         }
     }
 

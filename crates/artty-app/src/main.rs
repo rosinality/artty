@@ -1,6 +1,7 @@
 //! artty: the macOS app, and the `artty` command (which is all there is on
 //! other systems, where it runs the server other machines' apps reach).
 
+mod acp_host;
 #[cfg(target_os = "macos")]
 mod app;
 #[cfg(target_os = "macos")]
