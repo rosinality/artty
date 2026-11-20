@@ -19,6 +19,14 @@ const DONE: u32 = 0x9ece6aff;
 const BUSY: u32 = 0x8fb4ffff;
 const DENY: u32 = 0xf7768eff;
 
+/// Where agents are shown: the Agents view, or the thread panel beside the
+/// terminal (see `thread_panel`), which follows the focused pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Shown {
+    View,
+    Panel,
+}
+
 #[derive(Default)]
 pub(super) struct Agents {
     /// Every connected server's agents, pane ids tagged (see `ids`), with
@@ -26,16 +34,14 @@ pub(super) struct Agents {
     pub(super) agents: Vec<(AgentInfo, String)>,
     /// The agent shown (its pane), and its thread.
     pub(super) selected: Option<PaneId>,
-    /// What's being written to each agent.
-    pub(super) drafts: super::compose::Drafts,
     /// The chosen agent's asks not yet over (some still waiting to be
     /// given to it).
-    asks: Vec<artty_core::control::AskInfo>,
-    thread: Vec<ThreadEntry>,
-    thread_of: Option<PaneId>,
+    pub(super) asks: Vec<artty_core::control::AskInfo>,
+    pub(super) thread: Vec<ThreadEntry>,
+    pub(super) thread_of: Option<PaneId>,
     scroll: gpui::ScrollHandle,
     loading: bool,
-    loaded: bool,
+    pub(super) loaded: bool,
 }
 
 fn state_label(state: AgentState) -> (&'static str, u32) {
@@ -80,15 +86,40 @@ impl WindowView {
                 self.finish_rename(true, cx);
             }
             self.agents = Some(Agents::default());
-            self.refresh_agents(cx);
+            self.refresh_in(Shown::View, cx);
         }
         cx.notify();
     }
 
+    pub(super) fn agents_in(&self, which: Shown) -> Option<&Agents> {
+        match which {
+            Shown::View => self.agents.as_ref(),
+            Shown::Panel => self.thread_panel.as_ref().map(|p| &p.agents),
+        }
+    }
+
+    pub(super) fn agents_in_mut(&mut self, which: Shown) -> Option<&mut Agents> {
+        match which {
+            Shown::View => self.agents.as_mut(),
+            Shown::Panel => self.thread_panel.as_mut().map(|p| &mut p.agents),
+        }
+    }
+
+    /// Bring what's shown of agents up to date: the Agents view, the thread
+    /// panel.
+    pub(super) fn refresh_agents(&mut self, cx: &mut Context<Self>) {
+        if self.showing_agents() {
+            self.refresh_in(Shown::View, cx);
+        }
+        if self.panel_shown() {
+            self.refresh_in(Shown::Panel, cx);
+        }
+    }
+
     /// Ask every connected server for its agents, and the chosen one's
     /// thread.
-    pub(super) fn refresh_agents(&mut self, cx: &mut Context<Self>) {
-        let Some(agents) = self.agents.as_mut().filter(|a| !a.loading) else { return };
+    pub(super) fn refresh_in(&mut self, which: Shown, cx: &mut Context<Self>) {
+        let Some(agents) = self.agents_in_mut(which).filter(|a| !a.loading) else { return };
         agents.loading = true;
         let selected = agents.selected;
         let servers: Vec<(ServerId, String)> = app_state::servers(cx)
@@ -138,14 +169,17 @@ impl WindowView {
                 None => None,
             };
             let _ = this.update(cx, |this, cx| {
-                let Some(agents) = this.agents.as_mut() else { return };
+                let Some(agents) = this.agents_in_mut(which) else { return };
                 agents.loading = false;
                 agents.loaded = true;
                 agents.agents = found;
-                // The first, if none is chosen (or the chosen one is gone).
-                let chosen =
-                    agents.selected.filter(|p| agents.agents.iter().any(|(a, _)| a.pane == *p));
-                agents.selected = chosen.or_else(|| agents.agents.first().map(|(a, _)| a.pane));
+                // The first, if none is chosen (or the chosen one is gone);
+                // the panel's is the focused pane's, agent or not.
+                if which == Shown::View {
+                    let chosen =
+                        agents.selected.filter(|p| agents.agents.iter().any(|(a, _)| a.pane == *p));
+                    agents.selected = chosen.or_else(|| agents.agents.first().map(|(a, _)| a.pane));
+                }
                 // (Only the thread of the agent still chosen.)
                 if let Some((pane, entries, asks)) =
                     thread.filter(|(p, _, _)| agents.selected == Some(*p))
@@ -160,16 +194,18 @@ impl WindowView {
                         agents.scroll.scroll_to_bottom();
                     }
                 }
+                if which == Shown::Panel {
+                    this.panel_refreshed();
+                }
                 cx.notify();
             });
             // A new choice gets its thread at once.
             let _ = this.update(cx, |this, cx| {
                 if this
-                    .agents
-                    .as_ref()
+                    .agents_in(which)
                     .is_some_and(|a| a.thread_of.is_none() && a.selected.is_some())
                 {
-                    this.refresh_agents(cx);
+                    this.refresh_in(which, cx);
                 }
             });
         })
@@ -182,7 +218,7 @@ impl WindowView {
             agents.selected = Some(pane);
             agents.thread.clear();
             agents.thread_of = None;
-            self.refresh_agents(cx);
+            self.refresh_in(Shown::View, cx);
         }
         cx.notify();
     }
@@ -196,7 +232,7 @@ impl WindowView {
         }
         let Some(agents) = self.agents.as_ref() else { return false };
         let writing =
-            agents.selected.and_then(|p| agents.drafts.get(&p)).is_some_and(|d| !d.text.is_empty());
+            agents.selected.and_then(|p| self.drafts.get(&p)).is_some_and(|d| !d.text.is_empty());
         let panes: Vec<PaneId> = agents.agents.iter().map(|(a, _)| a.pane).collect();
         let at = agents.selected.and_then(|p| panes.iter().position(|&q| q == p));
         match event.keystroke.key.as_str() {
@@ -223,7 +259,7 @@ impl WindowView {
     }
 
     /// Leave Agents and show the agent's terminal, wherever it is.
-    fn show_agent_terminal(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+    pub(super) fn show_agent_terminal(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         self.agents = None;
         self.open_queue_pane(pane, cx);
         cx.notify();
@@ -261,7 +297,7 @@ impl WindowView {
             .flex()
             .min_h_0()
             .child(self.agent_list(agents, several, cx))
-            .child(self.agent_thread(agents, selected.map(|(a, _)| a), cx))
+            .child(self.agent_thread(agents, selected.map(|(a, _)| a), Shown::View, cx))
             .children(
                 selected.map(|(agent, server)| self.agent_details(agent, server, several, cx)),
             )
@@ -363,10 +399,12 @@ impl WindowView {
             .children(rows)
     }
 
-    fn agent_thread(
+    /// An agent's thread, with its header and the box to write to it in.
+    pub(super) fn agent_thread(
         &self,
         agents: &Agents,
         agent: Option<&AgentInfo>,
+        which: Shown,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let Some(agent) = agent else { return div().flex_1() };
@@ -528,27 +566,38 @@ impl WindowView {
                     .border_color(ui(0xffffff12))
                     .child(
                         div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
                             .text_size(px(14.))
                             .text_color(ui(0xffffffee))
                             .child(format!("{} · {}", agent.title, agent.agent)),
                     )
-                    .child(div().text_size(px(12.)).text_color(ui(color)).child(label))
+                    .child(div().flex_none().text_size(px(12.)).text_color(ui(color)).child(label))
                     .child(div().flex_1())
-                    .child(
-                        Self::small_button(
-                            format!("agent-terminal-{pane}"),
-                            "Open terminal  ↩",
-                            0xffffffd0,
-                            0xffffff14,
+                    .when(which == Shown::View, |d| {
+                        d.child(
+                            Self::small_button(
+                                format!("agent-terminal-{pane}"),
+                                "Open terminal  ↩",
+                                0xffffffd0,
+                                0xffffff14,
+                            )
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    this.show_agent_terminal(pane, cx)
+                                }),
+                            ),
                         )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.show_agent_terminal(pane, cx)),
-                        ),
-                    ),
+                    }),
             )
             .child(
                 div()
-                    .id("agent-thread")
+                    .id(match which {
+                        Shown::View => "agent-thread",
+                        Shown::Panel => "panel-thread",
+                    })
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -570,7 +619,7 @@ impl WindowView {
                             .child(self.queued_asks(&agents.asks)),
                     ),
             )
-            .child(self.compose_box(&agent.title, cx))
+            .child(self.compose_box(&agent.title, which, cx))
     }
 
     fn agent_details(

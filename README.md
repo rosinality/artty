@@ -66,6 +66,7 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘⇧O | Open a workspace: a hidden one, or one in another window |
 | ⇧⌘A | Activity: every pane's processes, CPU and memory |
 | ⇧⌘K | Agents: every agent on every server, and the chosen one's thread (↑↓ choose, Enter shows its terminal) |
+| ⇧⌘J | The focused pane's agent's thread beside its terminal, the keyboard in its box (Esc: back to the terminal; again: close) |
 | ⇧⌘E | Files: the focused pane's folder, on its machine |
 | ⌘⇧F | Search everything: what every pane on every server printed (history too), and Claude Code's and Codex's conversations on those machines (✳ Claude Code, ◇ Codex; matches highlighted); a line goes to its pane, selected, a conversation carries on in a new tab |
 | ⌘P / ⌘⇧P | Go to any pane on any server (fuzzy: title, workspace, folder, program, agent) / run any command (`>` in ⌘P) |
@@ -330,6 +331,14 @@ a new line, Esc clears. Begin with `@tab` — the agent's tab title, spaces
 left out — to send it to another agent instead, or several (`@api @web
 …`); typing `@` lists them, and ⇥ completes. ↑↓ choose an agent while
 nothing's written.
+
+To keep an agent's terminal in sight, open its thread beside it instead
+(⇧⌘J, or View → Agent Thread): the same thread and box at the window's
+right, for whichever pane has the focus (the terminal narrows to fit). The
+keyboard goes to the box; Esc (or a click in the terminal) gives it back to
+the terminal, ⇧⌘J or a click in the box takes it again, and ⇧⌘J from the box
+closes the panel. Drafts are the same as in the Agents view's. It shares the
+window's right edge with the files drawer: opening one closes the other.
 
 ```sh
 artty agents                          # pane, agent, state, workspace · tab

@@ -1,4 +1,5 @@
-//! Writing to agents from the Agents view: a draft per agent, sent as an
+//! Writing to agents from the Agents view or the thread panel: a draft per
+//! agent (the same in both), sent as an
 //! `artty ask` (given to the agent once it's between turns). Leading
 //! @mentions send it to other agents instead, by their tab's title.
 //!
@@ -130,15 +131,29 @@ pub(super) fn targets(
 pub(super) type Drafts = HashMap<PaneId, Draft>;
 
 impl WindowView {
+    /// Where what's typed goes: the Agents view while shown, else the
+    /// thread panel while it's being written in.
+    pub(super) fn composing(&self) -> Option<Shown> {
+        if self.showing_agents() {
+            Some(Shown::View)
+        } else if self.panel_typing() {
+            Some(Shown::Panel)
+        } else {
+            None
+        }
+    }
+
     fn draft_mut(&mut self) -> Option<&mut Draft> {
-        let agents = self.agents.as_mut()?;
-        let pane = agents.selected?;
-        Some(agents.drafts.entry(pane).or_default())
+        let pane = self.agents_in(self.composing()?)?.selected?;
+        Some(self.drafts.entry(pane).or_default())
+    }
+
+    fn draft_in(&self, which: Shown) -> Option<&Draft> {
+        self.drafts.get(&self.agents_in(which)?.selected?)
     }
 
     fn draft(&self) -> Option<&Draft> {
-        let agents = self.agents.as_ref()?;
-        agents.drafts.get(&agents.selected?)
+        self.draft_in(self.composing()?)
     }
 
     /// Text typed (or pasted, or from an input method) into the draft.
@@ -173,7 +188,9 @@ impl WindowView {
             "right" => draft.right(),
             "escape" if !empty => *draft = Draft::default(),
             "tab" => {
-                let Some(first) = self.mention_matches().into_iter().next() else { return false };
+                let first =
+                    self.composing().and_then(|w| self.mention_matches(w).into_iter().next());
+                let Some(first) = first else { return false };
                 if let Some(draft) = self.draft_mut() {
                     draft.complete(&first);
                 }
@@ -185,9 +202,9 @@ impl WindowView {
     }
 
     /// Agents whose handle starts with the @word being typed.
-    fn mention_matches(&self) -> Vec<String> {
+    fn mention_matches(&self, which: Shown) -> Vec<String> {
         let (Some(agents), Some(partial)) =
-            (self.agents.as_ref(), self.draft().and_then(Draft::mention))
+            (self.agents_in(which), self.draft_in(which).and_then(Draft::mention))
         else {
             return Vec::new();
         };
@@ -204,7 +221,7 @@ impl WindowView {
 
     /// Send the draft: an ask to each agent it's for.
     fn send_draft(&mut self, cx: &mut Context<Self>) {
-        let Some(agents) = self.agents.as_ref() else { return };
+        let Some(agents) = self.composing().and_then(|w| self.agents_in(w)) else { return };
         let Some(draft) = self.draft() else { return };
         let list: Vec<(PaneId, String)> =
             agents.agents.iter().map(|(a, _)| (a.pane, a.title.clone())).collect();
@@ -272,14 +289,23 @@ impl WindowView {
     }
 
     /// The box to write in, with what @ would complete, and its keys.
-    pub(super) fn compose_box(&self, title: &str, cx: &mut Context<Self>) -> gpui::Div {
-        let draft = self.draft().cloned().unwrap_or_default();
-        let marked = self.marked_text.clone().unwrap_or_default();
+    /// In the panel, it has the keyboard once clicked (till Esc, or a
+    /// click in the terminal).
+    pub(super) fn compose_box(
+        &self,
+        title: &str,
+        which: Shown,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let active = self.composing() == Some(which);
+        let draft = self.draft_in(which).cloned().unwrap_or_default();
+        let marked = self.marked_text.clone().filter(|_| active).unwrap_or_default();
         let (before, after) = draft.text.split_at(draft.cursor);
         let empty = draft.text.is_empty() && marked.is_empty();
         let focus = self.focus.clone();
         let entity = cx.entity();
-        let matches = self.mention_matches();
+        let matches = if active { self.mention_matches(which) } else { Vec::new() };
+        let cursor = if active { "▏" } else { "" };
         div()
             .flex()
             .flex_col()
@@ -309,6 +335,10 @@ impl WindowView {
             })
             .child(
                 div()
+                    .id(match which {
+                        Shown::View => "compose-view",
+                        Shown::Panel => "compose-panel",
+                    })
                     .relative()
                     .min_h(px(36.))
                     .px(px(10.))
@@ -316,33 +346,53 @@ impl WindowView {
                     .rounded(px(8.))
                     .bg(ui(0xffffff0c))
                     .border_1()
-                    .border_color(ui(0xffffff22))
+                    .border_color(if active || which == Shown::View {
+                        ui(0xffffff22)
+                    } else {
+                        ui(0xffffff12)
+                    })
+                    .when(active && which == Shown::Panel, |d| d.border_color(ui(0x7aa2f7aa)))
                     .text_size(px(13.))
                     .text_color(ui(0xffffffe8))
-                    // The input handler: typing and input methods come here.
-                    .child(
-                        canvas(
-                            |_, _, _| {},
-                            move |bounds, _, window, cx| {
-                                window.handle_input(&focus, ElementInputHandler::new(bounds, entity), cx);
-                            },
+                    .when(which == Shown::Panel, |d| {
+                        d.cursor_text().on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _, window, cx| {
+                                this.start_panel_typing(window, cx);
+                                cx.stop_propagation();
+                            }),
                         )
-                        .absolute()
-                        .size_full(),
-                    )
+                    })
+                    // The input handler: typing and input methods come here
+                    // (only while it has the keyboard: else the terminal's).
+                    .when(active, |d| {
+                        d.child(
+                            canvas(
+                                |_, _, _| {},
+                                move |bounds, _, window, cx| {
+                                    window.handle_input(
+                                        &focus,
+                                        ElementInputHandler::new(bounds, entity),
+                                        cx,
+                                    );
+                                },
+                            )
+                            .absolute()
+                            .size_full(),
+                        )
+                    })
                     .child(if empty {
-                        div().text_color(ui(0xffffff50)).child(format!("▏Message {title}…"))
+                        div().text_color(ui(0xffffff50)).child(format!("{cursor}Message {title}…"))
                     } else {
                         // The cursor as a bar; what an input method composes, before it.
-                        div().child(format!("{before}{marked}▏{after}"))
+                        div().child(format!("{before}{marked}{cursor}{after}"))
                     }),
             )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(ui(0xffffff50))
-                    .child("⏎ send · ⇧⏎ new line · @tab sends to another agent · esc clears"),
-            )
+            .child(div().text_size(px(11.)).text_color(ui(0xffffff50)).child(match which {
+                Shown::View => "⏎ send · ⇧⏎ new line · @tab sends to another agent · esc clears",
+                Shown::Panel if active => "⏎ send · ⇧⏎ new line · @tab · esc back to the terminal",
+                Shown::Panel => "click to write · ⏎ send",
+            }))
     }
 }
 

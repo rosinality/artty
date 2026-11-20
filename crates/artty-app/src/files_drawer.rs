@@ -42,6 +42,8 @@ impl WindowView {
             return cx.notify();
         }
         let Some(pane) = self.focused_id() else { return };
+        // One panel at the right edge at a time.
+        self.thread_panel = None;
         self.files = Some(Files {
             pane,
             path: None,

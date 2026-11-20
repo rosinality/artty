@@ -52,6 +52,10 @@ mod pane_actions;
 mod queue_view;
 #[path = "search_view.rs"]
 mod search_view;
+#[path = "thread_panel.rs"]
+mod thread_panel;
+
+use agents_view::Shown;
 
 actions!(
     artty,
@@ -68,6 +72,7 @@ actions!(
         OpenWorkspace,
         ShowActivity,
         ShowAgents,
+        ToggleThread,
         NextWorkspace,
         PreviousWorkspace,
         SplitRight,
@@ -422,6 +427,10 @@ pub struct WindowView {
     activity: Option<activity::Activity>,
     /// The Agents view, while shown (instead of the terminal).
     agents: Option<agents_view::Agents>,
+    /// The thread panel beside the terminal (⌘⇧J), when open.
+    thread_panel: Option<thread_panel::ThreadPanel>,
+    /// What's being written to each agent (in Agents or the panel).
+    drafts: compose::Drafts,
     /// The pane in copy mode, if any.
     copy_mode: Option<PaneId>,
     /// A short message over the terminal, and when it appeared.
@@ -573,6 +582,8 @@ impl WindowView {
             picker: None,
             activity: None,
             agents: None,
+            thread_panel: None,
+            drafts: Default::default(),
             copy_mode: None,
             toast: None,
             queue_all: false,
@@ -1585,9 +1596,7 @@ impl WindowView {
         if self.showing_activity() {
             self.refresh_activity(cx);
         }
-        if self.showing_agents() {
-            self.refresh_agents(cx);
-        }
+        self.refresh_agents(cx);
         if self.toast.as_ref().is_some_and(|(_, shown)| shown.elapsed() >= pane_actions::TOAST_TIME)
         {
             self.toast = None;
@@ -1727,6 +1736,13 @@ impl WindowView {
             }
             return;
         }
+        if self.panel_typing() {
+            // Nothing typed here goes to the terminal.
+            if self.panel_key(event, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
         if self.in_copy_mode(cx) {
             if self.copy_mode_key(event, cx) {
                 cx.stop_propagation();
@@ -1834,6 +1850,8 @@ impl WindowView {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window);
+        // The keyboard back from the thread panel.
+        self.stop_panel_typing(cx);
         if self.renaming.is_some() {
             self.finish_rename(true, cx);
         }
@@ -2088,7 +2106,7 @@ impl WindowView {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
-        if self.showing_agents() {
+        if self.composing().is_some() {
             return self.compose_text(&text, cx);
         }
         if let Some(search) = self.search.as_mut() {
@@ -3969,6 +3987,16 @@ impl Render for WindowView {
             self.apply_config(window);
         }
         self.area = Self::area_rect(window, self.sidebar_width());
+        // The terminal narrows for the thread panel (also while Agents or
+        // Activity is over it: its programs aren't resized back and forth).
+        let full = self.area.width;
+        self.area.width = self.beside_panel(full);
+        // The terminal's container ends where the panel begins: what's
+        // placed by its right edge (find, toasts) stays in sight.
+        let panel_cut = full - self.area.width;
+        if self.panel_shown() {
+            self.follow_focus(cx);
+        }
         self.window_active = window.is_window_active();
         if self.scale_factor != window.scale_factor() {
             // Another display: tell programs the new pixel sizes.
@@ -4028,7 +4056,8 @@ impl Render for WindowView {
             && self.search.is_none()
             && self.renaming.is_none()
             && self.picker.is_none()
-            && !self.showing_view();
+            && !self.showing_view()
+            && !self.panel_typing();
         self.blink_enabled =
             typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
@@ -4049,9 +4078,12 @@ impl Render for WindowView {
         let marked_text = self
             .marked_text
             .clone()
-            .filter(|_| self.search.is_none() && self.renaming.is_none() && self.picker.is_none());
+            .filter(|_| self.search.is_none() && self.renaming.is_none() && self.picker.is_none())
+            .filter(|_| !self.panel_typing());
         let cursor_visible = self.cursor_visible;
-        let focused_rect = focused_id.and_then(|id| self.rect_of(id));
+        // (The thread panel's box takes typing while it has the keyboard.)
+        let focused_rect =
+            focused_id.and_then(|id| self.rect_of(id)).filter(|_| !self.panel_typing());
         let divider_lines: Vec<Bounds<Pixels>> = self
             .dividers
             .iter()
@@ -4081,6 +4113,9 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
             .on_action(cx.listener(|this, _: &ShowAgents, _, cx| this.toggle_agents(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleThread, window, cx| this.thread_key(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_files(cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(
@@ -4288,6 +4323,7 @@ impl Render for WindowView {
                                 .relative()
                                 .flex_1()
                                 .min_h_0()
+                                .mr(px(panel_cut))
                                 .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
                                 .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
                                 .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
@@ -4372,6 +4408,7 @@ impl Render for WindowView {
             )
             // The files drawer: a side panel over the window's right edge.
             .children(self.files_drawer(cx))
+            .children(self.thread_panel_view(cx))
             .children(self.context_menu_overlay(window.viewport_size(), cx))
             .children(self.picker_overlay(cx))
             .children(self.palette_overlay(cx))
@@ -4435,7 +4472,7 @@ impl EntityInputHandler for WindowView {
             self.ask_text(text, cx);
             return;
         }
-        if self.showing_agents() {
+        if self.composing().is_some() {
             self.compose_text(text, cx);
             return;
         }
@@ -4491,7 +4528,7 @@ impl EntityInputHandler for WindowView {
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         // Writing to an agent: the input method's window by the box.
-        if self.showing_agents() {
+        if self.composing().is_some() {
             return Some(element_bounds);
         }
         let cursor = self.cursor?;
@@ -4516,6 +4553,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
         KeyBinding::new("cmd-shift-a", ShowActivity, None),
         KeyBinding::new("cmd-shift-k", ShowAgents, None),
+        KeyBinding::new("cmd-shift-j", ToggleThread, None),
         KeyBinding::new("cmd-shift-e", ToggleFiles, None),
         KeyBinding::new("cmd-b", ToggleSidebar, None),
         KeyBinding::new("cmd-p", GoTo, None),
