@@ -151,6 +151,17 @@ fn a_restart_brings_threads_back_to_their_reopened_panes() {
             r#"Reply: "echo: after the restart""#,
         ]
     );
+    // Its replies not yet read are still in the queue, the reopened pane's.
+    let out = scratch.artty(&["queue", "--json"]);
+    let queue: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let replies: Vec<(String, String)> = queue
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == "Reply")
+        .map(|item| (item["pane"].to_string(), item["text"].as_str().unwrap().to_owned()))
+        .collect();
+    assert!(replies.contains(&(reopened.clone(), "echo: hello".to_owned())), "{queue}");
     // The other tab (the shell, reopened with the agent's old id) has none.
     let out = scratch.artty(&["list", "--json"]);
     let tabs: Value = serde_json::from_str(&stdout(&out)).unwrap();

@@ -408,113 +408,104 @@ impl WindowView {
         }
         let selected =
             agents.selected.and_then(|p| agents.agents.iter().find(|(a, _)| a.pane == p));
+        // The list is the sidebar's; with the sidebar folded away, here.
+        let list = self.sidebar_hidden.then(|| {
+            div()
+                .id("agent-list")
+                .w(px(232.))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap(px(1.))
+                .p(px(6.))
+                .text_size(px(12.5))
+                .border_r_1()
+                .border_color(ui(0xffffff12))
+                .overflow_y_scroll()
+                .child(self.agents_heading(cx))
+                .children(self.sidebar_agents(cx))
+        });
         div()
             .size_full()
             .flex()
             .min_h_0()
-            .child(self.agent_list(agents, several, cx))
+            .children(list)
             .child(self.agent_thread(agents, selected.map(|(a, _)| a), Shown::View, cx))
             .children(
                 selected.map(|(agent, server)| self.agent_details(agent, server, several, cx)),
             )
     }
 
-    fn agent_list(
-        &self,
-        agents: &Agents,
-        several: bool,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
-        let rows = agents.agents.iter().map(|(agent, server)| {
-            let pane = agent.pane;
-            let chosen = agents.selected == Some(pane);
-            let (label, color) = state_label(agent.state);
-            let place = if several {
-                format!("{server} · {}", agent.workspace)
-            } else {
-                agent.workspace.clone()
-            };
-            let mut badges = Vec::new();
-            if agent.pending > 0 {
-                badges.push(("permission", WAITING));
-            }
-            if agent.unread > 0 {
-                badges.push(("reply", DONE));
-            }
-            div()
-                .id(SharedString::from(format!("agent-{pane}")))
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .px(px(8.))
-                .py(px(5.))
-                .rounded(px(6.))
-                .when(chosen, |d| d.bg(ui(0xffffff1c)))
-                .hover(|d| d.bg(ui(0xffffff10)))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(div().size(px(6.)).flex_none().rounded_full().bg(ui(color)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .text_ellipsis()
-                                .text_color(ui(0xffffffe8))
-                                .child(format!("{} · {}", agent.title, agent.agent)),
-                        )
-                        .children(badges.into_iter().map(|(text, color)| {
-                            div()
-                                .flex_none()
-                                .px(px(5.))
-                                .rounded(px(6.))
-                                .text_size(px(10.))
-                                .bg(ui(color))
-                                .text_color(ui(0x1a1b26ff))
-                                .child(text)
-                        })),
-                )
-                .child(
-                    div()
-                        .pl(px(12.))
-                        .text_size(px(11.))
-                        .text_color(ui(0xffffff70))
-                        .overflow_hidden()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(match &agent.message {
-                            Some(message) if !message.is_empty() => format!("{label} · {message}"),
-                            _ => format!("{label} · {place}"),
-                        }),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.select_agent(pane, cx)))
-        });
+    /// AGENTS, over the sidebar's list of them (in place of its tabs).
+    pub(super) fn agents_heading(&self, _cx: &mut Context<Self>) -> gpui::Div {
+        let count = self.agents.as_ref().map_or(0, |a| a.agents.len());
         div()
-            .id("agent-list")
-            .w(px(260.))
-            .flex_none()
             .flex()
-            .flex_col()
-            .gap(px(2.))
-            .p(px(8.))
-            // As the sidebar's tabs.
-            .text_size(px(12.5))
-            .border_r_1()
-            .border_color(ui(0xffffff12))
-            .overflow_y_scroll()
-            .child(
+            .items_center()
+            .px_2()
+            .pb_1()
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(ui(0xffffff70))
+            .child(format!("AGENTS · {count}"))
+    }
+
+    /// The agents, as the sidebar lists tabs: its state's icon, its tab's
+    /// title, and what it has for you (else what it is) on the right.
+    pub(super) fn sidebar_agents(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        let Some(agents) = self.agents.as_ref() else { return Vec::new() };
+        let several =
+            agents.agents.iter().map(|(_, server)| server).collect::<HashSet<_>>().len() > 1;
+        agents
+            .agents
+            .iter()
+            .map(|(agent, server)| {
+                let pane = agent.pane;
+                let chosen = agents.selected == Some(pane);
+                let icon = match agent.state {
+                    AgentState::Working => "busy",
+                    AgentState::Waiting => "waiting",
+                    AgentState::Done => "done",
+                    AgentState::Idle => "",
+                };
+                let (end, color) = match (agent.pending, agent.unread) {
+                    (n, _) if n > 0 => ("permission".to_owned(), WAITING),
+                    (_, n) if n > 0 => ("reply".to_owned(), DONE),
+                    _ => (agent.agent.clone(), 0xffffff60),
+                };
+                let mut title = agent.title.clone();
+                if several {
+                    title = format!("{title} · {server}");
+                }
+                let text = if chosen { ui(0xffffffee) } else { ui(0xffffffb0) };
                 div()
-                    .px(px(8.))
-                    .pb(px(4.))
-                    .text_size(px(10.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(ui(0xffffff70))
-                    .child(format!("AGENTS · {}", agents.agents.len())),
-            )
-            .children(rows)
+                    .id(SharedString::from(format!("agent-{pane}")))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .h(px(32.))
+                    .pl(px(4.))
+                    .pr(px(8.))
+                    .rounded(px(7.))
+                    .when(chosen, |d| d.bg(ui(0xffffff1c)))
+                    .when(!chosen && agent.state == AgentState::Waiting, |d| d.bg(ui(0xe0af6814)))
+                    .hover(|d| d.bg(ui(0xffffff10)))
+                    .child(self.icon(icon))
+                    .child(
+                        Self::one_line(title)
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(text)
+                            .when(agent.state == AgentState::Waiting, |d| {
+                                d.font_weight(FontWeight::SEMIBOLD)
+                            }),
+                    )
+                    .child(div().flex_none().text_size(px(11.5)).text_color(ui(color)).child(end))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_agent(pane, cx)))
+                    .into_any_element()
+            })
+            .collect()
     }
 
     /// An agent's thread, with its header and the box to write to it in.

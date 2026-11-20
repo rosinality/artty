@@ -334,8 +334,9 @@ pub(crate) struct Server {
     /// When the socket was last marked as used ([`touch`]).
     last_touch: Option<Instant>,
     last_saved: Option<String>,
-    /// The asks as last kept on disk (see `keep`).
+    /// The asks, and the unread replies, as last kept on disk (see `keep`).
     last_kept: Option<String>,
+    last_kept_replies: Option<String>,
     /// Previous CPU samples (pid → time used, when), for CPU percentages.
     cpu_samples: HashMap<i32, (u64, Instant)>,
     /// Every pane's processes as of the last sample, with history.
@@ -624,6 +625,7 @@ impl Server {
             last_touch: None,
             last_saved: None,
             last_kept: None,
+            last_kept_replies: None,
             cpu_samples: HashMap::new(),
             usage: Vec::new(),
             history: HashMap::new(),
@@ -3335,7 +3337,6 @@ impl Server {
                     for release in self.approvals.hook(id, hook, now) {
                         self.release_approval(release);
                     }
-                    self.keep(now);
                     match (hook.turn(), hook.event.as_str()) {
                         (Some(true), _) => self.replies.prompted(id, hook.prompt.as_deref()),
                         (Some(false), "Stop" | "AfterAgent") => {
@@ -3345,6 +3346,7 @@ impl Server {
                         },
                         _ => {},
                     }
+                    self.keep(now);
                 }
                 match state {
                     AgentState::Waiting if !was_waiting => {
@@ -4118,6 +4120,12 @@ impl Server {
             self.threads.store().set_record("asks", &json);
             self.last_kept = Some(json);
         }
+        let replies = self.replies.saved(|pane| self.threads.key(pane));
+        let Ok(json) = serde_json::to_string(&replies) else { return };
+        if self.last_kept_replies.as_ref() != Some(&json) {
+            self.threads.store().set_record("replies", &json);
+            self.last_kept_replies = Some(json);
+        }
     }
 
     /// Threads' permission requests brought up to date (answered since).
@@ -4151,6 +4159,13 @@ impl Server {
             })
         };
         self.asks.restore(saved, now, back);
+        let replies: crate::queue::SavedReplies = self
+            .threads
+            .store()
+            .record("replies")
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        self.replies.restore(replies, |key| self.threads.pane_of(key));
         self.adopted.clear();
         self.threads.forget_others();
         self.keep(now);

@@ -317,15 +317,16 @@ The server keeps each agent's thread: what it was given (by
 `artty ask`, or typed in its terminal), what it said at the end of each
 turn, its permission requests and how they went, and its sessions starting,
 resuming, compacting and ending. The Agents view (⇧⌘K, or Agents in the
-sidebar) lists every agent on every connected server with what it's doing,
+sidebar) lists every agent on every connected server in the sidebar, in
+place of the tabs, with what it's doing and what it has for you,
 shows the chosen one's thread (a pending permission request is answered
 there too), and what's known about it, with its terminal, live (shrunk to
 fit; click it to go there). The terminal is sent though no window shows it,
 at the size its own tab gives it (servers from before this don't send it). Threads are kept on disk (an
 `agents.db` beside the saved tabs, readable by you only; the last 1000
 entries of each): a tab reopened after a restart takes its thread back. A
-thread goes when its pane is closed. Unread replies (the queue's) don't
-outlast a restart yet.
+thread goes when its pane is closed. Unread replies (the queue's) are kept
+too, and come back with their reopened tabs.
 
 Below the thread, write to the agent: ⏎ sends it as an `artty ask` (given
 to the agent once its turn ends; until then it shows as queued), ⇧⏎ starts

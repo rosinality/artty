@@ -3495,8 +3495,15 @@ impl WindowView {
                     })),
             )
             .when_some(self.needs_you(cx), |d, section| d.child(section))
-            .when(!app_state::several_servers(cx), |d| d.child(self.sidebar_heading(cx)))
-            .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(1.)).overflow_y_scroll().children(rows))
+            // With Agents shown, the sidebar lists the agents instead of tabs.
+            .when(self.showing_agents(), |d| d.child(self.agents_heading(cx)))
+            .when(!app_state::several_servers(cx) && !self.showing_agents(), |d| {
+                d.child(self.sidebar_heading(cx))
+            })
+            .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(1.)).overflow_y_scroll().children(match self.showing_agents() {
+                true => self.sidebar_agents(cx),
+                false => rows,
+            }))
             .when_some(self.status_row(cx), |d, row| d.child(row))
             .when_some(self.config_error.clone(), |d, error| {
                 d.child(

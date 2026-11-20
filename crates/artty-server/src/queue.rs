@@ -41,7 +41,7 @@ pub fn now_ms() -> u64 {
         .map_or(0, |since| since.as_millis() as u64)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Reply {
     pub id: u64,
     pub pane: PaneId,
@@ -62,7 +62,42 @@ pub struct Replies {
     prompts: HashMap<PaneId, String>,
 }
 
+/// The unread replies, and turns' prompts, as kept on disk: by their panes'
+/// threads' keys (a pane reopened after a restart has another id).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SavedReplies {
+    pub unread: Vec<(u64, Reply)>,
+    #[serde(default)]
+    pub prompts: Vec<(u64, String)>,
+}
+
 impl Replies {
+    /// What to keep on disk (`key`: a pane's thread's key).
+    pub fn saved(&self, mut key: impl FnMut(PaneId) -> u64) -> SavedReplies {
+        SavedReplies {
+            unread: self.unread.iter().map(|r| (key(r.pane), r.clone())).collect(),
+            prompts: self.prompts.iter().map(|(&p, prompt)| (key(p), prompt.clone())).collect(),
+        }
+    }
+
+    /// Take back what an earlier server kept (`pane_of`: where each thread
+    /// is now; a reply whose pane didn't come back is dropped).
+    pub fn restore(&mut self, saved: SavedReplies, pane_of: impl Fn(u64) -> Option<PaneId>) {
+        for (key, mut reply) in saved.unread {
+            seen_id(reply.id);
+            if let Some(pane) = pane_of(key) {
+                reply.pane = pane;
+                self.unread.push(reply);
+            }
+        }
+        self.unread.sort_by_key(|r| r.at_ms);
+        for (key, prompt) in saved.prompts {
+            if let Some(pane) = pane_of(key) {
+                self.prompts.insert(pane, prompt);
+            }
+        }
+    }
+
     pub fn new() -> Self {
         Replies { next: now_ms(), ..Replies::default() }
     }
@@ -141,6 +176,27 @@ mod tests {
         let id = replies.unread().next().unwrap().id;
         assert!(replies.dismiss(id));
         assert_eq!(replies.unread().count(), 0);
+    }
+
+    #[test]
+    fn kept_by_thread() {
+        let mut replies = Replies::new();
+        replies.prompted(1, Some("fix it"));
+        replies.replied(1, None, "Fixed.");
+        replies.prompted(2, Some("still going"));
+        replies.replied(3, None, "Gone with its pane.");
+        let saved = replies.saved(|pane| pane * 100);
+        let mut again = Replies::new();
+        // Pane 1 came back as 7; 3 didn't.
+        again.restore(saved, |key| match key {
+            100 => Some(7),
+            200 => Some(8),
+            _ => None,
+        });
+        let unread: Vec<_> = again.unread().map(|r| (r.pane, r.text.as_str())).collect();
+        assert_eq!(unread, [(7, "Fixed.")]);
+        again.replied(8, None, "Done.");
+        assert_eq!(again.unread().next().map(|r| r.prompt.as_str()), Some("still going"));
     }
 
     #[test]
