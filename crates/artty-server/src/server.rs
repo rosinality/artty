@@ -3324,13 +3324,7 @@ impl Server {
                 // it, its first report would be taken for an agent gone.
                 pane.process = pane.session.process();
                 pane.report(state, message.clone(), agent_session, agent);
-                // A conversation resumed: its title, till its agent titles the
-                // terminal (Claude Code's: once given a message).
-                if matches!(&pane.status, Status::Agent { name, .. } if name == "claude")
-                    && let Some(session) = pane.untitled_session().map(str::to_owned)
-                {
-                    pane.set_session_title(&session, crate::sessions::claude_title(&session));
-                }
+                Self::title_session(pane);
                 if let Some(hook) = &hook {
                     let now = Instant::now();
                     self.asks.hook(id, hook, now);
@@ -3719,7 +3713,23 @@ impl Server {
     }
 
     /// Once a second: processes, statuses, `artty run` timeouts, config.
+    /// A Claude Code conversation (resumed, or carried over from an earlier
+    /// build): its title, till its agent titles the terminal (Claude Code
+    /// does once given a message). Looked up once a conversation.
+    fn title_session(pane: &mut Pane) {
+        if matches!(&pane.status, Status::Agent { name, .. } if name == "claude")
+            && let Some(session) = pane.untitled_session().map(str::to_owned)
+        {
+            pane.set_session_title(&session, crate::sessions::claude_title(&session));
+        }
+    }
+
     fn poll(&mut self) {
+        // Conversations whose agent hasn't reported since (one running when
+        // this build took over): their titles too.
+        for pane in self.panes.values_mut() {
+            Self::title_session(pane);
+        }
         // Files drawers following a pane's directory: it moved.
         let panes = &self.panes;
         let moved = self.watches.moved(|pane| panes.get(&pane)?.session.cwd());

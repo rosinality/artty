@@ -315,6 +315,11 @@ impl Pane {
             Some(self.reported_agent.clone().unwrap_or(name))
         };
         let Some(agent) = self.agent_name().or_else(reporter) else {
+            // What runs isn't known yet (a pane just taken over from an
+            // earlier build, not yet looked at): nothing's exited.
+            if self.process.foreground.is_none() && self.reported.is_some() {
+                return;
+            }
             // The agent exited: forget what it reported.
             self.reported = None;
             self.agent_session = None;

@@ -58,3 +58,28 @@ fn a_resumed_conversation_by_its_title() {
     // Then the title Claude Code gives the terminal.
     wait_for("the terminal's title", || title(&scratch, &pane) == "✳ Login redirect fix, done");
 }
+
+/// A conversation running when the server's handed over to a new build:
+/// no hook reports again, its title comes back all the same.
+#[test]
+fn carried_over_a_hand_over() {
+    let scratch = Scratch::new();
+    let project = scratch.dir.join(".claude/projects/-src");
+    std::fs::create_dir_all(&project).unwrap();
+    let transcript = "{\"type\":\"ai-title\",\"aiTitle\":\"Docs plan\",\"sessionId\":\"sess-2\"}\n";
+    std::fs::write(project.join("sess-2.jsonl"), transcript).unwrap();
+    let script = "import sys,time\nsys.stdout.write('\\x1b]0;claude\\x07'); sys.stdout.flush()\ntime.sleep(60)\n";
+    let pane = stdout(&scratch.artty(&["new", "--background", "--", "python3", "-c", script]));
+    let event = r#"{"hook_event_name":"SessionStart","session_id":"sess-2","source":"resume"}"#;
+    let mut hook = scratch
+        .command(&["status", "idle", "--hook", "--agent", "claude", "--tab", &pane])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin.take().unwrap().write_all(event.as_bytes()).unwrap();
+    assert!(hook.wait().unwrap().success());
+    wait_for("its title", || title(&scratch, &pane) == "Docs plan");
+
+    scratch.hand_over();
+    wait_for("its title again", || title(&scratch, &pane) == "Docs plan");
+}
