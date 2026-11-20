@@ -133,3 +133,24 @@ fn abandoning_one_with_its_agent() {
     let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "next"]);
     assert_eq!(stdout(&out), "echo: next", "{}", stderr(&out));
 }
+
+#[test]
+fn replies_wait_in_the_queue_until_read() {
+    let scratch = Scratch::new();
+    let pane = scratch.agent("0.3");
+    let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "the build?"]);
+    assert_eq!(stdout(&out), "echo: the build?", "{}", stderr(&out));
+    let queue = |scratch: &Scratch| -> serde_json::Value {
+        serde_json::from_str(&stdout(&scratch.artty(&["queue", "--json"]))).unwrap()
+    };
+    let items = queue(&scratch);
+    let reply = items.as_array().unwrap().iter().find(|i| i["kind"] == "Reply").cloned();
+    let reply = reply.unwrap_or_else(|| panic!("no reply queued: {items}"));
+    assert_eq!(
+        (reply["text"].as_str(), reply["context"].as_str()),
+        (Some("echo: the build?"), Some("the build?"))
+    );
+    let id = reply["id"].to_string();
+    assert!(scratch.artty(&["queue", "--dismiss", &id]).status.success());
+    assert!(queue(&scratch).as_array().unwrap().iter().all(|i| i["kind"] != "Reply"));
+}

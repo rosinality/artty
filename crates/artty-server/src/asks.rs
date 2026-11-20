@@ -155,7 +155,7 @@ impl Asks {
     }
 
     pub fn add(&mut self, pane: PaneId, text: String, now: Instant) -> u64 {
-        self.next += 1;
+        self.next = crate::queue::next_id();
         let id = self.next;
         let ask = Ask {
             pane,

@@ -70,6 +70,11 @@ pub fn incoming(server: ServerId, message: &mut ServerMessage) {
             if let Some(mut extension) = ServerExtension::decode(kind, data) {
                 match &mut extension {
                     ServerExtension::Status(update) => tag(&mut update.window),
+                    ServerExtension::Queue(update) => {
+                        for item in &mut update.items {
+                            tag(&mut item.pane);
+                        }
+                    },
                 }
                 *message = extension.message();
             }

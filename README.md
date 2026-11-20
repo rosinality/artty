@@ -293,9 +293,28 @@ too: its `PermissionRequest` hook (`artty approve`) hands artty the
 request while Claude Code shows its prompt as usual, so either answers it.
 
 ```sh
-artty approvals                       # pending first: id, pane, state, command
+artty approvals                       # pending first: id, pane, state, command,
+                                      # and the agent's "always" options
 artty approval allow 1795129609022
+artty approval allow 1795129609022 --always 0   # with the agent's option 0
 artty approval deny 1795129609022 --message "Use the staging database"
+```
+
+"Always" offers only what the agent itself suggests with the request
+(Claude Code's `permission_suggestions`, such as allowing a folder for the
+session), passed back as it is: never more than its own prompt would.
+
+### The queue
+
+What needs you, from every agent on the server: permission requests,
+agents waiting for you otherwise, and replies you haven't read (each
+finished turn's last message, with the prompt it answers). A reply is read
+once you look at its pane, or when dismissed. Apps are sent it as it
+changes; the command shows it too:
+
+```sh
+artty queue                           # id, pane, kind, what it's about
+artty queue --dismiss 1795132310737   # mark a reply read
 ```
 
 An agent mustn't approve its own requests: these (and `artty send` into a

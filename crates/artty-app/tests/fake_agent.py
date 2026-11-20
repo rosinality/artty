@@ -86,12 +86,17 @@ def main():
 def permission(command):
     """Ask to run `command`: the reply, or None if turned down at the prompt."""
     tool_input = {"command": command}
+    rule = {"toolName": "Bash", "ruleContent": command}
     request = {
         "hook_event_name": "PermissionRequest",
         "session_id": "fake-session",
         "tool_name": "Bash",
         "tool_input": tool_input,
+        "permission_suggestions": [
+            {"type": "addRules", "rules": [rule], "behavior": "allow", "destination": "session"}
+        ],
     }
+    always = False
     approve = subprocess.Popen(
         [ARTTY, "approve", "--hook", "--agent", "fake"],
         stdin=subprocess.PIPE,
@@ -111,6 +116,7 @@ def permission(command):
             if decided:
                 decision = json.loads(decided)["hookSpecificOutput"]["decision"]
                 if decision["behavior"] == "allow":
+                    always = bool(decision.get("updatedPermissions"))
                     break
                 return "denied: " + decision.get("message", "")
             # No decision: the prompt decides.
@@ -125,7 +131,7 @@ def permission(command):
     used = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": tool_input}
     hook("working", used)
     approve.wait()  # released by artty once it sees the tool used
-    return "ran: " + command
+    return ("ran (always): " if always else "ran: ") + command
 
 
 def turn(prompt):

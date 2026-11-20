@@ -9,6 +9,7 @@ mod approvals;
 mod asks;
 mod handover;
 mod inbox;
+mod queue;
 mod server;
 mod sessions;
 mod status;

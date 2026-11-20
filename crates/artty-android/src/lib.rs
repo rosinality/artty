@@ -842,6 +842,8 @@ pub fn connect(
                         right: status_pieces(line.right),
                     },
                     Event::Stopping { .. } => continue,
+                    // Shown once the app has a queue screen.
+                    Event::Queue(_) => continue,
                 };
                 events.event(event);
             }

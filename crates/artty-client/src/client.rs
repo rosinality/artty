@@ -13,13 +13,14 @@ use std::time::{Duration, Instant};
 
 use artty_core::Frame;
 use artty_core::TerminalSize;
+use artty_core::control::{Request, Response};
 use artty_core::keys::Key;
 use artty_core::layout::{Axis, PaneId};
 use artty_core::mouse::{self, Action, Button, Wheel};
 use artty_core::protocol::{
     ClientMessage, CopyModeOp, FileChunk, Hello, ImageData, Listing, OutputHit, PaneSpec,
-    PaneState, Query, Reply, SearchFound, SelectionOp, ServerExtension, ServerMessage, SessionHit,
-    StatusLine, StatusUpdate, UploadError, UploadTo, Uploaded, WindowId, WindowLayout,
+    PaneState, Query, QueueUpdate, Reply, SearchFound, SelectionOp, ServerExtension, ServerMessage,
+    SessionHit, StatusLine, StatusUpdate, UploadError, UploadTo, Uploaded, WindowId, WindowLayout,
     WindowSummary, WorkspaceId, protocol_version, read_message, write_message,
 };
 use artty_core::vt::term::TermMode;
@@ -58,6 +59,8 @@ pub enum Event {
         window: WindowId,
         line: StatusLine,
     },
+    /// What needs the user from the server's agents changed: all of it.
+    Queue(QueueUpdate),
     Bell {
         pane: PaneId,
     },
@@ -116,6 +119,8 @@ pub struct Client {
     heard: Arc<Mutex<Instant>>,
     /// Queries waiting for their answers, by id.
     pending: Arc<Mutex<HashMap<u64, mpsc::Sender<Reply>>>>,
+    /// Control requests waiting for their answers, by id.
+    controls: Arc<Mutex<HashMap<u64, mpsc::Sender<Response>>>>,
     next_id: AtomicU64,
     _keep: Mutex<Box<dyn Send>>,
 }
@@ -204,10 +209,11 @@ impl Client {
         let images = Arc::new(Mutex::new(HashMap::<u64, Arc<ImageData>>::new()));
         let heard = Arc::new(Mutex::new(Instant::now()));
         let pending = Arc::new(Mutex::new(HashMap::<u64, mpsc::Sender<Reply>>::new()));
+        let controls = Arc::new(Mutex::new(HashMap::<u64, mpsc::Sender<Response>>::new()));
         let (events, received) = mpsc::channel();
         {
             let (writer, screens, heard) = (writer.clone(), screens.clone(), heard.clone());
-            let (pending, images) = (pending.clone(), images.clone());
+            let (pending, images, controls) = (pending.clone(), images.clone(), controls.clone());
             std::thread::Builder::new()
                 .name("artty-client-reader".into())
                 .spawn(move || {
@@ -245,6 +251,7 @@ impl Client {
                                         window,
                                         line,
                                     })) => Event::Status { window, line },
+                                    Some(ServerExtension::Queue(update)) => Event::Queue(update),
                                     None => continue,
                                 }
                             },
@@ -266,6 +273,16 @@ impl Client {
                                 }
                             },
                             ServerMessage::Stopping { restart } => Event::Stopping { restart },
+                            ServerMessage::Control { id, response } => {
+                                if let Some(waiting) = controls.lock().unwrap().remove(&id) {
+                                    let response =
+                                        serde_json::from_str(&response).unwrap_or_else(|err| {
+                                            Response::error(format!("bad answer: {err}"))
+                                        });
+                                    let _ = waiting.send(response);
+                                }
+                                continue;
+                            },
                             // Screens are in: more may come.
                             ServerMessage::Sync { seq } => {
                                 let gone = forget_unshown(&screens, &images);
@@ -319,6 +336,7 @@ impl Client {
             server_extensions,
             heard,
             pending,
+            controls,
             next_id: AtomicU64::new(1),
             _keep: Mutex::new(keep),
         };
@@ -347,6 +365,20 @@ impl Client {
     pub fn ping(&self) -> Result<(), String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.send(&ClientMessage::Ping { id })
+    }
+
+    /// A control request (what the `artty` command sends), answered as the
+    /// command's are; waits a while for the answer.
+    pub fn control(&self, request: &Request) -> Result<Response, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = mpsc::channel();
+        self.controls.lock().unwrap().insert(id, tx);
+        let request = serde_json::to_string(request).map_err(|err| err.to_string());
+        let sent = request.and_then(|request| self.send(&ClientMessage::Control { id, request }));
+        let wait = Duration::from_secs(10);
+        let answer = sent.and_then(|()| rx.recv_timeout(wait).map_err(|_| "no answer".to_owned()));
+        self.controls.lock().unwrap().remove(&id);
+        answer
     }
 
     /// Ask the server something, and wait (a while) for its answer.
@@ -819,7 +851,7 @@ mod tests {
         });
         let (client, events) = Client::start(Link::socket(ours).unwrap(), "test").unwrap();
         let (asked, _out) = server.join().unwrap();
-        assert_eq!(asked, ["status"]);
+        assert_eq!(asked, ["status", "queue"]);
         assert!(client.supports("later.thing") && !client.supports("other"));
         let wait = Duration::from_secs(5);
         assert!(matches!(events.recv_timeout(wait), Ok(Event::Status { window: 1, .. })));

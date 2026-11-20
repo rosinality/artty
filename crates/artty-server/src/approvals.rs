@@ -40,8 +40,12 @@ struct Approval {
     agent: Option<String>,
     tool_name: String,
     tool_input: serde_json::Value,
+    /// The permission updates the agent offers for "always".
+    suggestions: Vec<serde_json::Value>,
     state: ApprovalState,
     asked: Instant,
+    /// When, in milliseconds since the Unix epoch (for apps).
+    asked_ms: u64,
     finished: Option<Instant>,
 }
 
@@ -69,6 +73,7 @@ impl Approvals {
         Approvals { next: start, ..Approvals::default() }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn open(
         &mut self,
         pane: PaneId,
@@ -76,17 +81,20 @@ impl Approvals {
         agent: Option<String>,
         tool_name: String,
         tool_input: serde_json::Value,
+        suggestions: Vec<serde_json::Value>,
         now: Instant,
     ) -> u64 {
-        self.next += 1;
+        self.next = crate::queue::next_id();
         let approval = Approval {
             pane,
             conn,
             agent,
             tool_name,
             tool_input,
+            suggestions,
             state: ApprovalState::Pending,
             asked: now,
+            asked_ms: crate::queue::now_ms(),
             finished: None,
         };
         self.items.insert(self.next, approval);
@@ -94,11 +102,27 @@ impl Approvals {
         self.next
     }
 
-    /// Someone decided `id`.
-    pub fn decide(&mut self, id: u64, decision: Decision, now: Instant) -> Result<Release, String> {
+    /// Someone decided `id`; `always`: allowed, with one of its options.
+    pub fn decide(
+        &mut self,
+        id: u64,
+        mut decision: Decision,
+        always: Option<usize>,
+        now: Instant,
+    ) -> Result<Release, String> {
         let item = self.items.get_mut(&id).ok_or(format!("no permission request {id}"))?;
         if item.state != ApprovalState::Pending {
             return Err(format!("permission request {id} is already over ({})", name(item.state)));
+        }
+        if let Some(index) = always {
+            let chosen = item.suggestions.get(index).ok_or(format!(
+                "permission request {id} has {} \"always\" options; no option {index}",
+                item.suggestions.len()
+            ))?;
+            if !decision.allow {
+                return Err("\"always\" goes with allow".into());
+            }
+            decision.permissions = vec![chosen.clone()];
         }
         item.finish(
             if decision.allow { ApprovalState::Allowed } else { ApprovalState::Denied },
@@ -198,7 +222,17 @@ impl Approvals {
             tool_input: item.tool_input.clone(),
             state: item.state,
             age_secs: now.duration_since(item.asked).as_secs(),
+            options: item.suggestions.iter().map(option_label).collect(),
         })
+    }
+
+    /// The pending ones, oldest first, with when they were asked (for apps).
+    pub fn pending(&self, now: Instant) -> Vec<(ApprovalInfo, u64)> {
+        self.items
+            .iter()
+            .filter(|(_, a)| a.state == ApprovalState::Pending)
+            .filter_map(|(&id, a)| Some((self.info(id, now)?, a.asked_ms)))
+            .collect()
     }
 
     /// Pending ones first (oldest first), then those over (newest first).
@@ -236,6 +270,61 @@ pub fn name(state: ApprovalState) -> &'static str {
         ApprovalState::Ended => "ended",
         ApprovalState::Expired => "expired",
     }
+}
+
+/// An "always" option as people read it, from the permission update the
+/// agent offers (Claude Code's `permission_suggestions`).
+pub fn option_label(update: &serde_json::Value) -> String {
+    let text = |key: &str| update.get(key).and_then(serde_json::Value::as_str);
+    let scope = match text("destination") {
+        Some("session") => " for this session",
+        Some("localSettings") => " in this project (just you)",
+        Some("projectSettings") => " in this project",
+        Some("userSettings") => " everywhere",
+        _ => "",
+    };
+    let what = match text("type") {
+        Some("addRules") => {
+            let rules: Vec<String> = update
+                .get("rules")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|rule| {
+                    let tool = rule.get("toolName").and_then(|t| t.as_str()).unwrap_or("?");
+                    match rule.get("ruleContent").and_then(|c| c.as_str()) {
+                        Some(content) => format!("{tool}({content})"),
+                        None => tool.to_owned(),
+                    }
+                })
+                .collect();
+            format!("Always allow {}", rules.join(", "))
+        },
+        Some("addDirectories") => {
+            let dirs: Vec<&str> = update
+                .get("directories")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            format!("Always allow access to {}", dirs.join(", "))
+        },
+        Some("setMode") => {
+            let mode = match text("mode") {
+                Some("acceptEdits") => "accept-edits",
+                Some("bypassPermissions") => "bypass-permissions",
+                Some("plan") => "plan",
+                Some("default") => "default",
+                Some(other) => other,
+                None => "another",
+            };
+            format!("Switch to {mode} mode")
+        },
+        Some(other) => format!("Apply {other}"),
+        None => "Apply the agent's suggestion".to_owned(),
+    };
+    format!("{what}{scope}")
 }
 
 /// What a tool call would do, in a line.
@@ -286,20 +375,31 @@ mod tests {
 
     fn open(approvals: &mut Approvals, conn: Conn, command: &str) -> u64 {
         let input = json!({ "command": command });
-        approvals.open(PANE, conn, Some("claude".into()), "Bash".into(), input, Instant::now())
+        let suggestions = vec![
+            json!({"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "cargo test:*"}], "behavior": "allow", "destination": "localSettings"}),
+        ];
+        approvals.open(
+            PANE,
+            conn,
+            Some("claude".into()),
+            "Bash".into(),
+            input,
+            suggestions,
+            Instant::now(),
+        )
     }
 
     #[test]
     fn decided_here() {
         let mut approvals = Approvals::new();
         let id = open(&mut approvals, 7, "touch x");
-        let deny = Decision { allow: false, message: Some("no".into()) };
-        let release = approvals.decide(id, deny.clone(), Instant::now()).unwrap();
+        let deny = Decision { message: Some("no".into()), ..Decision::default() };
+        let release = approvals.decide(id, deny.clone(), None, Instant::now()).unwrap();
         assert_eq!(release, Release { id, conn: 7, decision: Some(deny) });
         assert_eq!(state(&approvals, id), ApprovalState::Denied);
         // Once only.
-        let allow = Decision { allow: true, message: None };
-        assert!(approvals.decide(id, allow, Instant::now()).is_err());
+        let allow = Decision { allow: true, ..Decision::default() };
+        assert!(approvals.decide(id, allow, None, Instant::now()).is_err());
         // Its hook ending afterwards changes nothing.
         assert_eq!(approvals.hangup(7, Instant::now()), None);
     }
@@ -349,7 +449,7 @@ mod tests {
         let id = open(&mut approvals, 4, "sleep 20");
         let now = Instant::now();
         // Allowed at the prompt (no event yet), then denied here.
-        approvals.decide(id, Decision { allow: false, message: None }, now).unwrap();
+        approvals.decide(id, Decision::default(), None, now).unwrap();
         assert!(
             approvals.hook(PANE, &used("Bash", json!({"command": "sleep 20"})), now).is_empty()
         );
@@ -365,6 +465,29 @@ mod tests {
         let releases = approvals.expire(now + WAIT);
         assert_eq!(releases, vec![Release { id, conn: 4, decision: None }]);
         assert_eq!(state(&approvals, id), ApprovalState::Expired);
+    }
+
+    #[test]
+    fn always_with_the_agents_own_option() {
+        let mut approvals = Approvals::new();
+        let id = open(&mut approvals, 4, "cargo test");
+        let now = Instant::now();
+        let info = approvals.info(id, now).unwrap();
+        assert_eq!(info.options, ["Always allow Bash(cargo test:*) in this project (just you)"]);
+        let allow = Decision { allow: true, ..Decision::default() };
+        assert!(approvals.decide(id, allow.clone(), Some(1), now).is_err());
+        assert!(approvals.decide(id, Decision::default(), Some(0), now).is_err());
+        let release = approvals.decide(id, allow, Some(0), now).unwrap();
+        let permissions = release.decision.unwrap().permissions;
+        assert_eq!(permissions[0]["rules"][0]["ruleContent"], "cargo test:*");
+    }
+
+    #[test]
+    fn option_labels() {
+        let dirs = json!({"type": "addDirectories", "directories": ["/src/app"], "destination": "session"});
+        assert_eq!(option_label(&dirs), "Always allow access to /src/app for this session");
+        let mode = json!({"type": "setMode", "mode": "acceptEdits", "destination": "session"});
+        assert_eq!(option_label(&mode), "Switch to accept-edits mode for this session");
     }
 
     #[test]

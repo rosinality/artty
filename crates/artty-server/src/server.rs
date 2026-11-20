@@ -15,9 +15,10 @@ use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
 use artty_core::protocol::{
     AppCommand, ClientMessage, DirEntry, Existing, FileChunk, Listing, OutputHit, PaneSpec,
-    PaneState, Query, Reply, SelectionOp, ServerExtension, ServerMessage, StatusLine, StatusUpdate,
-    TabLayout, UploadError, UploadTo, Uploaded, WORKSPACE_COLORS, WindowId, WindowLayout,
-    WindowSummary, WorkspaceId, WorkspaceLayout, extension,
+    PaneState, Query, QueueItem, QueueKind, QueueUpdate, Reply, SelectionOp, ServerExtension,
+    ServerMessage, StatusLine, StatusUpdate, TabLayout, UploadError, UploadTo, Uploaded,
+    WORKSPACE_COLORS, WindowId, WindowLayout, WindowSummary, WorkspaceId, WorkspaceLayout,
+    extension,
 };
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
@@ -194,6 +195,8 @@ struct Client {
     /// Its process at the other end of the socket (for `artty attach`, or
     /// `artty server --stdio` relaying a remote app), if the system says.
     pid: Option<i32>,
+    /// The queue as last sent (apps taking the `queue` extension).
+    queue_sent: Option<QueueUpdate>,
     /// Last screen sent per visible pane, for sending only changes.
     sent: HashMap<PaneId, (Frame, Instant)>,
     dirty: HashSet<PaneId>,
@@ -273,6 +276,10 @@ pub(crate) struct Server {
     /// Agents' permission requests, and their hooks waiting for answers.
     approvals: crate::approvals::Approvals,
     approval_waiters: HashMap<crate::approvals::Conn, Waiter>,
+    /// Agents' replies not yet read, for the queue.
+    replies: crate::queue::Replies,
+    /// Since when each pane's agent has waited (Unix ms), for the queue.
+    waiting_since: HashMap<PaneId, u64>,
     next_pane: PaneId,
     next_window: WindowId,
     next_workspace: WorkspaceId,
@@ -552,6 +559,8 @@ impl Server {
             ask_waiters: Vec::new(),
             approvals: crate::approvals::Approvals::new(),
             approval_waiters: HashMap::new(),
+            replies: crate::queue::Replies::new(),
+            waiting_since: HashMap::new(),
             next_pane: 1,
             next_window: 1,
             sizes: HashMap::new(),
@@ -1412,6 +1421,7 @@ impl Server {
             Self::answer(&self.clients, run.waiter, Response::error(message));
         }
         self.asks.fail_pane(pane, message, Instant::now());
+        self.replies.pane_closed(pane);
         for release in self.approvals.pane_closed(pane, Instant::now()) {
             self.release_approval(release);
         }
@@ -1509,6 +1519,7 @@ impl Server {
                     Client {
                         tx,
                         pid,
+                        queue_sent: None,
                         sent: HashMap::new(),
                         dirty: HashSet::new(),
                         panes_sent: Vec::new(),
@@ -2113,20 +2124,21 @@ impl Server {
     fn control(&mut self, request: Request, waiter: Waiter, peer: Option<Peer>) {
         let deadline = |secs: Option<u64>| secs.map(|s| Instant::now() + Duration::from_secs(s));
         match request {
-            Request::Approve { tab, agent, tool_name, tool_input } => {
+            Request::Approve { tab, agent, tool_name, tool_input, suggestions } => {
                 let Some(peer) = peer.filter(|_| matches!(waiter, Waiter::Command(_))) else {
                     let error = Response::error("permission requests come from agents' hooks");
                     return Self::answer(&self.clients, waiter, error);
                 };
-                match self.open_approval(tab, peer, agent, tool_name, tool_input) {
+                match self.open_approval(tab, peer, agent, tool_name, tool_input, suggestions) {
                     Ok(()) => {
                         self.approval_waiters.insert(peer.conn, waiter);
                     },
                     Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
                 }
             },
-            Request::Decide { id, allow, message } => {
-                let response = self.decide(id, Decision { allow, message }, peer);
+            Request::Decide { id, allow, message, always } => {
+                let decision = Decision { allow, message, permissions: Vec::new() };
+                let response = self.decide(id, decision, always, peer);
                 Self::answer(&self.clients, waiter, response.unwrap_or_else(Response::error));
             },
             // Not keys from a program in a pane (an agent answering its own
@@ -2202,11 +2214,20 @@ impl Server {
         agent: Option<String>,
         tool_name: String,
         tool_input: serde_json::Value,
+        suggestions: Vec<serde_json::Value>,
     ) -> Result<(), String> {
         let pane_id = tab.ok_or("which pane? (permission requests come from agents in artty)")?;
         let pane = self.panes.get_mut(&pane_id).ok_or(format!("no pane {pane_id}"))?;
         let now = Instant::now();
-        let id = self.approvals.open(pane_id, peer.conn, agent.clone(), tool_name, tool_input, now);
+        let id = self.approvals.open(
+            pane_id,
+            peer.conn,
+            agent.clone(),
+            tool_name,
+            tool_input,
+            suggestions,
+            now,
+        );
         let info = self.approvals.info(id, now).expect("just opened");
         let message = format!("Allow {}?", info.summary);
         pane.process = pane.session.process();
@@ -2221,6 +2242,7 @@ impl Server {
         &mut self,
         id: u64,
         decision: Decision,
+        always: Option<usize>,
         peer: Option<Peer>,
     ) -> Result<Response, String> {
         if self.in_a_pane(peer) {
@@ -2229,7 +2251,7 @@ impl Server {
                         terminal outside artty"
                 .into());
         }
-        let release = self.approvals.decide(id, decision, Instant::now())?;
+        let release = self.approvals.decide(id, decision, always, Instant::now())?;
         self.release_approval(release);
         Ok(Response::Approvals {
             approvals: self.approvals.info(id, Instant::now()).into_iter().collect(),
@@ -2734,6 +2756,13 @@ impl Server {
             | Request::AskResult { .. }
             | Request::Approve { .. }
             | Request::Decide { .. } => unreachable!("handled before"),
+            Request::Queue => Response::Queue { items: self.queue_items() },
+            Request::QueueDismiss { id } => {
+                if !self.replies.dismiss(id) {
+                    return Err(format!("no unread reply {id}"));
+                }
+                Response::Ok
+            },
             Request::Approvals { tab } => {
                 Response::Approvals { approvals: self.approvals.list(tab, Instant::now()) }
             },
@@ -2766,6 +2795,7 @@ impl Server {
                 Response::Ok
             },
             Request::Status { tab, state, message, agent_session, agent, hook } => {
+                let reporter = agent.clone();
                 let id = self.resolve(tab)?;
                 let pane = self.panes.get_mut(&id).ok_or("the pane closed")?;
                 let was_waiting =
@@ -2780,6 +2810,15 @@ impl Server {
                     self.asks.hook(id, hook, now);
                     for release in self.approvals.hook(id, hook, now) {
                         self.release_approval(release);
+                    }
+                    match (hook.turn(), hook.event.as_str()) {
+                        (Some(true), _) => self.replies.prompted(id, hook.prompt.as_deref()),
+                        (Some(false), "Stop" | "AfterAgent") => {
+                            let agent = reporter
+                                .or_else(|| self.panes.get(&id).and_then(|p| p.agent_name()));
+                            self.replies.replied(id, agent, hook.reply.as_deref().unwrap_or(""));
+                        },
+                        _ => {},
                     }
                 }
                 match state {
@@ -3209,6 +3248,13 @@ impl Server {
     /// Panes the user is looking at have been seen.
     fn clear_seen(&mut self) {
         let seen: Vec<PaneId> = self.seen_windows().flat_map(|w| self.window_visible(w)).collect();
+        // Replies are read only by someone there: an app used lately.
+        let now = Instant::now();
+        let someone =
+            self.clients.values().any(|c| c.last_used.is_some_and(|at| now - at < IN_USE));
+        for &pane in seen.iter().filter(|_| someone) {
+            self.replies.read_pane(pane);
+        }
         for pane in seen {
             if let Some(pane) = self.panes.get_mut(&pane) {
                 pane.seen();
@@ -3302,6 +3348,12 @@ impl Server {
             let facts = self.status_facts(window);
             lines.insert(window, self.status.line(window, facts.as_ref(), &self.theme));
         }
+        // The queue, worked out once, for apps taking it.
+        let queue = self
+            .clients
+            .values()
+            .any(|c| c.takes(extension::QUEUE))
+            .then(|| QueueUpdate { items: self.queue_items() });
         let client_ids: Vec<ClientId> = self.clients.keys().copied().collect();
         for client_id in client_ids {
             let windows: Vec<(WindowId, WindowLayout, Vec<PaneId>)> = self
@@ -3398,10 +3450,93 @@ impl Server {
                     messages.push(ServerExtension::Status(update).message());
                 }
             }
+            if client.takes(extension::QUEUE)
+                && let Some(queue) = &queue
+                && client.queue_sent.as_ref() != Some(queue)
+            {
+                client.queue_sent = Some(queue.clone());
+                messages.push(ServerExtension::Queue(queue.clone()).message());
+            }
             for message in messages {
                 let _ = client.tx.send(message);
             }
         }
+    }
+
+    /// What needs the user now: permission requests (oldest first), agents
+    /// waiting otherwise, then unread replies (newest first).
+    fn queue_items(&mut self) -> Vec<QueueItem> {
+        use crate::queue::start_of;
+        let waiting: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, p)| matches!(p.status, Status::Agent { state: AgentState::Waiting, .. }))
+            .map(|(&id, _)| id)
+            .filter(|&id| !self.approvals.pending_in(id))
+            .collect();
+        self.waiting_since.retain(|pane, _| waiting.contains(pane));
+        for &pane in &waiting {
+            self.waiting_since.entry(pane).or_insert_with(crate::queue::now_ms);
+        }
+        let now = Instant::now();
+        let place = |pane: PaneId| -> (String, String) {
+            let title = self.panes.get(&pane).map(|p| p.title()).unwrap_or_default();
+            let workspace = self
+                .place_of(pane)
+                .and_then(|(w, _)| self.workspaces.get(&w))
+                .map(|w| w.name.clone().unwrap_or_else(|| w.title.clone()))
+                .unwrap_or_default();
+            (title, workspace)
+        };
+        let mut items = Vec::new();
+        for (approval, since_ms) in self.approvals.pending(now) {
+            let (title, workspace) = place(approval.pane);
+            items.push(QueueItem {
+                kind: QueueKind::Approval,
+                id: approval.id,
+                pane: approval.pane,
+                agent: approval.agent,
+                title,
+                workspace,
+                text: approval.summary,
+                context: start_of(&approval.tool_input.to_string(), 4000),
+                options: approval.options,
+                since_ms,
+            });
+        }
+        for pane in waiting {
+            let since_ms = self.waiting_since[&pane];
+            let state = &self.panes[&pane];
+            let (title, workspace) = place(pane);
+            items.push(QueueItem {
+                kind: QueueKind::Waiting,
+                id: pane,
+                pane,
+                agent: state.agent_name(),
+                title,
+                workspace,
+                text: state.message.clone().unwrap_or_else(|| "Waiting for you".to_owned()),
+                context: String::new(),
+                options: Vec::new(),
+                since_ms,
+            });
+        }
+        for reply in self.replies.unread() {
+            let (title, workspace) = place(reply.pane);
+            items.push(QueueItem {
+                kind: QueueKind::Reply,
+                id: reply.id,
+                pane: reply.pane,
+                agent: reply.agent.clone(),
+                title,
+                workspace,
+                text: start_of(&reply.text, 4000),
+                context: start_of(&reply.prompt, 1000),
+                options: Vec::new(),
+                since_ms: reply.at_ms,
+            });
+        }
+        items
     }
 
     /// A tab's layout as saved; for a hand-over, each pane names its running

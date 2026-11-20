@@ -11,6 +11,7 @@ use artty_core::control::{
     AgentState, ApprovalInfo, AskInfo, AskState, HookEvent, ReadSource, Request, Response,
     SESSION_ENV, SOCKET_ENV, SplitDirection, live_sockets,
 };
+use artty_core::protocol::QueueKind;
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
@@ -24,6 +25,7 @@ pub const COMMANDS: &[&str] = &[
     "approve",
     "approvals",
     "approval",
+    "queue",
     "notify",
     "status",
     "focus",
@@ -90,10 +92,15 @@ artty, your own pane is found automatically:
   artty ask --cancel ID --abandon        stop waiting for one with its agent
   artty approvals [--tab N] [--json]     agents' permission requests (pending
                                          first): id, pane, state, what they'd do
-  artty approval allow|deny ID [--message M]
+  artty approval allow|deny ID [--message M] [--always N]
                                          answer one (not from inside artty's
                                          panes: an agent mustn't approve its own);
-                                         the agent's own prompt answers it too
+                                         the agent's own prompt answers it too.
+                                         --always N: allow with its Nth always-
+                                         option (as the agent offered them)
+  artty queue [--json]                   what needs you: permission requests,
+                                         agents waiting, unread replies
+  artty queue --dismiss ID               mark a reply read
   artty approve --hook --agent NAME      (an agent's PermissionRequest hook)
   artty new [--split right|down] [--tab N] [--cwd DIR] [--title T]
             [--workspace NAME] [--background] [-- COMMAND...]
@@ -257,6 +264,8 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--root" => _ = flags.insert("root", args.value("--root")?),
             "--result" => _ = flags.insert("result", args.value("--result")?),
             "--cancel" => _ = flags.insert("cancel", args.value("--cancel")?),
+            "--always" => _ = flags.insert("always", args.value("--always")?),
+            "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
             "--raw" | "--no-wait" | "--list" | "--abandon" => {
                 switches.insert(match arg.as_str() {
                     "--raw" => "raw",
@@ -520,7 +529,17 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 .get(1)
                 .and_then(|id| id.parse().ok())
                 .ok_or("approval: which request? (its id, from artty approvals)")?;
-            Request::Decide { id, allow, message: flags.get("message").cloned() }
+            let always = flags
+                .get("always")
+                .map(|n| n.parse().map_err(|_| "--always: not a number (an option's index)"))
+                .transpose()?;
+            Request::Decide { id, allow, message: flags.get("message").cloned(), always }
+        },
+        "queue" => match flags.get("dismiss") {
+            Some(id) => Request::QueueDismiss {
+                id: id.parse().map_err(|_| "--dismiss: not a number (a reply's id)")?,
+            },
+            None => Request::Queue,
         },
         "hooks" => return hooks(&rest),
         "server" => match rest.first().map(String::as_str) {
@@ -662,6 +681,22 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         Response::Approvals { approvals } => {
             for approval in &approvals {
                 print_approval(approval);
+            }
+            Ok(0)
+        },
+        Response::Queue { items } if json => {
+            println!("{}", serde_json::to_string_pretty(&items).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Queue { items } => {
+            for item in &items {
+                let kind = match item.kind {
+                    QueueKind::Approval => "permission",
+                    QueueKind::Waiting => "waiting",
+                    QueueKind::Reply => "reply",
+                };
+                let text = item.text.lines().next().unwrap_or_default();
+                println!("{:>14}  pane {:<3} {:<10} {}", item.id, item.pane, kind, text);
             }
             Ok(0)
         },
@@ -963,6 +998,9 @@ fn print_approval(approval: &ApprovalInfo) {
         duration(approval.age_secs),
         approval.summary
     );
+    for (index, option) in approval.options.iter().enumerate() {
+        println!("{:>14}  --always {index}: {option}", "");
+    }
 }
 
 /// An agent's hook event, as JSON on stdin.
@@ -997,11 +1035,15 @@ fn approve(agent: Option<String>) -> Result<i32, String> {
     let Some(event) = hook_input() else { return Ok(0) };
     let tool_name = event.get("tool_name").and_then(Value::as_str).unwrap_or("a tool").to_owned();
     let tool_input = event.get("tool_input").cloned().unwrap_or(Value::Null);
-    let request = Request::Approve { tab: own_tab(), agent, tool_name, tool_input };
+    let suggestions =
+        event.get("permission_suggestions").and_then(Value::as_array).cloned().unwrap_or_default();
+    let request = Request::Approve { tab: own_tab(), agent, tool_name, tool_input, suggestions };
     let Ok(Response::Decision { decision: Some(decision) }) = send(&request, None) else {
         return Ok(0);
     };
-    let decision = if decision.allow {
+    let decision = if decision.allow && !decision.permissions.is_empty() {
+        json!({ "behavior": "allow", "updatedPermissions": decision.permissions })
+    } else if decision.allow {
         json!({ "behavior": "allow" })
     } else {
         let message = decision.message.unwrap_or_else(|| "Denied in artty".to_owned());

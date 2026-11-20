@@ -66,6 +66,17 @@ fn answered_in_artty() {
     let again = scratch.artty(&["approval", "deny", &id]);
     assert!(stderr(&again).contains("already over"), "{}", stderr(&again));
 
+    // Always: with the agent's own option, which goes back to it.
+    let (ask, id) = asking(&scratch, &pane, "make test");
+    let listed = stdout(&scratch.artty(&["approvals", "--tab", &pane]));
+    assert!(
+        listed.contains("--always 0: Always allow Bash(make test) for this session"),
+        "{listed}"
+    );
+    let out = scratch.artty(&["approval", "allow", &id, "--always", "0"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert_eq!(reply(&scratch, &ask).1, "ran (always): make test");
+
     let (ask, id) = asking(&scratch, &pane, "rm -rf /tmp/nothing");
     scratch.artty(&["approval", "deny", &id, "--message", "not now"]);
     assert_eq!(reply(&scratch, &ask).1, "denied: not now");

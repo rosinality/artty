@@ -336,6 +336,10 @@ pub enum Request {
         tool_name: String,
         #[serde(default)]
         tool_input: serde_json::Value,
+        /// The permission updates the agent offers for "always" (Claude
+        /// Code's `permission_suggestions`), passed back as they are.
+        #[serde(default)]
+        suggestions: Vec<serde_json::Value>,
     },
     /// Permission requests (all, or a pane's), pending first.
     Approvals {
@@ -350,15 +354,29 @@ pub enum Request {
         /// Why, for the agent (a denial).
         #[serde(default)]
         message: Option<String>,
+        /// Allow, and always: the request's option of this index (one of
+        /// the agent's own suggestions).
+        #[serde(default)]
+        always: Option<usize>,
+    },
+    /// What needs the user: permission requests, agents waiting, unread
+    /// replies (what apps are sent as the `queue` extension).
+    Queue,
+    /// Mark a reply in the queue read.
+    QueueDismiss {
+        id: u64,
     },
 }
 
 /// Someone's answer to a permission request.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Decision {
     pub allow: bool,
     #[serde(default)]
     pub message: Option<String>,
+    /// Permission updates to apply with an allow (one the agent suggested).
+    #[serde(default)]
+    pub permissions: Vec<serde_json::Value>,
 }
 
 /// A permission request, as `artty approvals` lists it.
@@ -376,6 +394,9 @@ pub struct ApprovalInfo {
     pub state: ApprovalState,
     /// How long ago it was asked.
     pub age_secs: u64,
+    /// Its "always" choices (`Decide`'s `always` picks one by index).
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -571,6 +592,9 @@ pub enum Response {
     },
     Approvals {
         approvals: Vec<ApprovalInfo>,
+    },
+    Queue {
+        items: Vec<crate::protocol::QueueItem>,
     },
 }
 

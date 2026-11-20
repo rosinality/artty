@@ -1041,23 +1041,27 @@ pub enum ServerMessage {
 pub mod extension {
     /// Server → app: [`super::StatusUpdate`].
     pub const STATUS: &str = "status";
+    /// Server → app: [`super::QueueUpdate`].
+    pub const QUEUE: &str = "queue";
 }
 
 /// The server's extensions this build reads, decoded.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ServerExtension {
     Status(StatusUpdate),
+    Queue(QueueUpdate),
 }
 
 impl ServerExtension {
     /// Every kind there is a variant for: what an app handling them all
     /// lists in its [`Hello`], and what a server sends.
-    pub const KINDS: &[&str] = &[extension::STATUS];
+    pub const KINDS: &[&str] = &[extension::STATUS, extension::QUEUE];
 
     /// `None` for a kind this build doesn't know, or can't read: skipped.
     pub fn decode(kind: &str, data: &[u8]) -> Option<Self> {
         let decoded = match kind {
             extension::STATUS => postcard::from_bytes(data).map(Self::Status),
+            extension::QUEUE => postcard::from_bytes(data).map(Self::Queue),
             _ => {
                 log::debug!("skipped an extension of unknown kind {kind:?}");
                 return None;
@@ -1069,6 +1073,7 @@ impl ServerExtension {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Status(_) => extension::STATUS,
+            Self::Queue(_) => extension::QUEUE,
         }
     }
 
@@ -1076,9 +1081,55 @@ impl ServerExtension {
     pub fn message(&self) -> ServerMessage {
         let data = match self {
             Self::Status(update) => postcard::to_stdvec(update),
+            Self::Queue(update) => postcard::to_stdvec(update),
         };
         ServerMessage::Extension { kind: self.kind().to_owned(), data: data.unwrap_or_default() }
     }
+}
+
+/// [`extension::QUEUE`]: what needs the user, from every agent on the
+/// server, whole each time it changes. Frozen, with [`QueueItem`] and
+/// [`QueueKind`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct QueueUpdate {
+    /// Permission requests (oldest first), agents waiting, then replies
+    /// (newest first).
+    pub items: Vec<QueueItem>,
+}
+
+/// One thing in the queue. Answered with control requests: `Decide` (a
+/// permission request, by `id`; `always` picks one of `options`), or
+/// `QueueDismiss` (a reply, by `id`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct QueueItem {
+    pub kind: QueueKind,
+    /// The permission request's or the reply's id; a waiting agent's pane.
+    pub id: u64,
+    pub pane: PaneId,
+    /// `claude`, `codex`, ...
+    pub agent: Option<String>,
+    /// The pane's tab title, and its workspace's name.
+    pub title: String,
+    pub workspace: String,
+    /// What it's about: the command or file asked for, the agent's question,
+    /// the reply (its start, if long).
+    pub text: String,
+    /// More: the tool's whole input (JSON), or the prompt a reply answers.
+    pub context: String,
+    /// A permission request's "always" choices, as the agent offered them.
+    pub options: Vec<String>,
+    /// When, in milliseconds since the Unix epoch.
+    pub since_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueueKind {
+    /// An agent asks permission to use a tool.
+    Approval,
+    /// An agent waits for you otherwise (a question, a prompt of its own).
+    Waiting,
+    /// An agent finished a turn; unread.
+    Reply,
 }
 
 /// [`extension::STATUS`]: the window's status line changed (see
@@ -1333,6 +1384,27 @@ mod tests {
         assert_eq!(kind, "status");
         assert_eq!(data, &FROZEN_STATUS);
         assert_eq!(ServerExtension::decode(kind, data), Some(status));
+        let queue = ServerExtension::Queue(QueueUpdate {
+            items: vec![QueueItem {
+                kind: QueueKind::Reply,
+                id: 9,
+                pane: 3,
+                agent: Some("c".into()),
+                title: "t".into(),
+                workspace: "w".into(),
+                text: "x".into(),
+                context: "p".into(),
+                options: vec!["o".into()],
+                since_ms: 300,
+            }],
+        });
+        let queued = queue.message();
+        let ServerMessage::Extension { kind: queue_kind, data: queue_data } = &queued else {
+            panic!()
+        };
+        assert_eq!(queue_kind, "queue");
+        assert_eq!(queue_data, &FROZEN_QUEUE);
+        assert_eq!(ServerExtension::decode(queue_kind, queue_data), Some(queue));
         // The envelopes, each way (core: changed only in a breaking release).
         assert_eq!(bytes(&message), FROZEN_ENVELOPE);
         let client = ClientMessage::Extension { kind: "k".into(), data: vec![7] };
@@ -1345,6 +1417,10 @@ mod tests {
 
     /// `status`: window 300, `l` bold in 1,2,3 on the left, `r` dim on
     /// 4,5,6 on the right.
+    /// `queue`: one reply (kind 2), id 9, pane 3, agent "c", title "t",
+    /// workspace "w", text "x", context "p", options ["o"], 300 ms.
+    const FROZEN_QUEUE: [u8; 20] =
+        [1, 2, 9, 3, 1, 1, 99, 1, 116, 1, 119, 1, 120, 1, 112, 1, 1, 111, 172, 2];
     const FROZEN_STATUS: [u8; 22] =
         [172, 2, 1, 1, 108, 1, 1, 2, 3, 0, 1, 0, 1, 1, 114, 0, 1, 4, 5, 6, 0, 1];
     /// `ServerMessage::Extension` (variant 18): `status`, then its payload.

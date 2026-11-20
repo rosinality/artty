@@ -705,6 +705,8 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                     view.update(cx, |_, cx| cx.notify());
                 }
             },
+            // Shown once the sidebar has a queue.
+            Some(ServerExtension::Queue(_)) => {},
             None => {},
         },
         // What the server sends and reads: every kind the app shows, so far.
