@@ -435,7 +435,7 @@ impl WindowView {
         let entries = agents.thread.iter().map(|entry| {
             let time = clock(entry.at_ms);
             let element: gpui::AnyElement = match &entry.item {
-                ThreadItem::Prompt { text, ask } => div()
+                ThreadItem::Prompt { text, ask, from } => div()
                     .flex()
                     .justify_end()
                     .child(
@@ -447,9 +447,10 @@ impl WindowView {
                             .items_end()
                             .gap(px(3.))
                             .child(div().text_size(px(11.)).text_color(ui(0xffffff60)).child(
-                                match ask {
-                                    Some(_) => format!("you, by artty ask · {time}"),
-                                    None => format!("you · {time}"),
+                                match (ask, from) {
+                                    (_, Some(from)) => format!("{} · {time}", from_label(from)),
+                                    (Some(_), None) => format!("you, by artty ask · {time}"),
+                                    (None, None) => format!("you · {time}"),
                                 },
                             ))
                             .child(bubble(true).child(clip(text))),
@@ -686,6 +687,14 @@ impl WindowView {
             .text_color(ui(fg))
             .hover(|d| d.bg(ui(0xffffff28)))
             .child(label.to_owned())
+    }
+}
+
+/// An agent that asked another, as its thread shows it: "from api (claude)".
+pub(super) fn from_label(from: &artty_core::control::AskFrom) -> String {
+    match &from.agent {
+        Some(agent) => format!("from {} · {agent}", from.title),
+        None => format!("from {}", from.title),
     }
 }
 

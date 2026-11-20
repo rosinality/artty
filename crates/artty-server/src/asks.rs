@@ -31,7 +31,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
-use artty_core::control::{AgentState, AskInfo, AskState, HookEvent};
+use artty_core::control::{AgentState, AskFrom, AskInfo, AskState, HookEvent};
 use artty_core::layout::PaneId;
 use serde::{Deserialize, Serialize};
 
@@ -95,6 +95,8 @@ fn turn_of(event: &HookEvent) -> Option<Turn> {
 
 struct Ask {
     pane: PaneId,
+    /// The agent that asked, if one did.
+    from: Option<AskFrom>,
     text: String,
     added: Instant,
     state: AskState,
@@ -132,6 +134,8 @@ pub struct SavedAsk {
     pub pane: PaneId,
     pub text: String,
     pub state: AskState,
+    #[serde(default)]
+    pub from: Option<AskFrom>,
     #[serde(default)]
     pub warning: Option<String>,
     #[serde(default)]
@@ -188,11 +192,24 @@ impl Asks {
         Asks { next: start, ..Asks::default() }
     }
 
+    #[cfg(test)]
     pub fn add(&mut self, pane: PaneId, text: String, now: Instant) -> u64 {
+        self.add_from(pane, text, None, now)
+    }
+
+    /// An ask from `from` (an agent), or someone at artty.
+    pub fn add_from(
+        &mut self,
+        pane: PaneId,
+        text: String,
+        from: Option<AskFrom>,
+        now: Instant,
+    ) -> u64 {
         self.next = crate::queue::next_id();
         let id = self.next;
         let ask = Ask {
             pane,
+            from,
             text,
             added: now,
             state: AskState::Queued,
@@ -221,6 +238,7 @@ impl Asks {
                 pane: ask.pane,
                 text: ask.text.clone(),
                 state: ask.state,
+                from: ask.from.clone(),
                 warning: ask.warning.clone(),
                 prompt_id: ask.prompt_id.clone(),
                 reply: ask.reply.clone(),
@@ -261,6 +279,7 @@ impl Asks {
             };
             let mut ask = Ask {
                 pane,
+                from: saved.from,
                 text: saved.text,
                 added: now,
                 state: saved.state,
@@ -299,12 +318,18 @@ impl Asks {
         Some(AskInfo {
             id,
             pane: ask.pane,
+            from: ask.from.clone(),
             state: ask.state,
             reply: ask.reply.clone(),
             error: ask.error.clone(),
             warning: ask.warning.clone(),
             text,
         })
+    }
+
+    /// Who asked `id`, if an agent did.
+    pub fn asker_of(&self, id: u64) -> Option<AskFrom> {
+        self.asks.get(&id)?.from.clone()
     }
 
     /// The ask `pane`'s agent is at work on, if its turn is one.

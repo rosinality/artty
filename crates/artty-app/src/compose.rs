@@ -266,12 +266,16 @@ impl WindowView {
                             .flex_col()
                             .items_end()
                             .gap(px(3.))
-                            .child(div().text_size(px(11.)).text_color(ui(0xffffff60)).child(
+                            .child(div().text_size(px(11.)).text_color(ui(0xffffff60)).child({
+                                let who = ask.from.as_ref().map_or_else(
+                                    || "you".to_owned(),
+                                    super::agents_view::from_label,
+                                );
                                 match ask.state {
-                                    AskState::Delivering => "you · being given to it",
-                                    _ => "you · queued until its turn ends",
-                                },
-                            ))
+                                    AskState::Delivering => format!("{who} · being given to it"),
+                                    _ => format!("{who} · queued until its turn ends"),
+                                }
+                            }))
                             .child(
                                 div()
                                     .px(px(11.))

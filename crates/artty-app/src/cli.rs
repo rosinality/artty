@@ -45,6 +45,7 @@ pub const COMMANDS: &[&str] = &[
     "workspaces",
     "activity",
     "hooks",
+    "guide",
     "shell-integration",
 ];
 
@@ -188,6 +189,10 @@ artty, your own pane is found automatically:
                                          the right conversation
   artty hooks uninstall [AGENT...]       remove them (default: everywhere)
   artty hooks [AGENT]                    print an agent's hooks
+  artty guide                            the guide for agents asking other agents
+                                         (also in ~/.config/artty/AGENTS.md)
+  artty guide install|uninstall          add (or take out) a Claude Code skill
+                                         pointing agents to it
 ";
 
 pub fn main(args: Vec<String>) -> i32 {
@@ -441,7 +446,10 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             } else {
                 let tab = tab.ok_or("ask: which agent? (--tab N)")?;
                 if Some(tab) == own_tab() {
-                    return Err("ask: that's your own pane".into());
+                    return Err(format!(
+                        "ask: pane {tab} is your own: an agent can't ask itself (`artty agents` \
+                         lists the others)"
+                    ));
                 }
                 let text = if rest == ["-"] {
                     let mut text = String::new();
@@ -567,6 +575,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             None => Request::Queue,
         },
         "hooks" => return hooks(&rest),
+        "guide" => return guide(rest.first().map(String::as_str)),
         "server" => match rest.first().map(String::as_str) {
             None | Some("run") => {
                 return artty_server::run().map(|()| 0).map_err(|err| format!("server: {err}"));
@@ -1057,14 +1066,25 @@ fn print_ask(ask: &AskInfo, json: bool) -> Result<i32, String> {
     }
 }
 
+/// An agent that asked, as "api (claude, pane 3, ask 17…)".
+fn sender(from: &artty_core::control::AskFrom, ask: &str) -> String {
+    match &from.agent {
+        Some(agent) => format!("{} ({agent}, pane {}, {ask})", from.title, from.pane),
+        None => format!("{} (pane {}, {ask})", from.title, from.pane),
+    }
+}
+
 /// A thread's entry for reading: its time, a mark, and what it says (later
 /// lines indented under the first).
 fn thread_entry(entry: &ThreadEntry, agent: &str) -> String {
     let (mark, head, text) = match &entry.item {
-        ThreadItem::Prompt { text, ask: Some(id) } => {
+        ThreadItem::Prompt { text, ask: Some(id), from: Some(from) } => {
+            ("›", sender(from, &format!("ask {id}")), text.clone())
+        },
+        ThreadItem::Prompt { text, ask: Some(id), from: None } => {
             ("›", format!("you (ask {id})"), text.clone())
         },
-        ThreadItem::Prompt { text, ask: None } => ("›", "you".to_owned(), text.clone()),
+        ThreadItem::Prompt { text, ask: None, .. } => ("›", "you".to_owned(), text.clone()),
         ThreadItem::Reply { text } => ("‹", agent.to_owned(), text.clone()),
         ThreadItem::Permission { id, summary, state, .. } => {
             let state = serde_json::to_value(state).unwrap_or_default();
@@ -1257,6 +1277,47 @@ fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String
         return Err(format!("{CLOSED} (stopped, or restarted)"));
     }
     serde_json::from_str(&reply).map_err(|err| format!("bad reply: {err}"))
+}
+
+/// `artty guide`: the guide for agents working with other agents; `install`
+/// adds a Claude Code skill pointing to it, `uninstall` takes it out.
+fn guide(action: Option<&str>) -> Result<i32, String> {
+    use artty_core::guide;
+    let skill = guide::skill_path().ok_or("no HOME")?;
+    match action {
+        None => {
+            print!("{}", guide::GUIDE);
+            Ok(0)
+        },
+        Some("install") => {
+            let dir = skill.parent().unwrap();
+            std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+            std::fs::write(&skill, guide::SKILL)
+                .map_err(|err| format!("{}: {err}", skill.display()))?;
+            println!("Claude Code: added the artty skill ({})", skill.display());
+            println!(
+                "Claude Code asks before each artty command an agent runs. To let agents ask \
+                 each other without that, allow them in its settings (permissions.allow):\n  \
+                 \"Bash(artty agents:*)\", \"Bash(artty ask:*)\", \"Bash(artty thread:*)\", \
+                 \"Bash(artty guide)\""
+            );
+            Ok(0)
+        },
+        Some("uninstall") => {
+            match std::fs::remove_file(&skill) {
+                Ok(()) => {
+                    let _ = std::fs::remove_dir(skill.parent().unwrap());
+                    println!("Claude Code: took out the artty skill");
+                },
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    println!("Claude Code: the artty skill isn't installed");
+                },
+                Err(err) => return Err(format!("{}: {err}", skill.display())),
+            }
+            Ok(0)
+        },
+        Some(other) => Err(format!("guide: unknown action {other} (install, uninstall)")),
+    }
 }
 
 /// `artty hooks` subcommands: show, status, install, uninstall.

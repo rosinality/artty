@@ -126,6 +126,10 @@ fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -
         None => server.start(),
     }
     server.restored();
+    // The guide for agents in its panes, for those told to read it.
+    if let Err(err) = artty_core::guide::write() {
+        log::warn!("writing the agents' guide: {err}");
+    }
     loop {
         inbox.wait(server.next_deadline().max(Instant::now() + Duration::from_millis(1)));
         // Handle what's waiting before doing per-batch work, so a burst of

@@ -2177,7 +2177,8 @@ impl Server {
                 Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
             },
             Request::Ask { tab, text, raw, wait, timeout_secs } => {
-                match self.add_ask(tab, text, raw) {
+                let from = self.pane_of_peer(peer);
+                match self.add_ask(tab, text, raw, from) {
                     Ok(ask) if wait => self.ask_waiters.push(AskWaiter {
                         ask,
                         waiter,
@@ -2215,6 +2216,15 @@ impl Server {
 
     /// A request from a program running in one of artty's panes (or one
     /// that can't be told apart from one). Apps' requests aren't.
+    /// The pane `peer` runs in (a program started in it, or under one).
+    fn pane_of_peer(&self, peer: Option<Peer>) -> Option<PaneId> {
+        let pid = peer?.pid?;
+        self.panes.iter().find_map(|(&id, pane)| {
+            let shell = pane.session.shell_pid()?;
+            artty_core::descends_from(pid, &HashSet::from([shell])).then_some(id)
+        })
+    }
+
     fn in_a_pane(&self, peer: Option<Peer>) -> bool {
         let Some(peer) = peer else { return false };
         let Some(pid) = peer.pid else { return true };
@@ -2310,7 +2320,28 @@ impl Server {
         }
     }
 
-    fn add_ask(&mut self, tab: PaneId, text: String, raw: bool) -> Result<u64, String> {
+    /// `from`: the pane asking, if it's one of ours (an agent asking
+    /// another).
+    fn add_ask(
+        &mut self,
+        tab: PaneId,
+        text: String,
+        raw: bool,
+        from: Option<PaneId>,
+    ) -> Result<u64, String> {
+        if from == Some(tab) {
+            return Err(format!(
+                "pane {tab} is your own: an agent can't ask itself (the ask would wait for the \
+                 turn you're in to end). `artty agents` lists the others"
+            ));
+        }
+        let from = from.and_then(|id| self.panes.get(&id)).zip(from).map(|(pane, id)| {
+            let agent = match &pane.status {
+                Status::Agent { name, .. } => Some(name.clone()),
+                _ => pane.agent_name(),
+            };
+            artty_core::control::AskFrom { pane: id, title: pane.title(), agent }
+        });
         let pane = self.panes.get(&tab).ok_or(format!("no pane {tab}"))?;
         let text = text.trim_end_matches(['\r', '\n']).to_owned();
         if text.trim().is_empty() {
@@ -2329,7 +2360,7 @@ impl Server {
             return Err(format!("no agent is running in pane {tab}"));
         }
         let now = Instant::now();
-        let id = self.asks.add(tab, text, now);
+        let id = self.asks.add_from(tab, text, from, now);
         self.keep(now);
         Ok(id)
     }
@@ -2892,8 +2923,10 @@ impl Server {
                     let now = Instant::now();
                     self.asks.hook(id, hook, now);
                     // (After the asks: a turn that took one says so.)
-                    let ask =
-                        (hook.turn() == Some(true)).then(|| self.asks.running_in(id)).flatten();
+                    let ask = (hook.turn() == Some(true))
+                        .then(|| self.asks.running_in(id))
+                        .flatten()
+                        .map(|ask| (ask, self.asks.asker_of(ask)));
                     self.threads.hook(id, hook, message.as_deref(), ask);
                     for release in self.approvals.hook(id, hook, now) {
                         self.release_approval(release);

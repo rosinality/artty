@@ -405,6 +405,18 @@ pub struct AgentInfo {
     pub ask: Option<u64>,
 }
 
+/// The agent an ask came from: run in one of artty's panes. As it was when
+/// it asked (its pane's id may since have changed, after a restart).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskFrom {
+    pub pane: SessionId,
+    /// Its tab's title.
+    pub title: String,
+    /// `claude`, `codex`, ... if known.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
 /// One thing in an agent's thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadEntry {
@@ -419,7 +431,13 @@ pub struct ThreadEntry {
 pub enum ThreadItem {
     /// A turn began: what the agent was given (by `artty ask`, with its id,
     /// or typed in its terminal).
-    Prompt { text: String, ask: Option<u64> },
+    /// `from`: the agent whose `artty ask` it was, if another agent's.
+    Prompt {
+        text: String,
+        ask: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<AskFrom>,
+    },
     /// A turn ended: the agent's last message.
     Reply { text: String },
     /// It asked permission to use a tool; `state` is how that went.
@@ -541,6 +559,9 @@ pub struct AskInfo {
     pub id: u64,
     pub pane: SessionId,
     pub state: AskState,
+    /// Asked by another agent (from its pane), not by someone at artty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<AskFrom>,
     /// The agent's reply, once answered.
     #[serde(default)]
     pub reply: Option<String>,

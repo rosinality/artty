@@ -345,6 +345,27 @@ artty agents                          # pane, agent, state, workspace · tab
 artty thread --tab 4 --lines 20       # its last 20 entries
 ```
 
+### Agents asking agents
+
+An agent can ask another one something the way you would, with `artty ask`
+from its shell tool: the ask comes from inside one of artty's panes, so its
+thread names the agent that asked ("from planner · claude"), and an agent
+asking its own pane is refused (it would wait for the very turn it's in).
+`artty guide` prints the guide for agents — how to find the others, ask,
+wait for an answer or check back, and the rules for doing so — and the
+server keeps a copy in `~/.config/artty/AGENTS.md`. Point an agent to it
+("Read ~/.config/artty/AGENTS.md"), or add a Claude Code skill that does:
+
+```sh
+artty guide install      # ~/.claude/skills/artty/SKILL.md: "run artty guide"
+artty guide uninstall
+```
+
+Claude Code asks before each of those commands an agent runs; to let
+agents ask each other without that, allow them in its settings
+(`permissions.allow`): `"Bash(artty agents:*)"`, `"Bash(artty ask:*)"`,
+`"Bash(artty thread:*)"`, `"Bash(artty guide)"`.
+
 ### The queue
 
 What needs you, from every agent on the server: permission requests,

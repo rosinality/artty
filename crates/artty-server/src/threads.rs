@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use artty_core::control::{ApprovalState, HookEvent, ThreadEntry, ThreadItem};
+use artty_core::control::{ApprovalState, AskFrom, HookEvent, ThreadEntry, ThreadItem};
 use artty_core::layout::PaneId;
 
 use crate::store::Store;
@@ -97,13 +97,13 @@ impl Threads {
     }
 
     /// An agent's hook reported `event` (`message`: what it said with it;
-    /// `ask`: the ask its turn took, if a turn began).
+    /// `ask`: the ask its turn took, if a turn began, and who asked).
     pub fn hook(
         &mut self,
         pane: PaneId,
         event: &HookEvent,
         message: Option<&str>,
-        ask: Option<u64>,
+        ask: Option<(u64, Option<AskFrom>)>,
     ) {
         if let Some(item) = item_of(event, message, ask) {
             self.add(pane, item);
@@ -172,11 +172,20 @@ impl Threads {
 /// What a hook event adds to a thread, if anything. Permission prompts come
 /// as permission requests instead (their own entries); an idle agent's
 /// notification is no news.
-fn item_of(event: &HookEvent, message: Option<&str>, ask: Option<u64>) -> Option<ThreadItem> {
+fn item_of(
+    event: &HookEvent,
+    message: Option<&str>,
+    ask: Option<(u64, Option<AskFrom>)>,
+) -> Option<ThreadItem> {
     let text = |t: Option<&str>| t.unwrap_or_default().to_owned();
     match event.event.as_str() {
         "UserPromptSubmit" | "BeforeAgent" => {
-            Some(ThreadItem::Prompt { text: text(event.prompt.as_deref()), ask })
+            let (ask, from) = ask.unzip();
+            Some(ThreadItem::Prompt {
+                text: text(event.prompt.as_deref()),
+                ask,
+                from: from.flatten(),
+            })
         },
         "Stop" | "AfterAgent" => event
             .reply
@@ -215,7 +224,7 @@ mod tests {
     fn a_turn_in_order() {
         let mut threads = Threads::default();
         let prompt = HookEvent { prompt: Some("fix it".into()), ..event("UserPromptSubmit") };
-        threads.hook(1, &prompt, None, Some(42));
+        threads.hook(1, &prompt, None, Some((42, None)));
         let permission = ThreadItem::Permission {
             id: 7,
             tool_name: "Bash".into(),
@@ -237,7 +246,7 @@ mod tests {
         assert_eq!(
             items,
             [
-                ThreadItem::Prompt { text: "fix it".into(), ask: Some(42) },
+                ThreadItem::Prompt { text: "fix it".into(), ask: Some(42), from: None },
                 ThreadItem::Permission {
                     id: 7,
                     tool_name: "Bash".into(),

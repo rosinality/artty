@@ -8,6 +8,7 @@ mod config;
 pub mod config_file;
 pub mod control;
 mod frame;
+pub mod guide;
 pub mod integration;
 pub mod keys;
 pub mod layout;
