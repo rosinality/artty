@@ -2380,11 +2380,14 @@ impl Server {
     }
 
     /// An agent named `AGENT-acp` (`artty new --agent claude-acp`, `/new
-    /// claude-acp`) is run by `artty acp AGENT`, if it has an adapter.
+    /// claude-acp`) is run by `artty acp AGENT`, if it has an adapter; so is
+    /// one started with a task (`headless-tasks`).
     fn acp_agents(&self, mut request: Request) -> Request {
-        if let Request::New { command, .. } = &mut request
+        if let Request::New { command, task, .. } = &mut request
             && let [name] = command.as_slice()
-            && let Some(agent) = name.strip_suffix("-acp")
+            && let Some(agent) = name
+                .strip_suffix("-acp")
+                .or(Some(name.as_str()).filter(|_| task.is_some() && self.config.headless_tasks))
             && self.config.acp.contains_key(agent)
         {
             let exe = std::env::current_exe()
@@ -2605,6 +2608,7 @@ impl Server {
                 tool_name: info.tool_name.clone(),
                 summary: info.summary.clone(),
                 state: info.state,
+                input: info.tool_input.clone(),
             },
         );
         pane.process = pane.session.process();

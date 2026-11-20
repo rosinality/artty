@@ -261,6 +261,8 @@ struct Host {
     /// shown yet (a line at a time).
     reply: (Option<String>, String),
     unshown: String,
+    /// What it was last said to be doing (a tool in use).
+    doing: Option<String>,
     /// Tools in use: name and input, by call id.
     tools: HashMap<String, (String, Value, String)>,
     permission: Option<Permission>,
@@ -328,6 +330,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         reply: (None, String::new()),
         unshown: String::new(),
         tools: HashMap::new(),
+        doing: None,
         permission: None,
         title: None,
         paused,
@@ -437,7 +440,15 @@ impl Host {
             _ => "\x1b[1m›\x1b[0m ",
         };
         let shown = self.input.replace('\n', "⏎");
-        let _ = write!(out, "\r\x1b[2K{mark}{shown}");
+        // Nothing typed, at work: what it's doing (dim, till typing).
+        let doing = match (&self.doing, self.phase) {
+            (Some(doing), Phase::Working(_)) if shown.is_empty() && self.permission.is_none() => {
+                let line = doing.lines().next().unwrap_or_default();
+                format!("\x1b[2m{}\x1b[0m", line.chars().take(100).collect::<String>())
+            },
+            _ => String::new(),
+        };
+        let _ = write!(out, "\r\x1b[2K{mark}{shown}{doing}");
         let _ = out.flush();
     }
 
@@ -491,6 +502,7 @@ impl Host {
     }
 
     fn turn_ended(&mut self) {
+        self.doing = None;
         self.show_reply(true);
         self.phase = Phase::Idle;
         let reply = std::mem::take(&mut self.reply.1);
@@ -499,6 +511,7 @@ impl Host {
     }
 
     fn interrupted(&mut self, how: &str) {
+        self.doing = None;
         self.show_reply(true);
         self.say("\x1b[2m(interrupted)\x1b[0m");
         self.phase = Phase::Idle;
@@ -808,7 +821,21 @@ impl Host {
                     entry.2 = title;
                 }
                 let status = text("status");
+                // What it's doing now, for artty to show (a tool's generic
+                // title, as "Terminal", comes first: its own, with its
+                // input, next).
+                let doing = entry.2.clone();
+                if !matches!(status.as_deref(), Some("completed" | "failed"))
+                    && !doing.is_empty()
+                    && self.permission.is_none()
+                    && self.doing.as_deref() != Some(doing.as_str())
+                {
+                    self.doing = Some(doing.clone());
+                    self.status(AgentState::Working, Some(doing), None);
+                    self.prompt_line();
+                }
                 if matches!(status.as_deref(), Some("completed" | "failed")) {
+                    self.doing = None;
                     let (name, input, title) = self.tools.remove(&call).unwrap_or_default();
                     let failed = status.as_deref() == Some("failed");
                     self.show_reply(true);
@@ -826,6 +853,9 @@ impl Host {
                                 ..hook("PostToolUse")
                             }),
                         );
+                    } else {
+                        // (Not doing it any more.)
+                        self.status(AgentState::Working, None, None);
                     }
                 }
             },

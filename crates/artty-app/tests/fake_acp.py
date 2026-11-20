@@ -8,6 +8,7 @@ What a prompt does, by its text:
   bg         answers "started", and a second later goes on by itself
              ("background done"), as after a background task
   bgslow     answers "started", then goes on by itself until cancelled
+  busy       runs a tool ("cargo test --workspace") until cancelled
   hook       runs the agent's hooks as Claude Code would (artty status
              --hook: under artty acp, they keep quiet), answers "echo: hook"
   else       answers "echo: TEXT"
@@ -79,6 +80,15 @@ def prompt(rid, session, text):
     elif text == "slow":
         while not cancelled.wait(0.2):
             say(session, ".", "m-slow")
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
+        return
+    elif text == "busy":
+        call = {"toolCallId": "call-2", "_meta": {"claudeCode": {"toolName": "Bash"}}}
+        update(session, dict(call, sessionUpdate="tool_call", title="Terminal", kind="execute", status="pending"))
+        update(session, dict(call, sessionUpdate="tool_call_update", title="cargo test --workspace",
+                             rawInput={"command": "cargo test --workspace"}))
+        cancelled.wait()
+        update(session, dict(call, sessionUpdate="tool_call_update", status="failed"))
         send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
         return
     elif text == "bgslow":

@@ -542,7 +542,16 @@ pub enum ThreadItem {
     /// A turn ended: the agent's last message.
     Reply { text: String },
     /// It asked permission to use a tool; `state` is how that went.
-    Permission { id: u64, tool_name: String, summary: String, state: ApprovalState },
+    Permission {
+        id: u64,
+        tool_name: String,
+        summary: String,
+        state: ApprovalState,
+        /// The tool's input (an edit's text, before and after: shown as
+        /// what it would change).
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        input: serde_json::Value,
+    },
     /// It waits for the user otherwise (a question of its own).
     Waiting { message: String },
     /// Its session: `started`, `resumed`, `cleared`, `compacted`, `ended`.

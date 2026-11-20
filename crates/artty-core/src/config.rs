@@ -75,6 +75,10 @@ pub struct Config {
     pub resume_agents: bool,
     /// How to resume each agent, by process name.
     pub resume: BTreeMap<String, ResumeCommand>,
+    /// Agents started with a task (`artty new --task`, `/new`) run without
+    /// their terminal UI, when they have an adapter (`acp`): ^T in the tab
+    /// takes one over.
+    pub headless_tasks: bool,
     /// Agents run without their terminal UI (`artty acp AGENT`): the
     /// command of each one's Agent Client Protocol adapter.
     pub acp: BTreeMap<String, String>,
@@ -396,6 +400,7 @@ impl Default for Config {
             restore_scrollback: 1000,
             resume_agents: true,
             max_agent_depth: 2,
+            headless_tasks: true,
             acp: BTreeMap::from([(
                 "claude".to_owned(),
                 "npx -y @agentclientprotocol/claude-agent-acp@0.109.0".to_owned(),

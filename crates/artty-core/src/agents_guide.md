@@ -45,8 +45,9 @@ own pane's id is in `$ARTTY_SESSION_ID`.
   branch; the worktree is removed when its tab closes if it has no changes
   (the branch stays). How deep agents may start agents is the user's
   setting.
-  `--agent claude-acp` runs Claude Code without its terminal UI (through
-  its Agent Client Protocol adapter); asks and threads work the same.
+  Started with a task, Claude Code runs without its terminal UI (through
+  its Agent Client Protocol adapter; the user's setting); asks and threads
+  work the same.
 
 ## What to know
 

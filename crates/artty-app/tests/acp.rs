@@ -161,12 +161,14 @@ fn resumed_after_a_restart() {
 #[test]
 fn started_with_a_task() {
     let scratch = Scratch::with_config(&format!("[acp]\nclaude = \"python3 '{ADAPTER}'\"\n"));
-    let out = scratch.artty(&["new", "--background", "--agent", "claude-acp", "--task", "first"]);
+    // Started with a task, plain `claude` runs headless (`headless-tasks`).
+    let out = scratch.artty(&["new", "--background", "--agent", "claude", "--task", "first"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let pane = stdout(&out);
     wait_for("its answer", || {
         thread(&scratch, &pane).iter().any(|(k, v)| k == "Reply" && v["text"] == "echo: first")
     });
+    assert!(stdout(&scratch.artty(&["agents"])).contains("claude-acp"));
 }
 
 #[test]
@@ -218,4 +220,33 @@ fn an_adapter_that_fails_says_why() {
         let screen = stdout(&scratch.artty(&["read", "--tab", &pane, "--screen"]));
         screen.contains("no such adapter here") && screen.contains("a key closes this")
     });
+}
+
+#[test]
+fn what_it_is_doing() {
+    let (scratch, pane) = started();
+    no_wait(&scratch, &pane, "busy");
+    // The tool in use, by its own title (not the generic first one).
+    wait_for("its activity", || {
+        stdout(&scratch.artty(&["agents", "--json"]))
+            .contains("\"message\": \"cargo test --workspace\"")
+    });
+    scratch.artty(&["send", "--tab", &pane, "--no-enter", "\x1b"]);
+    wait_for("it to stop", || {
+        let agents = stdout(&scratch.artty(&["agents", "--json"]));
+        agents.contains("\"state\": \"idle\"")
+    });
+}
+
+#[test]
+fn an_edit_shown_before_it_is_allowed() {
+    let (scratch, pane) = started();
+    let file = scratch.dir.join("draft.md");
+    no_wait(&scratch, &pane, &format!("edit {}", file.display()));
+    wait_for("its permission request", || {
+        thread(&scratch, &pane).iter().any(|(k, _)| k == "Permission")
+    });
+    let entries = thread(&scratch, &pane);
+    let (_, permission) = entries.iter().find(|(k, _)| k == "Permission").unwrap();
+    assert_eq!(permission["input"]["new_string"], "edited\n", "{permission:?}");
 }

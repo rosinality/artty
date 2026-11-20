@@ -913,7 +913,8 @@ impl WindowView {
                     cx,
                 )))
                 .into_any_element(),
-            ThreadItem::Permission { id, summary, state, .. } => {
+            ThreadItem::Permission { id, tool_name, summary, state, input } => {
+                let diff = edit_diff(tool_name, input);
                 let pending = *state == ApprovalState::Pending;
                 let (word, color) = match state {
                     ApprovalState::Pending => ("asks permission", WAITING),
@@ -948,6 +949,10 @@ impl WindowView {
                             .text_color(ui(0xffffffe0))
                             .child(summary.clone()),
                     )
+                    // What it would change, for an edit.
+                    .when_some(diff, |d, diff| {
+                        d.child(self.markdown(agents, &diff, &format!("{seq}-diff"), which, cx))
+                    })
                     .when(pending, |d| {
                         d.child(
                             div()
@@ -1330,6 +1335,34 @@ impl WindowView {
                         .size_full(),
                     ),
             )
+            // What it's doing now (a tool in use), while it works.
+            .when_some(
+                agent
+                    .message
+                    .as_deref()
+                    .filter(|m| agent.state == AgentState::Working && !m.is_empty()),
+                |d, doing| {
+                    d.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .px(px(18.))
+                            .pb(px(2.))
+                            .text_size(px(11.5))
+                            .text_color(ui(0xffffff80))
+                            .child(div().flex_none().text_color(ui(color)).child("●"))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .child(doing.lines().next().unwrap_or_default().to_owned()),
+                            ),
+                    )
+                },
+            )
             .child(self.compose_box(&agent.title, which, cx))
     }
 
@@ -1520,8 +1553,62 @@ fn relative_width(fraction: f32) -> gpui::DefiniteLength {
     gpui::relative(fraction)
 }
 
+/// What an edit tool (Claude Code's Edit, MultiEdit, Write) would change,
+/// as a markdown diff block: its lines removed and added, the first few.
+fn edit_diff(tool: &str, input: &serde_json::Value) -> Option<String> {
+    const MOST: usize = 24;
+    let text = |v: &serde_json::Value, key: &str| v.get(key)?.as_str().map(str::to_owned);
+    let mut lines: Vec<String> = Vec::new();
+    let mut change = |old: &str, new: &str| {
+        lines.extend(old.lines().map(|l| format!("-{l}")));
+        lines.extend(new.lines().map(|l| format!("+{l}")));
+    };
+    match tool {
+        "Edit" => change(&text(input, "old_string")?, &text(input, "new_string")?),
+        "MultiEdit" => {
+            for edit in input.get("edits")?.as_array()? {
+                change(&text(edit, "old_string")?, &text(edit, "new_string")?);
+            }
+        },
+        "Write" => change("", &text(input, "content")?),
+        _ => return None,
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let more = lines.len().saturating_sub(MOST);
+    lines.truncate(MOST);
+    if more > 0 {
+        lines.push(format!("… {more} more lines"));
+    }
+    // (A fence longer than any run of backticks in it.)
+    let fence = "`".repeat(3.max(lines.iter().map(|l| longest_run(l, '`')).max().unwrap_or(0) + 1));
+    Some(format!("{fence}diff\n{}\n{fence}", lines.join("\n")))
+}
+
+fn longest_run(text: &str, c: char) -> usize {
+    let (mut most, mut run) = (0, 0);
+    for ch in text.chars() {
+        run = if ch == c { run + 1 } else { 0 };
+        most = most.max(run);
+    }
+    most
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn edits_as_diffs() {
+        let edit =
+            serde_json::json!({ "file_path": "a.rs", "old_string": "x\ny", "new_string": "z" });
+        assert_eq!(super::edit_diff("Edit", &edit).unwrap(), "```diff\n-x\n-y\n+z\n```");
+        let write = serde_json::json!({ "file_path": "a.md", "content": "```\ncode\n```" });
+        assert_eq!(super::edit_diff("Write", &write).unwrap(), "````diff\n+```\n+code\n+```\n````");
+        let long = serde_json::json!({ "content": "l\n".repeat(30) });
+        assert!(super::edit_diff("Write", &long).unwrap().contains("… 6 more lines"));
+        assert_eq!(super::edit_diff("Bash", &serde_json::json!({ "command": "ls" })), None);
+    }
+
     use super::word_at;
 
     #[test]

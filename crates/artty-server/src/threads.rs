@@ -487,6 +487,7 @@ mod tests {
             tool_name: "Bash".into(),
             summary: "cargo test".into(),
             state: ApprovalState::Pending,
+            input: serde_json::Value::Null,
         };
         threads.add(1, permission);
         // A permission prompt's notification adds nothing: the request is there.
@@ -514,6 +515,7 @@ mod tests {
                     tool_name: "Bash".into(),
                     summary: "cargo test".into(),
                     state: ApprovalState::Allowed,
+                    input: serde_json::Value::Null,
                 },
                 ThreadItem::Reply { text: "Fixed.".into() },
             ]

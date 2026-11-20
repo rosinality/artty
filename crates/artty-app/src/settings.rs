@@ -1024,6 +1024,11 @@ impl Render for Settings {
                 .child("Status hooks let agents tell artty when they're working, need you, or are done, and which conversation to resume.")
                 .into_any_element(),
         ];
+        agent_rows.push(Self::row(
+            "Run delegated agents headless",
+            Some("Agents started with a task run without their terminal UI (^T in the tab takes one over)"),
+            self.toggle("headless", c.headless_tasks, "headless-tasks", cx),
+        ));
         agent_rows.extend(self.agent_rows(cx));
         agent_rows.push(Self::row(
             "Configuration file",
