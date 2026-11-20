@@ -9,7 +9,7 @@ use std::time::Duration;
 use artty_core::SessionId;
 use artty_core::control::{
     AgentState, ApprovalInfo, AskInfo, AskState, HookEvent, ReadSource, Request, Response,
-    SESSION_ENV, SOCKET_ENV, SplitDirection, live_sockets,
+    SESSION_ENV, SOCKET_ENV, SplitDirection, ThreadEntry, ThreadItem, live_sockets,
 };
 use artty_core::protocol::QueueKind;
 use serde_json::{Value, json};
@@ -26,6 +26,7 @@ pub const COMMANDS: &[&str] = &[
     "approvals",
     "approval",
     "queue",
+    "thread",
     "notify",
     "status",
     "focus",
@@ -101,6 +102,11 @@ artty, your own pane is found automatically:
   artty queue [--json]                   what needs you: permission requests,
                                          agents waiting, unread replies
   artty queue --dismiss ID               mark a reply read
+  artty thread --tab N [--lines N] [--after SEQ] [--json]
+                                         what pane N's agent was given and said,
+                                         its permission requests and sessions,
+                                         oldest first (the last N; or after an
+                                         entry's SEQ, from --json)
   artty approve --hook --agent NAME      (an agent's PermissionRequest hook)
   artty new [--split right|down] [--tab N] [--cwd DIR] [--title T]
             [--workspace NAME] [--background] [-- COMMAND...]
@@ -266,6 +272,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--cancel" => _ = flags.insert("cancel", args.value("--cancel")?),
             "--always" => _ = flags.insert("always", args.value("--always")?),
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
+            "--after" => _ = flags.insert("after", args.value("--after")?),
             "--raw" | "--no-wait" | "--list" | "--abandon" => {
                 switches.insert(match arg.as_str() {
                     "--raw" => "raw",
@@ -535,6 +542,19 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 .transpose()?;
             Request::Decide { id, allow, message: flags.get("message").cloned(), always }
         },
+        "thread" => {
+            let number = |name: &str| -> Result<Option<u64>, String> {
+                flags
+                    .get(name)
+                    .map(|v| v.parse().map_err(|_| format!("--{name}: not a number")))
+                    .transpose()
+            };
+            Request::Thread {
+                tab: tab.or_else(own_tab).ok_or("thread: which pane? (--tab N)")?,
+                after: number("after")?,
+                limit: number("lines")?.map(|n| n as usize),
+            }
+        },
         "queue" => match flags.get("dismiss") {
             Some(id) => Request::QueueDismiss {
                 id: id.parse().map_err(|_| "--dismiss: not a number (a reply's id)")?,
@@ -697,6 +717,17 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
                 };
                 let text = item.text.lines().next().unwrap_or_default();
                 println!("{:>14}  pane {:<3} {:<10} {}", item.id, item.pane, kind, text);
+            }
+            Ok(0)
+        },
+        Response::Thread { entries, .. } if json => {
+            println!("{}", serde_json::to_string_pretty(&entries).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Thread { agent, entries, .. } => {
+            let agent = agent.unwrap_or_else(|| "agent".to_owned());
+            for entry in &entries {
+                print!("{}", thread_entry(entry, &agent));
             }
             Ok(0)
         },
@@ -986,6 +1017,44 @@ fn print_ask(ask: &AskInfo, json: bool) -> Result<i32, String> {
             Ok(3)
         },
     }
+}
+
+/// A thread's entry for reading: its time, a mark, and what it says (later
+/// lines indented under the first).
+fn thread_entry(entry: &ThreadEntry, agent: &str) -> String {
+    let (mark, head, text) = match &entry.item {
+        ThreadItem::Prompt { text, ask: Some(id) } => {
+            ("›", format!("you (ask {id})"), text.clone())
+        },
+        ThreadItem::Prompt { text, ask: None } => ("›", "you".to_owned(), text.clone()),
+        ThreadItem::Reply { text } => ("‹", agent.to_owned(), text.clone()),
+        ThreadItem::Permission { id, summary, state, .. } => {
+            let state = serde_json::to_value(state).unwrap_or_default();
+            let state = state.as_str().unwrap_or_default().to_owned();
+            ("⚑", format!("permission {id}, {state}"), summary.clone())
+        },
+        ThreadItem::Waiting { message } => ("!", "waiting".to_owned(), message.clone()),
+        ThreadItem::Session { event } => ("·", format!("session {event}"), String::new()),
+        ThreadItem::Interrupted { reason } => ("✕", "interrupted".to_owned(), reason.clone()),
+    };
+    let mut lines = text.lines();
+    let first = lines.next().map(|l| format!(": {l}")).unwrap_or_default();
+    let mut out = format!("{}  {mark} {head}{first}\n", clock(entry.at_ms));
+    for line in lines {
+        out.push_str(&format!("          {line}\n"));
+    }
+    out
+}
+
+/// A Unix time in milliseconds as local "HH:MM".
+fn clock(ms: u64) -> String {
+    let secs = (ms / 1000) as libc::time_t;
+    // SAFETY: `tm` is written by localtime_r before it's read.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return "--:--".to_owned();
+    }
+    format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
 }
 
 fn print_approval(approval: &ApprovalInfo) {

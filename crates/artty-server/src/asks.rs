@@ -191,6 +191,14 @@ impl Asks {
         })
     }
 
+    /// The ask `pane`'s agent is at work on, if its turn is one.
+    pub fn running_in(&self, pane: PaneId) -> Option<u64> {
+        self.asks
+            .iter()
+            .find(|(_, a)| a.pane == pane && a.state == AskState::Running)
+            .map(|(&id, _)| id)
+    }
+
     /// Asks not yet over: all, or `pane`'s; oldest first.
     pub fn pending_ids(&self, pane: Option<PaneId>) -> Vec<u64> {
         let mine = |ask: &Ask| pane.is_none_or(|pane| ask.pane == pane);

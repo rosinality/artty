@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use artty_core::control::{
     AgentState, Decision, PaneProcesses, ProcessRow, ReadSource, Request, Response, SESSION_ENV,
-    SOCKET_ENV, ServerInfo, ServerUsage, SplitDirection, TabInfo, WorkspaceInfo,
+    SOCKET_ENV, ServerInfo, ServerUsage, SplitDirection, TabInfo, ThreadItem, WorkspaceInfo,
 };
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
@@ -280,6 +280,8 @@ pub(crate) struct Server {
     replies: crate::queue::Replies,
     /// Since when each pane's agent has waited (Unix ms), for the queue.
     waiting_since: HashMap<PaneId, u64>,
+    /// Each agent's thread.
+    threads: crate::threads::Threads,
     next_pane: PaneId,
     next_window: WindowId,
     next_workspace: WorkspaceId,
@@ -561,6 +563,7 @@ impl Server {
             approval_waiters: HashMap::new(),
             replies: crate::queue::Replies::new(),
             waiting_since: HashMap::new(),
+            threads: crate::threads::Threads::default(),
             next_pane: 1,
             next_window: 1,
             sizes: HashMap::new(),
@@ -1422,6 +1425,7 @@ impl Server {
         }
         self.asks.fail_pane(pane, message, Instant::now());
         self.replies.pane_closed(pane);
+        self.threads.pane_closed(pane);
         for release in self.approvals.pane_closed(pane, Instant::now()) {
             self.release_approval(release);
         }
@@ -2230,6 +2234,15 @@ impl Server {
         );
         let info = self.approvals.info(id, now).expect("just opened");
         let message = format!("Allow {}?", info.summary);
+        self.threads.add(
+            pane_id,
+            ThreadItem::Permission {
+                id,
+                tool_name: info.tool_name.clone(),
+                summary: info.summary.clone(),
+                state: info.state,
+            },
+        );
         pane.process = pane.session.process();
         pane.report(AgentState::Waiting, Some(message.clone()), None, agent);
         self.notify_user(pane_id, Some("Needs permission"), &message);
@@ -2272,6 +2285,8 @@ impl Server {
         let now = Instant::now();
         if let Some(pane) = self.approvals.hangup(conn, now) {
             self.asks.interrupted(pane, now);
+            let reason = "a permission prompt was turned down".to_owned();
+            self.threads.add(pane, ThreadItem::Interrupted { reason });
             if let Some(pane) = self.panes.get_mut(&pane) {
                 let message = Some("Permission prompt dismissed".to_owned());
                 pane.report(AgentState::Done, message, None, None);
@@ -2757,6 +2772,22 @@ impl Server {
             | Request::Approve { .. }
             | Request::Decide { .. } => unreachable!("handled before"),
             Request::Queue => Response::Queue { items: self.queue_items() },
+            Request::Thread { tab, after, limit } => {
+                let pane = self.panes.get(&tab).ok_or(format!("no pane {tab}"))?;
+                let agent = pane.agent_name();
+                // Permission requests as they are now (answered since, say).
+                let now = Instant::now();
+                for id in self.threads.permission_ids(tab) {
+                    if let Some(info) = self.approvals.info(id, now) {
+                        self.threads.permission(id, info.state);
+                    }
+                }
+                Response::Thread {
+                    pane: tab,
+                    agent,
+                    entries: self.threads.entries(tab, after, limit),
+                }
+            },
             Request::QueueDismiss { id } => {
                 if !self.replies.dismiss(id) {
                     return Err(format!("no unread reply {id}"));
@@ -2808,6 +2839,10 @@ impl Server {
                 if let Some(hook) = &hook {
                     let now = Instant::now();
                     self.asks.hook(id, hook, now);
+                    // (After the asks: a turn that took one says so.)
+                    let ask =
+                        (hook.turn() == Some(true)).then(|| self.asks.running_in(id)).flatten();
+                    self.threads.hook(id, hook, message.as_deref(), ask);
                     for release in self.approvals.hook(id, hook, now) {
                         self.release_approval(release);
                     }

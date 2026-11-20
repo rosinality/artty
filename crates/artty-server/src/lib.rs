@@ -13,6 +13,7 @@ mod queue;
 mod server;
 mod sessions;
 mod status;
+mod threads;
 mod watch;
 
 use std::io::{self, BufRead, BufReader, Write};

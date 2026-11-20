@@ -366,6 +366,42 @@ pub enum Request {
     QueueDismiss {
         id: u64,
     },
+    /// What a pane's agent and the user said and did, oldest first: its
+    /// entries after `after` (an entry's `seq`), the last `limit` of them.
+    Thread {
+        tab: SessionId,
+        #[serde(default)]
+        after: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+}
+
+/// One thing in an agent's thread.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadEntry {
+    /// Increasing, server-wide: ask for what came after one.
+    pub seq: u64,
+    /// When, in milliseconds since the Unix epoch.
+    pub at_ms: u64,
+    pub item: ThreadItem,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreadItem {
+    /// A turn began: what the agent was given (by `artty ask`, with its id,
+    /// or typed in its terminal).
+    Prompt { text: String, ask: Option<u64> },
+    /// A turn ended: the agent's last message.
+    Reply { text: String },
+    /// It asked permission to use a tool; `state` is how that went.
+    Permission { id: u64, tool_name: String, summary: String, state: ApprovalState },
+    /// It waits for the user otherwise (a question of its own).
+    Waiting { message: String },
+    /// Its session: `started`, `resumed`, `cleared`, `compacted`, `ended`.
+    Session { event: String },
+    /// Its turn stopped short (a permission prompt turned down there).
+    Interrupted { reason: String },
 }
 
 /// Someone's answer to a permission request.
@@ -595,6 +631,11 @@ pub enum Response {
     },
     Queue {
         items: Vec<crate::protocol::QueueItem>,
+    },
+    Thread {
+        pane: SessionId,
+        agent: Option<String>,
+        entries: Vec<ThreadEntry>,
     },
 }
 
