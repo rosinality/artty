@@ -154,6 +154,33 @@ impl WindowView {
         });
     }
 
+    /// A message's line over it (who, when), and on hover, Copy: the
+    /// message as written (its markdown).
+    fn copyable(&self, label: String, text: &str, seq: u64, cx: &mut Context<Self>) -> gpui::Div {
+        let text = text.to_owned();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(11.))
+            .text_color(ui(0xffffff60))
+            .child(label)
+            .child(
+                div()
+                    .id(SharedString::from(format!("copy-{seq}")))
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .opacity(0.)
+                    .group_hover(SharedString::from(format!("entry-{seq}")), |s| s.opacity(1.))
+                    .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffd0)))
+                    .child("Copy")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+                        this.show_toast("Copied", cx);
+                    })),
+            )
+    }
+
     /// A message, drawn as markdown (`id`: unique in the thread).
     fn markdown(&self, agents: &Agents, text: &str, id: &str) -> gpui::Div {
         use std::hash::{Hash, Hasher};
@@ -658,11 +685,14 @@ impl WindowView {
                             .flex_col()
                             .items_end()
                             .gap(px(3.))
-                            .child(div().text_size(px(11.)).text_color(ui(0xffffff60)).child(
+                            .child(self.copyable(
                                 match (ask, from) {
                                     (_, Some(from)) => format!("{} · {time}", from_label(from)),
                                     (_, None) => format!("you · {time}"),
                                 },
+                                text,
+                                seq,
+                                cx,
                             ))
                             .child(bubble(true).child(self.markdown(
                                 agents,
@@ -676,12 +706,7 @@ impl WindowView {
                     .flex()
                     .flex_col()
                     .gap(px(3.))
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(ui(0xffffff60))
-                            .child(format!("{} · {time}", agent.agent)),
-                    )
+                    .child(self.copyable(format!("{} · {time}", agent.agent), text, seq, cx))
                     .child(bubble(false).child(self.markdown(agents, text, &seq.to_string())))
                     .into_any_element(),
                 ThreadItem::Permission { id, summary, state, .. } => {
@@ -793,12 +818,13 @@ impl WindowView {
                         .border_l_2()
                         .border_color(ui(0x7aa2f7ff))
                         .bg(ui(0xffffff08))
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(ui(0xffffff70))
-                                .child(format!("{who} → {target} · {time}")),
-                        )
+                        // (Copy: its answer, once there's one.)
+                        .child(self.copyable(
+                            format!("{who} → {target} · {time}"),
+                            reply.as_deref().unwrap_or(text),
+                            seq,
+                            cx,
+                        ))
                         .child(self.markdown(agents, text, &seq.to_string()))
                         .child(
                             div()
@@ -968,11 +994,14 @@ impl WindowView {
             // An entry just searched for stands out a moment.
             let found = agents.flash.is_some_and(|(s, at)| s == seq && at.elapsed() < FLASH_FOUND);
             div()
+                .group(SharedString::from(format!("entry-{seq}")))
                 .flex_none()
                 .rounded(px(8.))
                 .when(found, |d| d.bg(ui(0xe0af6826)).border_1().border_color(ui(0xe0af6888)))
                 .child(element)
         });
+        // (Built now: their buttons' listeners hold the context.)
+        let entries: Vec<gpui::Div> = entries.collect();
         let (label, color) = state_label(agent.state);
         let pane = agent.pane;
         let live =

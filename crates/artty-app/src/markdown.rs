@@ -6,8 +6,9 @@
 use std::ops::Range;
 
 use gpui::{
-    AnyElement, App, Font, FontStyle, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
-    StrikethroughStyle, Styled, StyledText, TextRun, UnderlineStyle, Window, div, px,
+    AnyElement, App, Font, FontStyle, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, StrikethroughStyle, Styled,
+    StyledText, TextRun, UnderlineStyle, Window, div, px,
 };
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -305,20 +306,47 @@ fn block_view(block: &Block, look: &Look, id: &str) -> AnyElement {
                 .child(text_view(&bold, look, id))
                 .into_any_element()
         },
-        Block::Code(code) => div()
-            .flex()
-            .flex_col()
-            .px(px(8.))
-            .py(px(6.))
-            .rounded(px(6.))
-            .bg(look.code_bg)
-            .font_family(look.mono.clone())
-            .text_size(px(12.))
-            .children(code.lines().map(|line| {
-                // (An empty line keeps its height.)
-                div().min_h(px(16.)).child(line.to_owned())
-            }))
-            .into_any_element(),
+        Block::Code(code) => {
+            let group = SharedString::from(format!("{id}-code"));
+            let copied = code.clone();
+            div()
+                .group(group.clone())
+                .relative()
+                .flex()
+                .flex_col()
+                .px(px(8.))
+                .py(px(6.))
+                .rounded(px(6.))
+                .bg(look.code_bg)
+                .font_family(look.mono.clone())
+                .text_size(px(12.))
+                .children(code.lines().map(|line| {
+                    // (An empty line keeps its height.)
+                    div().min_h(px(16.)).child(line.to_owned())
+                }))
+                // On hover: Copy, the code alone.
+                .child(
+                    div()
+                        .id(SharedString::from(format!("{id}-copy")))
+                        .absolute()
+                        .top(px(4.))
+                        .right(px(4.))
+                        .px(px(6.))
+                        .rounded(px(4.))
+                        .font_family(look.font.clone())
+                        .text_size(px(11.))
+                        .text_color(look.dim)
+                        .bg(look.code_bg)
+                        .opacity(0.)
+                        .group_hover(group, |s| s.opacity(1.))
+                        .hover(|d| d.text_color(look.text))
+                        .child("Copy")
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone()))
+                        }),
+                )
+                .into_any_element()
+        },
         Block::List { start, items } => div()
             .flex()
             .flex_col()

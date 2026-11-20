@@ -31,6 +31,9 @@ impl Scratch {
         let dir = std::env::temp_dir().join(format!("artty-t-{}-{n}", std::process::id()));
         std::fs::create_dir_all(dir.join("t")).unwrap();
         std::fs::create_dir_all(dir.join("config/artty")).unwrap();
+        // No notifications: with no app attached, the server posts them
+        // itself, to whoever runs the tests.
+        let config = format!("notifications = false\n{config}");
         std::fs::write(dir.join("config/artty/config.toml"), config).unwrap();
         let server = spawn_server(&dir);
         let scratch = Scratch { dir, server };
