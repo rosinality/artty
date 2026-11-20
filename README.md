@@ -374,6 +374,22 @@ agents ask each other without that, allow them in its settings
 (`permissions.allow`): `"Bash(artty agents:*)"`, `"Bash(artty ask:*)"`,
 `"Bash(artty thread:*)"`, `"Bash(artty guide)"`.
 
+### Waiting on agents
+
+```sh
+artty wait 1795…01 1795…02 --timeout 600      # the first of these asks to be over
+artty wait 1795…01 1795…02 --all              # every one
+artty events --follow                         # every agent's thread, as it comes
+artty events --follow --tab 4 --text          # one agent's, as artty thread shows it
+artty events --after 1795…37                  # what came after an entry, and exit
+```
+
+`artty wait` prints each ask's answer (or how far it got), and exits 3 if
+what it waited for didn't come in time. `artty events` prints thread
+entries — asks, replies, permission requests, files changed, handoffs — a
+JSON object a line, with the pane and the entry's `seq` (to go on from with
+`--after`). Both carry on across a hand-over to a new server build.
+
 ### Starting agents with a task
 
 ```sh

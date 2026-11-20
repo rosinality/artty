@@ -405,6 +405,34 @@ pub enum Request {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Wait for the first of these asks to be over (`all`: every one), at
+    /// most `timeout_secs`; how they all are then.
+    AskWait {
+        ids: Vec<u64>,
+        #[serde(default)]
+        all: bool,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+    /// Every pane's thread entries after `after` (an entry's `seq`), or
+    /// `tab`'s; none yet: wait for one, at most `timeout_secs`. Without
+    /// `after`: none, and where they're up to (to go on from).
+    Events {
+        #[serde(default)]
+        after: Option<u64>,
+        #[serde(default)]
+        tab: Option<SessionId>,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
+}
+
+/// A thread entry, and whose thread it's in.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadEvent {
+    pub pane: SessionId,
+    #[serde(flatten)]
+    pub entry: ThreadEntry,
 }
 
 /// A pane's agent, as `Agents` lists it.
@@ -761,6 +789,12 @@ pub enum Response {
     },
     Agents {
         agents: Vec<AgentInfo>,
+    },
+    /// Thread entries, oldest first; `last`: where they're up to (the next
+    /// `Events` goes on from there).
+    Events {
+        events: Vec<ThreadEvent>,
+        last: u64,
     },
 }
 

@@ -46,6 +46,8 @@ pub const COMMANDS: &[&str] = &[
     "activity",
     "hooks",
     "guide",
+    "wait",
+    "events",
     "shell-integration",
 ];
 
@@ -93,6 +95,16 @@ artty, your own pane is found automatically:
   artty ask --cancel all [--tab N]       ... every one (of pane N's), printing them
   artty ask --list [--tab N] [--json]    asks not yet over: id, pane, state, text
   artty ask --cancel ID --abandon        stop waiting for one with its agent
+  artty wait ID... [--all] [--timeout S] [--json]
+                                         wait for the first of these asks to be
+                                         over (--all: every one), and print each
+                                         one's answer or state; exit 3 if not
+  artty events --follow [--tab N] [--text]
+                                         every agent's thread entries as they
+                                         come (asks, replies, permission
+                                         requests, files changed), a JSON object
+                                         a line with its pane and seq
+  artty events --after SEQ [--tab N]     ... those after SEQ, and exit
   artty ask --bring-back ID              give an answered ask's answer to the
                                          agent whose thread it was written from
   artty approvals [--tab N] [--json]     agents' permission requests (pending
@@ -298,11 +310,14 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--always" => _ = flags.insert("always", args.value("--always")?),
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
             "--after" => _ = flags.insert("after", args.value("--after")?),
-            "--raw" | "--no-wait" | "--list" | "--abandon" => {
+            "--raw" | "--no-wait" | "--list" | "--abandon" | "--all" | "--follow" | "--text" => {
                 switches.insert(match arg.as_str() {
                     "--raw" => "raw",
                     "--list" => "list",
                     "--abandon" => "abandon",
+                    "--all" => "all",
+                    "--follow" => "follow",
+                    "--text" => "text",
                     _ => "no-wait",
                 });
             },
@@ -603,6 +618,33 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             Request::Decide { id, allow, message: flags.get("message").cloned(), always }
         },
         "agents" => Request::Agents,
+        "wait" => {
+            let ids: Vec<u64> = rest
+                .iter()
+                .map(|id| id.parse().map_err(|_| format!("wait: {id} isn't an ask's id")))
+                .collect::<Result<_, _>>()?;
+            if ids.is_empty() {
+                return Err("wait: which asks? (their ids)".into());
+            }
+            let timeout_secs = flags
+                .get("timeout")
+                .map(|t| t.parse().map_err(|_| "--timeout: not a number"))
+                .transpose()?;
+            let all = switches.contains("all");
+            let response = keep_waiting(timeout_secs, "artty wait", |left| Request::AskWait {
+                ids: ids.clone(),
+                all,
+                timeout_secs: left,
+            })?;
+            return print_waited(response, all, switches.contains("json"));
+        },
+        "events" => {
+            let after = flags
+                .get("after")
+                .map(|v| v.parse().map_err(|_| "--after: not a number (an entry's seq)"))
+                .transpose()?;
+            return events(after, tab, switches.contains("follow"), switches.contains("text"));
+        },
         "thread" => {
             let number = |name: &str| -> Result<Option<u64>, String> {
                 flags
@@ -754,6 +796,12 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         Response::Error { message } => Err(message),
         Response::Tab { id } => {
             println!("{id}");
+            Ok(0)
+        },
+        Response::Events { events, .. } => {
+            for event in &events {
+                println!("{}", serde_json::to_string(event).unwrap_or_default());
+            }
             Ok(0)
         },
         Response::Started { id, ask } => {
@@ -1322,14 +1370,29 @@ fn socket() -> Result<PathBuf, String> {
     live_sockets().into_iter().next().ok_or_else(|| "artty is not running".to_owned())
 }
 
-/// Wait for an ask's reply, for at most `timeout_secs`. The server keeps
-/// asks across a hand-over to a new build (which drops connections) and a
-/// restart: ask again, by id, once it's back.
+/// Wait for an ask's reply, for at most `timeout_secs`.
 fn wait_for_ask(id: u64, timeout_secs: Option<u64>) -> Result<Response, String> {
+    let again = format!("artty ask --result {id}");
+    keep_waiting(timeout_secs, &again, |left| Request::AskResult {
+        id,
+        wait: true,
+        timeout_secs: left,
+    })
+}
+
+/// Send what `request` makes (given the seconds left), waiting at most
+/// `timeout_secs` in all. The server keeps asks across a hand-over to a new
+/// build (which drops connections) and a restart: ask again once it's
+/// back (`again`: how to, if it isn't).
+fn keep_waiting(
+    timeout_secs: Option<u64>,
+    again: &str,
+    request: impl Fn(Option<u64>) -> Request,
+) -> Result<Response, String> {
     let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
     loop {
         let left = deadline.map(|d| d.saturating_duration_since(Instant::now()).as_secs());
-        let wait = Request::AskResult { id, wait: true, timeout_secs: left };
+        let wait = request(left);
         match send(&wait, left.map(|s| Duration::from_secs(s + 5))) {
             Err(err) if err.starts_with(CLOSED) => {},
             other => return other,
@@ -1342,13 +1405,107 @@ fn wait_for_ask(id: u64, timeout_secs: Option<u64>) -> Result<Response, String> 
                 break;
             }
             if Instant::now() > back || deadline.is_some_and(|d| Instant::now() > d) {
-                return Err(format!("{CLOSED}; artty ask --result {id} waits for its reply"));
+                return Err(format!("{CLOSED}; {again} waits again"));
             }
         }
     }
 }
 
 const CLOSED: &str = "the server closed the connection";
+
+/// `artty wait`: each ask, its answer (or how far it got); exit 0 once
+/// what was waited for came (the first over, or `all`), else 3.
+fn print_waited(response: Response, all: bool, json: bool) -> Result<i32, String> {
+    let asks = match response {
+        Response::Asks { asks } => asks,
+        Response::Error { message } => return Err(message),
+        other => return Err(format!("unexpected answer: {other:?}")),
+    };
+    let over = |a: &AskInfo| a.state.finished();
+    let came = if all { asks.iter().all(over) } else { asks.iter().any(over) };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&asks).unwrap_or_default());
+    } else {
+        for ask in &asks {
+            let state = serde_json::to_value(ask.state).unwrap_or_default();
+            let state = state.as_str().unwrap_or_default().to_owned();
+            println!("ask {} (pane {}): {state}", ask.id, ask.pane);
+            let said = ask.reply.as_deref().or(ask.error.as_deref()).unwrap_or_default();
+            for line in said.lines() {
+                println!("  {line}");
+            }
+        }
+    }
+    Ok(if came { 0 } else { 3 })
+}
+
+/// `artty events`: thread entries as they come (every pane's, or `tab`'s),
+/// a JSON object a line (`text`: as `artty thread` shows them). Without
+/// `follow`, those after `after`; with it, on and on (from now, or after).
+fn events(
+    after: Option<u64>,
+    tab: Option<SessionId>,
+    follow: bool,
+    text: bool,
+) -> Result<i32, String> {
+    use std::io::Write;
+    let mut after = match (after, follow) {
+        (Some(after), _) => after,
+        (None, true) => {
+            match send(&Request::Events { after: None, tab, timeout_secs: None }, None)? {
+                Response::Events { last, .. } => last,
+                Response::Error { message } => return Err(message),
+                _ => 0,
+            }
+        },
+        (None, false) => return Err("events: --after SEQ, or --follow".into()),
+    };
+    let mut names: std::collections::HashMap<SessionId, String> = Default::default();
+    loop {
+        let wait = if follow { Some(30) } else { Some(0) };
+        let request = Request::Events { after: Some(after), tab, timeout_secs: wait };
+        let response = match send(&request, Some(Duration::from_secs(40))) {
+            Err(err) if follow && err.starts_with(CLOSED) => {
+                // A hand-over: back in a moment, with the entries kept.
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
+            },
+            other => other?,
+        };
+        let (found, last) = match response {
+            Response::Events { events, last } => (events, last),
+            Response::Error { message } => return Err(message),
+            _ => return Err("unexpected answer".into()),
+        };
+        // Each pane's agent, by name (asked again for one not yet known).
+        if text
+            && found.iter().any(|e| !names.contains_key(&e.pane))
+            && let Ok(Response::Agents { agents }) =
+                send(&Request::Agents, Some(Duration::from_secs(5)))
+        {
+            names.extend(agents.into_iter().map(|a| (a.pane, a.agent)));
+        }
+        let mut out = std::io::stdout().lock();
+        for event in &found {
+            let line = match text {
+                true => {
+                    let agent = names.get(&event.pane).map_or("agent", String::as_str);
+                    let entry = thread_entry(&event.entry, agent);
+                    format!("pane {:>3}  {}", event.pane, entry.trim_end())
+                },
+                false => serde_json::to_string(event).unwrap_or_default(),
+            };
+            // A reader gone (a pipe closed): done.
+            if writeln!(out, "{line}").and_then(|()| out.flush()).is_err() {
+                return Ok(0);
+            }
+        }
+        after = last.max(after);
+        if !follow {
+            return Ok(0);
+        }
+    }
+}
 
 fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String> {
     let path = socket()?;

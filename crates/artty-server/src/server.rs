@@ -245,8 +245,34 @@ struct PendingRun {
 
 /// Who's waiting for an ask to be over; at `deadline`, they're told how
 /// far it got (it carries on).
+/// Someone waiting for asks to be over: `asks[0]` (`artty ask --result`),
+/// or the first of `asks` (`all`: every one) for `artty wait`.
 struct AskWaiter {
-    ask: u64,
+    asks: Vec<u64>,
+    all: bool,
+    /// Answer with every ask's state (`artty wait`), not one's.
+    many: bool,
+    waiter: Waiter,
+    deadline: Option<Instant>,
+}
+
+impl AskWaiter {
+    fn one(ask: u64, waiter: Waiter, deadline: Option<Instant>) -> Self {
+        AskWaiter { asks: vec![ask], all: false, many: false, waiter, deadline }
+    }
+
+    fn over(&self, asks: &crate::asks::Asks) -> bool {
+        match self.all {
+            true => self.asks.iter().all(|&id| asks.finished(id)),
+            false => self.asks.iter().any(|&id| asks.finished(id)),
+        }
+    }
+}
+
+/// Someone waiting for thread entries after `after` (`artty events`).
+struct EventWaiter {
+    after: u64,
+    tab: Option<PaneId>,
     waiter: Waiter,
     deadline: Option<Instant>,
 }
@@ -274,6 +300,7 @@ pub(crate) struct Server {
     /// `artty ask`s, and who waits for them.
     asks: crate::asks::Asks,
     ask_waiters: Vec<AskWaiter>,
+    event_waiters: Vec<EventWaiter>,
     /// Agents' permission requests, and their hooks waiting for answers.
     approvals: crate::approvals::Approvals,
     approval_waiters: HashMap<crate::approvals::Conn, Waiter>,
@@ -572,6 +599,7 @@ impl Server {
             runs: Vec::new(),
             asks: crate::asks::Asks::new(),
             ask_waiters: Vec::new(),
+            event_waiters: Vec::new(),
             approvals: crate::approvals::Approvals::new(),
             approval_waiters: HashMap::new(),
             replies: crate::queue::Replies::new(),
@@ -1611,6 +1639,8 @@ impl Server {
                 // (Their asks carry on.)
                 self.ask_waiters
                     .retain(|w| !matches!(w.waiter, Waiter::App(client, _) if client == id));
+                self.event_waiters
+                    .retain(|w| !matches!(w.waiter, Waiter::App(client, _) if client == id));
             },
         }
     }
@@ -2209,11 +2239,9 @@ impl Server {
                     }
                 }
                 match added {
-                    Ok(ask) if wait => self.ask_waiters.push(AskWaiter {
-                        ask,
-                        waiter,
-                        deadline: deadline(timeout_secs),
-                    }),
+                    Ok(ask) if wait => {
+                        self.ask_waiters.push(AskWaiter::one(ask, waiter, deadline(timeout_secs)))
+                    },
                     Ok(ask) => {
                         let info = self.asks.info(ask).expect("just added");
                         Self::answer(&self.clients, waiter, Response::Ask { ask: info });
@@ -2231,11 +2259,42 @@ impl Server {
                 Some(info) if !wait || info.state.finished() => {
                     Self::answer(&self.clients, waiter, Response::Ask { ask: info })
                 },
-                Some(_) => self.ask_waiters.push(AskWaiter {
-                    ask: id,
+                Some(_) => {
+                    self.ask_waiters.push(AskWaiter::one(id, waiter, deadline(timeout_secs)))
+                },
+            },
+            Request::AskWait { ids, all, timeout_secs } => {
+                if ids.is_empty() {
+                    return Self::answer(&self.clients, waiter, Response::error("which asks?"));
+                }
+                if let Some(id) = ids.iter().find(|&&id| self.asks.info(id).is_none()) {
+                    let message = format!("no ask {id} (asks are kept an hour once over)");
+                    return Self::answer(&self.clients, waiter, Response::error(message));
+                }
+                let waiting = AskWaiter {
+                    asks: ids,
+                    all,
+                    many: true,
                     waiter,
                     deadline: deadline(timeout_secs),
-                }),
+                };
+                match waiting.over(&self.asks) || timeout_secs == Some(0) {
+                    true => self.answer_asks(waiting),
+                    false => self.ask_waiters.push(waiting),
+                }
+            },
+            Request::Events { after, tab, timeout_secs } => {
+                let Some(after) = after else {
+                    let last = self.threads.newest();
+                    let response = Response::Events { events: Vec::new(), last };
+                    return Self::answer(&self.clients, waiter, response);
+                };
+                let waiting = EventWaiter { after, tab, waiter, deadline: deadline(timeout_secs) };
+                if timeout_secs == Some(0) || !self.threads.since(after, tab).is_empty() {
+                    self.answer_events(waiting);
+                } else {
+                    self.event_waiters.push(waiting);
+                }
             },
             request => {
                 let response = self.respond(request).unwrap_or_else(Response::error);
@@ -2636,13 +2695,53 @@ impl Server {
             }
         }
         let asks = &self.asks;
-        let over = |w: &mut AskWaiter| asks.finished(w.ask) || w.deadline.is_some_and(|d| d <= now);
-        for waiter in self.ask_waiters.extract_if(.., over) {
-            let response = match self.asks.info(waiter.ask) {
+        let over = |w: &mut AskWaiter| w.over(asks) || w.deadline.is_some_and(|d| d <= now);
+        let done: Vec<AskWaiter> = self.ask_waiters.extract_if(.., over).collect();
+        for waiter in done {
+            self.answer_asks(waiter);
+        }
+    }
+
+    /// Tell someone waiting for asks how they are.
+    fn answer_asks(&self, waiter: AskWaiter) {
+        let response = match waiter.many {
+            true => Response::Asks {
+                asks: waiter.asks.iter().filter_map(|&id| self.asks.info(id)).collect(),
+            },
+            false => match self.asks.info(waiter.asks[0]) {
                 Some(ask) => Response::Ask { ask },
-                None => Response::error(format!("ask {} is gone", waiter.ask)),
-            };
-            Self::answer(&self.clients, waiter.waiter, response);
+                None => Response::error(format!("ask {} is gone", waiter.asks[0])),
+            },
+        };
+        Self::answer(&self.clients, waiter.waiter, response);
+    }
+
+    /// Tell someone waiting for thread entries what came (perhaps nothing,
+    /// at its deadline).
+    fn answer_events(&self, waiter: EventWaiter) {
+        let found = self.threads.since(waiter.after, waiter.tab);
+        let last = found.last().map_or(waiter.after.max(self.threads.newest()), |(_, e)| e.seq);
+        let events = found
+            .into_iter()
+            .map(|(pane, entry)| artty_core::control::ThreadEvent { pane, entry })
+            .collect();
+        Self::answer(&self.clients, waiter.waiter, Response::Events { events, last });
+    }
+
+    /// Answer those waiting for thread entries, once there are some (or
+    /// they've waited long enough).
+    fn follow_events(&mut self, now: Instant) {
+        if self.event_waiters.is_empty() {
+            return;
+        }
+        let newest = self.threads.newest();
+        let ready = |w: &mut EventWaiter| {
+            w.deadline.is_some_and(|d| d <= now)
+                || (newest > w.after && !self.threads.since(w.after, w.tab).is_empty())
+        };
+        let ready: Vec<EventWaiter> = self.event_waiters.extract_if(.., ready).collect();
+        for waiter in ready {
+            self.answer_events(waiter);
         }
     }
 
@@ -3083,6 +3182,8 @@ impl Server {
             | Request::Ask { .. }
             | Request::AskResult { .. }
             | Request::Approve { .. }
+            | Request::AskWait { .. }
+            | Request::Events { .. }
             | Request::Decide { .. } => unreachable!("handled before"),
             Request::AskForward { id } => {
                 let ask = self.forward(id)?;
@@ -3521,6 +3622,7 @@ impl Server {
         let now = Instant::now();
         let asks = self.asks.next_due(now).into_iter();
         let waiters = self.ask_waiters.iter().filter_map(|w| w.deadline);
+        let waiters = waiters.chain(self.event_waiters.iter().filter_map(|w| w.deadline));
         if let Some(due) = asks.chain(waiters).min() {
             deadline = deadline.min(due);
         }
@@ -3545,6 +3647,7 @@ impl Server {
             self.pump_asks(now);
         }
         self.follow_handoffs(now);
+        self.follow_events(now);
         self.clear_seen();
         self.push_updates(now);
         if now.duration_since(self.last_save) >= SAVE_INTERVAL {

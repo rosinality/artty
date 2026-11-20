@@ -27,6 +27,13 @@ own pane's id is in `$ARTTY_SESSION_ID`.
   - Nothing is typed twice: a failed ask says why, and isn't retried.
 - `artty ask --list [--tab N]` lists asks not yet answered;
   `artty ask --cancel ID` takes back one not yet given to its agent.
+- `artty wait ID... [--timeout S]` waits for the first of several asks to be
+  over (`--all`: every one) and prints each one's answer or state; exit 3 if
+  what it waited for didn't come in time.
+- `artty events --follow [--tab N]` prints every agent's thread entries as
+  they come (asks, replies, permission requests, files changed), a JSON
+  object a line with its `pane` and `seq`; `artty events --after SEQ` prints
+  those after one, and exits.
 - `artty thread --tab N --lines 20` shows agent N's last 20 thread entries:
   what it was asked (and by whom), what it answered, its permission
   requests, the files it changed.

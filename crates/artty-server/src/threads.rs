@@ -19,6 +19,8 @@ pub struct Threads {
     /// Each pane's thread's key, on disk.
     keys: HashMap<PaneId, u64>,
     store: Store,
+    /// The newest entry's `seq` (what waiters for events go by).
+    newest: u64,
 }
 
 impl Default for Threads {
@@ -30,7 +32,7 @@ impl Default for Threads {
 impl Threads {
     pub fn new(store: Store) -> Self {
         crate::queue::seen_id(store.last_seq());
-        Threads { panes: HashMap::new(), keys: HashMap::new(), store }
+        Threads { panes: HashMap::new(), keys: HashMap::new(), store, newest: 0 }
     }
 
     pub fn store(&self) -> &Store {
@@ -86,6 +88,7 @@ impl Threads {
         let entry = ThreadEntry { seq, at_ms: crate::queue::now_ms(), item };
         let key = self.key(pane);
         self.store.put_entry(key, &entry);
+        self.newest = self.newest.max(seq);
         let thread = self.panes.entry(pane).or_default();
         thread.push_back(entry);
         if thread.len() > MOST
@@ -122,6 +125,30 @@ impl Threads {
             thread.iter().filter(|e| after.is_none_or(|after| e.seq > after)).collect();
         let skip = limit.map_or(0, |limit| newer.len().saturating_sub(limit));
         newer.into_iter().skip(skip).cloned().collect()
+    }
+
+    /// The newest entry's `seq` (0: none yet).
+    pub fn newest(&self) -> u64 {
+        self.newest
+    }
+
+    /// Entries after `after` in every thread (or `pane`'s), oldest first.
+    pub fn since(&self, after: u64, pane: Option<PaneId>) -> Vec<(PaneId, ThreadEntry)> {
+        if self.newest <= after {
+            return Vec::new();
+        }
+        let mut found: Vec<(PaneId, ThreadEntry)> = self
+            .panes
+            .iter()
+            .filter(|(p, _)| pane.is_none_or(|pane| **p == pane))
+            .flat_map(|(&p, thread)| {
+                // (Newest last: only the end of each needs looking at.)
+                let newer = thread.iter().rev().take_while(|e| e.seq > after);
+                newer.map(move |e| (p, e.clone())).collect::<Vec<_>>()
+            })
+            .collect();
+        found.sort_by_key(|(_, e)| e.seq);
+        found
     }
 
     /// Permission requests pending in any thread, by id, to bring up to
