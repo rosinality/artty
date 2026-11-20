@@ -21,6 +21,9 @@ pub struct PaneMeta {
     /// seconds; and the last one's exit code.
     running: Option<(Option<String>, u64)>,
     last_exit: Option<i32>,
+    /// The agent has set the terminal's title (see `Pane::agent_titled`).
+    #[serde(default)]
+    agent_titled: bool,
 }
 
 /// What a pane is doing, as shown in the sidebar.
@@ -106,6 +109,12 @@ pub struct Pane {
     pub command: Option<Vec<String>>,
     /// The agent's conversation id, from its hooks.
     agent_session: Option<String>,
+    /// That conversation's title, as its agent keeps it (Claude Code's
+    /// transcript): shown until the agent sets the terminal's title itself
+    /// (resumed, Claude Code does only once given a message). By session.
+    session_title: Option<(String, String)>,
+    /// The agent in the foreground has set the terminal's title.
+    agent_titled: bool,
     /// The agent's name, from its hooks (`claude`, `codex`, ...).
     reported_agent: Option<String>,
     /// Typed into the shell once it shows a prompt (resuming an agent).
@@ -165,6 +174,8 @@ impl Pane {
             agents,
             command,
             agent_session: None,
+            session_title: None,
+            agent_titled: false,
             reported_agent: None,
             pending_input: None,
             reading: None,
@@ -172,14 +183,53 @@ impl Pane {
     }
 
     pub fn title(&self) -> String {
-        let title = self.fixed_title.as_ref().or(self.title.as_ref());
+        // An agent that hasn't titled the terminal yet: its conversation's
+        // title (not the shell's, which is the command's name).
+        let agent = matches!(self.status, Status::Agent { .. });
+        let session_title = self
+            .session_title
+            .as_ref()
+            .filter(|(session, title)| {
+                agent
+                    && !title.is_empty()
+                    && !self.agent_titled
+                    && self.agent_session.as_ref() == Some(session)
+            })
+            .map(|(_, title)| title);
+        let title = self.fixed_title.as_ref().or(session_title).or(self.title.as_ref());
         title
             .cloned()
             .or_else(|| self.process.foreground.clone())
             .unwrap_or_else(|| "shell".to_owned())
     }
 
+    /// The conversation the agent is in, if its title isn't known yet.
+    pub fn untitled_session(&self) -> Option<&str> {
+        let session = self.agent_session.as_deref()?;
+        let known = self.session_title.as_ref().is_some_and(|(s, _)| s == session);
+        (!known && !self.agent_titled).then_some(session)
+    }
+
+    /// `session`'s title, as its agent keeps it (none: looked, none there).
+    /// (Empty: looked, none there; not looked for again.)
+    pub fn set_session_title(&mut self, session: &str, title: Option<String>) {
+        let title = title.unwrap_or_default().trim().to_owned();
+        self.session_title = Some((session.to_owned(), title));
+    }
+
     pub fn set_title(&mut self, title: Option<String>) {
+        // While an agent is in the foreground, what titles the terminal is it
+        // (a title that's only its name isn't one).
+        let named = |t: &str| {
+            let t = t.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
+            self.agent_name().is_some_and(|n| n.eq_ignore_ascii_case(t))
+        };
+        if matches!(self.status, Status::Agent { .. })
+            && title.as_deref().is_some_and(|t| !t.trim().is_empty() && !named(t))
+            && title != self.title
+        {
+            self.agent_titled = true;
+        }
         if title != self.title {
             self.title = title;
             let now = Instant::now();
@@ -269,6 +319,8 @@ impl Pane {
             self.reported = None;
             self.agent_session = None;
             self.reported_agent = None;
+            self.session_title = None;
+            self.agent_titled = false;
             self.status = self.shell_status();
             return;
         };
@@ -293,6 +345,7 @@ impl Pane {
                 .as_ref()
                 .map(|(command, since)| (command.clone(), since.elapsed().as_secs())),
             last_exit: self.last_exit,
+            agent_titled: self.agent_titled,
         }
     }
 
@@ -309,6 +362,7 @@ impl Pane {
             (command, now.checked_sub(Duration::from_secs(secs)).unwrap_or(now))
         });
         self.last_exit = meta.last_exit;
+        self.agent_titled = meta.agent_titled;
         self.refresh();
     }
 

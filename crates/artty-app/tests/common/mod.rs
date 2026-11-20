@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 pub const ARTTY: &str = env!("CARGO_BIN_EXE_artty");
 pub const AGENT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake_agent.py");
 
-/// What the artty the tests may run in tells its panes: not for these.
-const OUTSIDE: [&str; 2] = ["ARTTY_SOCKET", "ARTTY_SESSION_ID"];
+/// What the artty the tests may run in tells its panes, and where the
+/// agents' own files are: not for these (theirs are in their home).
+const OUTSIDE: [&str; 4] = ["ARTTY_SOCKET", "ARTTY_SESSION_ID", "CLAUDE_CONFIG_DIR", "CODEX_HOME"];
 
 /// A scratch server with a home of its own; stopped (and gone) when dropped.
 pub struct Scratch {

@@ -3324,6 +3324,13 @@ impl Server {
                 // it, its first report would be taken for an agent gone.
                 pane.process = pane.session.process();
                 pane.report(state, message.clone(), agent_session, agent);
+                // A conversation resumed: its title, till its agent titles the
+                // terminal (Claude Code's: once given a message).
+                if matches!(&pane.status, Status::Agent { name, .. } if name == "claude")
+                    && let Some(session) = pane.untitled_session().map(str::to_owned)
+                {
+                    pane.set_session_title(&session, crate::sessions::claude_title(&session));
+                }
                 if let Some(hook) = &hook {
                     let now = Instant::now();
                     self.asks.hook(id, hook, now);

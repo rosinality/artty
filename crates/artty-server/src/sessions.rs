@@ -42,6 +42,60 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
+/// A Claude Code conversation's title, as its transcript has it: the name
+/// it was given (`/rename`), else the latest one Claude Code made up for it.
+/// Read from the end (the transcript can be large), all of it only if need be.
+pub fn claude_title(session: &str) -> Option<String> {
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| Some(home()?.join(".claude")))?;
+    claude_title_in(&claude, session)
+}
+
+/// [`claude_title`], Claude Code's folder being `claude`.
+fn claude_title_in(claude: &Path, session: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    // (A session id names a file: nothing else in it.)
+    if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return None;
+    }
+    let name = format!("{session}.jsonl");
+    let path = std::fs::read_dir(claude.join("projects"))
+        .ok()?
+        .flatten()
+        .map(|dir| dir.path().join(&name))
+        .find(|path| path.is_file())?;
+    let title_in = |text: &str| -> Option<String> {
+        let mut found: (Option<String>, Option<String>) = (None, None);
+        for line in text.lines().filter(|l| l.contains("-title\"")) {
+            let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+            let text = |key: &str| entry.get(key).and_then(Value::as_str).map(str::to_owned);
+            match entry.get("type").and_then(Value::as_str) {
+                Some("custom-title") => found.0 = text("customTitle").or(found.0),
+                Some("ai-title") => found.1 = text("aiTitle").or(found.1),
+                _ => {},
+            }
+        }
+        found.0.or(found.1).filter(|t| !t.trim().is_empty())
+    };
+    let mut file = std::fs::File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    const TAIL: u64 = 512 << 10;
+    if len > TAIL {
+        file.seek(SeekFrom::Start(len - TAIL)).ok()?;
+        let mut tail = Vec::new();
+        file.by_ref().take(TAIL).read_to_end(&mut tail).ok()?;
+        // (Its first line may be cut: a whole line or none matches.)
+        if let Some(title) = title_in(&String::from_utf8_lossy(&tail)) {
+            return Some(title);
+        }
+        file.seek(SeekFrom::Start(0)).ok()?;
+    }
+    let mut all = String::new();
+    file.take(64 << 20).read_to_string(&mut all).ok()?;
+    title_in(&all)
+}
+
 /// Every transcript: its agent, path, and modification time.
 fn transcripts() -> Vec<(&'static str, PathBuf, u64)> {
     let mut files = Vec::new();
@@ -215,6 +269,40 @@ fn shorten(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_titles() {
+        let dir = std::env::temp_dir().join(format!("artty-titles-{}", std::process::id()));
+        let project = dir.join("projects/-src-api");
+        std::fs::create_dir_all(&project).unwrap();
+        let line = |kind: &str, key: &str, title: &str| {
+            format!("{{\"type\":\"{kind}\",\"{key}\":\"{title}\",\"sessionId\":\"s\"}}\n")
+        };
+        // The latest made-up title; a name given wins over any.
+        let made = [
+            line("ai-title", "aiTitle", "Old"),
+            "{\"type\":\"user\"}\n".into(),
+            line("ai-title", "aiTitle", "Login fix"),
+        ];
+        std::fs::write(project.join("aaa-1.jsonl"), made.concat()).unwrap();
+        let named =
+            [line("custom-title", "customTitle", "Mine"), line("ai-title", "aiTitle", "Later")];
+        std::fs::write(project.join("bbb-2.jsonl"), named.concat()).unwrap();
+        // A long transcript: its title far from its end.
+        let long = format!(
+            "{}{}",
+            line("ai-title", "aiTitle", "Early"),
+            "{\"type\":\"user\"}\n".repeat(40_000)
+        );
+        std::fs::write(project.join("ccc-3.jsonl"), long).unwrap();
+        let title = |session: &str| claude_title_in(&dir, session);
+        assert_eq!(title("aaa-1").as_deref(), Some("Login fix"));
+        assert_eq!(title("bbb-2").as_deref(), Some("Mine"));
+        assert_eq!(title("ccc-3").as_deref(), Some("Early"));
+        assert_eq!(title("none"), None);
+        assert_eq!(title("../x"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn claude_and_codex_transcripts() {
