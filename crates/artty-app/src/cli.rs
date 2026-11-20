@@ -121,6 +121,12 @@ artty, your own pane is found automatically:
                                          your own, or the focused one); prints
                                          the new pane's id. --workspace opens it
                                          in that workspace, creating it if needed
+  artty new --agent NAME [--task TEXT | --task -] [...]
+                                         ... running agent NAME (claude, codex,
+                                         gemini), given TEXT as its first
+                                         message (an ask: its id on stderr).
+                                         From an agent's pane, it's the new
+                                         agent's starter (2 deep at most)
   artty focus N | artty close N
   artty rename [--tab N] TITLE           name the tab holding pane N (empty
                                          title: back to automatic)
@@ -282,6 +288,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--result" => _ = flags.insert("result", args.value("--result")?),
             "--cancel" => _ = flags.insert("cancel", args.value("--cancel")?),
             "--bring-back" => _ = flags.insert("bring-back", args.value("--bring-back")?),
+            "--task" => _ = flags.insert("task", args.value("--task")?),
             "--always" => _ = flags.insert("always", args.value("--always")?),
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
             "--after" => _ = flags.insert("after", args.value("--after")?),
@@ -485,14 +492,34 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             if split.is_some() && workspace.is_some() {
                 return Err("new: --split and --workspace don't go together".into());
             }
+            // An agent by name (its command), and its first message.
+            let command = match flags.get("agent") {
+                Some(agent) if rest.is_empty() => vec![agent.clone()],
+                Some(_) => return Err("new: --agent or -- COMMAND, not both".into()),
+                None => rest,
+            };
+            let task = match flags.get("task").map(String::as_str) {
+                Some("-") => {
+                    let mut text = String::new();
+                    std::io::stdin().read_to_string(&mut text).map_err(|err| err.to_string())?;
+                    Some(text)
+                },
+                task => task.map(str::to_owned),
+            };
+            if task.is_some() && command.is_empty() {
+                return Err("new: --task needs an agent to give it to (--agent NAME)".into());
+            }
             Request::New {
                 workspace,
                 cwd: flags.get("cwd").map(PathBuf::from),
-                command: rest,
+                command,
                 title: flags.get("title").cloned(),
                 focus: !switches.contains("background"),
                 split,
                 target: split.and(tab.or_else(own_tab)),
+                task,
+                thread: None,
+                back: false,
             }
         },
         "focus" | "close" => {
@@ -713,6 +740,13 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         Response::Error { message } => Err(message),
         Response::Tab { id } => {
             println!("{id}");
+            Ok(0)
+        },
+        Response::Started { id, ask } => {
+            println!("{id}");
+            eprintln!(
+                "artty: its task is ask {ask} (artty ask --result {ask} waits for its answer)"
+            );
             Ok(0)
         },
         Response::Text { text } => {
@@ -1095,6 +1129,23 @@ fn thread_entry(entry: &ThreadEntry, agent: &str) -> String {
         },
         ThreadItem::Prompt { text, ask: None, .. } => ("›", "you".to_owned(), text.clone()),
         ThreadItem::Reply { text } => ("‹", agent.to_owned(), text.clone()),
+        ThreadItem::Edited { files } => {
+            let list: Vec<String> = files
+                .iter()
+                .map(|f| match f.written {
+                    true => format!("{} (written, {} lines)", f.path, f.added),
+                    false => format!("{} +{} -{}", f.path, f.added, f.removed),
+                })
+                .collect();
+            let head = match files.len() {
+                1 => "edited a file".to_owned(),
+                n => format!("edited {n} files"),
+            };
+            ("✎", head, list.join("\n"))
+        },
+        ThreadItem::Overlap { file, other } => {
+            ("!", "overlap".to_owned(), format!("{} also changed {file}", other.title))
+        },
         ThreadItem::Handoff { ask, to, text, state, reply, error, forwarded, .. } => {
             let state = serde_json::to_value(state).unwrap_or_default();
             let mut body = text.clone();

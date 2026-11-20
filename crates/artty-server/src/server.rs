@@ -44,6 +44,9 @@ const FRAMES_IN_FLIGHT: u64 = 2;
 /// Used within this long, an app is the one its user is at: notifications go to it alone.
 const IN_USE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Agents started by agents (`artty new --task` from a pane), this many
+/// deep at most.
+const MAX_DEPTH: usize = 2;
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 /// An app silent this long (it pings every 5 s) is taken as gone.
 const CLIENT_SILENCE: Duration = Duration::from_secs(60);
@@ -283,6 +286,11 @@ pub(crate) struct Server {
     waiting_since: HashMap<PaneId, u64>,
     /// Each agent's thread.
     threads: crate::threads::Threads,
+    /// Files agents change: each turn's, and who changed which lately.
+    edits: crate::edits::Edits,
+    /// The pane each agent was started from by another (`artty new
+    /// --task` from inside a pane).
+    parents: HashMap<PaneId, PaneId>,
     next_pane: PaneId,
     next_window: WindowId,
     next_workspace: WorkspaceId,
@@ -569,6 +577,8 @@ impl Server {
             replies: crate::queue::Replies::new(),
             waiting_since: HashMap::new(),
             threads: crate::threads::Threads::new(crate::store::Store::open()),
+            edits: crate::edits::Edits::default(),
+            parents: HashMap::new(),
             next_pane: 1,
             next_window: 1,
             sizes: HashMap::new(),
@@ -1442,6 +1452,8 @@ impl Server {
         self.asks.fail_pane(pane, message, Instant::now());
         self.replies.pane_closed(pane);
         self.threads.pane_closed(pane);
+        self.edits.pane_closed(pane);
+        self.parents.remove(&pane);
         for release in self.approvals.pane_closed(pane, Instant::now()) {
             self.release_approval(release);
         }
@@ -2176,6 +2188,11 @@ impl Server {
                 },
                 Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
             },
+            request @ Request::New { task: Some(_), .. } => {
+                let response = self.start_with_task(request, peer).unwrap_or_else(Response::error);
+                Self::answer(&self.clients, waiter, response);
+                self.pump_asks(Instant::now());
+            },
             Request::Ask { tab, text, raw, wait, timeout_secs, thread, back } => {
                 let from = self.pane_of_peer(peer);
                 let added = self.add_ask(tab, text, raw, from);
@@ -2225,6 +2242,113 @@ impl Server {
 
     /// A request from a program running in one of artty's panes (or one
     /// that can't be told apart from one). Apps' requests aren't.
+    /// What a hook event says of files: an edit tool used (kept for the
+    /// turn; another agent having changed the file lately is told in both
+    /// threads), or a turn begun or over (the last one's files go in its
+    /// thread, before its reply).
+    fn follow_edits(&mut self, pane: PaneId, hook: &artty_core::control::HookEvent, now: Instant) {
+        if let (Some(tool), Some(input)) = (&hook.tool_name, &hook.tool_input) {
+            for (other, file) in self.edits.tool_used(pane, tool, input, now) {
+                let (Some(this), Some(that)) = (self.ask_from(pane), self.ask_from(other)) else {
+                    continue;
+                };
+                let (this_title, that_title) = (this.title.clone(), that.title.clone());
+                self.threads.add(pane, ThreadItem::Overlap { file: file.clone(), other: that });
+                self.threads.add(other, ThreadItem::Overlap { file: file.clone(), other: this });
+                let name = std::path::Path::new(&file)
+                    .file_name()
+                    .map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                self.notify_user(
+                    pane,
+                    Some("Two agents, one file"),
+                    &format!("{this_title} and {that_title} both changed {name}"),
+                );
+            }
+        }
+        if hook.turn().is_some() || hook.session_boundary() {
+            let files = self.edits.take_turn(pane);
+            if !files.is_empty() {
+                self.threads.add(pane, ThreadItem::Edited { files });
+            }
+        }
+    }
+
+    /// How many agents up `pane` was started from (by `artty new --task`
+    /// from inside a pane): 0 for one the user started.
+    fn depth(&self, pane: PaneId) -> usize {
+        let mut depth = 0;
+        let mut at = pane;
+        while let Some(&parent) = self.parents.get(&at) {
+            depth += 1;
+            at = parent;
+            if depth > MAX_DEPTH {
+                break;
+            }
+        }
+        depth
+    }
+
+    /// Open a tab with its first message: the tab as asked, then the task
+    /// as an ask of its agent, from the agent asking (if one is: its
+    /// thread gets a card), so many agents deep at most.
+    fn start_with_task(
+        &mut self,
+        request: Request,
+        peer: Option<Peer>,
+    ) -> Result<Response, String> {
+        let Request::New {
+            cwd,
+            command,
+            title,
+            focus,
+            split,
+            target,
+            workspace,
+            task: Some(task),
+            thread,
+            back,
+        } = request
+        else {
+            unreachable!("only with a task")
+        };
+        if task.trim().is_empty() || crate::asks::commandlike(&task) {
+            return Err("--task: a message for the agent (not a /, ! or # command)".into());
+        }
+        let parent = self.pane_of_peer(peer);
+        if let Some(parent) = parent
+            && self.depth(parent) >= MAX_DEPTH
+        {
+            return Err(format!(
+                "agents started by agents go {MAX_DEPTH} deep at most: ask the user, or do it \
+                 yourself"
+            ));
+        }
+        let open = Request::New {
+            cwd,
+            command,
+            title,
+            focus,
+            split,
+            target,
+            workspace,
+            task: None,
+            thread: None,
+            back: false,
+        };
+        let Response::Tab { id } = self.respond(open)? else {
+            return Err("the tab didn't open".into());
+        };
+        if let Some(parent) = parent {
+            self.parents.insert(id, parent);
+        }
+        let ask = self.add_ask(id, task, false, parent)?;
+        let here = parent.or(thread).filter(|&p| p != id && self.panes.contains_key(&p));
+        if let Some(here) = here {
+            self.start_handoff(ask, here, parent.is_some(), back && parent.is_none());
+        }
+        Ok(Response::Started { id, ask })
+    }
+
     /// The agent in `pane`, as an ask names it.
     fn ask_from(&self, pane: PaneId) -> Option<artty_core::control::AskFrom> {
         let p = self.panes.get(&pane)?;
@@ -2855,7 +2979,7 @@ impl Server {
                 session.write(bytes);
                 Response::Ok
             },
-            Request::New { cwd, command, title, focus, split, target, workspace } => {
+            Request::New { cwd, command, title, focus, split, target, workspace, .. } => {
                 let command = (!command.is_empty()).then_some(command);
                 let spec = PaneSpec { command, cwd, title };
                 let named =
@@ -3030,6 +3154,7 @@ impl Server {
                 if let Some(hook) = &hook {
                     let now = Instant::now();
                     self.asks.hook(id, hook, now);
+                    self.follow_edits(id, hook, now);
                     // (After the asks: a turn that took one says so.)
                     let ask = (hook.turn() == Some(true))
                         .then(|| self.asks.running_in(id))

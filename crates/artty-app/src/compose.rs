@@ -127,6 +127,24 @@ pub(super) fn targets(
     Ok((chosen, message))
 }
 
+/// The agents `/new` starts by name (else Claude Code).
+const AGENTS: [&str; 3] = ["claude", "codex", "gemini"];
+
+/// `/new [AGENT] TASK`: the agent to start and its task.
+pub(super) fn new_agent(text: &str) -> Option<(String, String)> {
+    let rest = text.trim_start().strip_prefix("/new")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim();
+    let (first, after) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let (agent, task) = match AGENTS.iter().find(|a| a.eq_ignore_ascii_case(first)) {
+        Some(agent) => (agent.to_string(), after.trim()),
+        None => ("claude".to_owned(), rest),
+    };
+    Some((agent, task.to_owned()))
+}
+
 /// Per agent's pane: its draft.
 pub(super) type Drafts = HashMap<PaneId, Draft>;
 
@@ -226,6 +244,9 @@ impl WindowView {
     fn send_draft(&mut self, back: bool, cx: &mut Context<Self>) {
         let Some(agents) = self.composing().and_then(|w| self.agents_in(w)) else { return };
         let Some(draft) = self.draft() else { return };
+        if let Some(new) = new_agent(&draft.text) {
+            return self.start_agent(new, back, cx);
+        }
         let list: Vec<(PaneId, String)> =
             agents.agents.iter().map(|(a, _)| (a.pane, a.title.clone())).collect();
         let (panes, text) = match targets(&draft.text, &list, agents.selected) {
@@ -260,6 +281,45 @@ impl WindowView {
             })
             .detach();
         }
+        cx.notify();
+    }
+
+    /// `/new`: start an agent, in the chosen one's folder (on its machine),
+    /// with the task; the chosen one's thread follows it (`back`: and gets
+    /// its answer).
+    fn start_agent(&mut self, (agent, task): (String, String), back: bool, cx: &mut Context<Self>) {
+        let Some(agents) = self.composing().and_then(|w| self.agents_in(w)) else { return };
+        let chosen = agents.selected.and_then(|p| agents.agents.iter().find(|(a, _)| a.pane == p));
+        let server = chosen.map_or(LOCAL, |(a, _)| ids::server_of(a.pane));
+        let request = Request::New {
+            cwd: chosen.and_then(|(a, _)| a.cwd.clone()),
+            command: vec![agent.clone()],
+            title: None,
+            focus: false,
+            split: None,
+            target: None,
+            workspace: None,
+            task: Some(task),
+            thread: chosen.map(|(a, _)| ids::local_id(a.pane)),
+            back: back && chosen.is_some(),
+        };
+        if let Some(draft) = self.draft_mut() {
+            *draft = Draft::default();
+        }
+        let answer = app_state::control_on(server, request, cx);
+        cx.spawn(async move |this, cx| {
+            let message = match answer.await {
+                Ok(Response::Started { id, .. }) => format!("Started {agent} (pane {id})"),
+                Ok(Response::Error { message }) => message,
+                Ok(_) => return,
+                Err(err) => err.to_string(),
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.show_toast(message, cx);
+                this.refresh_agents(cx);
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -404,7 +464,9 @@ impl WindowView {
                         )
                     })
                     .child(if empty {
-                        div().text_color(ui(0xffffff50)).child(format!("{cursor}Message {title}…"))
+                        div().text_color(ui(0xffffff50)).child(format!(
+                            "{cursor}Message {title}… (/new claude TASK starts another agent here)"
+                        ))
                     } else {
                         // The cursor as a bar; what an input method composes, before it.
                         div().child(format!("{before}{marked}{cursor}{after}"))
@@ -457,6 +519,16 @@ mod tests {
         assert_eq!(d.text, "@server ");
         assert_eq!(d.mention(), None);
         assert_eq!(draft("hi @a", 2).mention(), None);
+    }
+
+    #[test]
+    fn new_agents() {
+        let new = |t: &str| new_agent(t);
+        assert_eq!(new("/new codex fix it"), Some(("codex".into(), "fix it".into())));
+        assert_eq!(new("/new review the docs"), Some(("claude".into(), "review the docs".into())));
+        assert_eq!(new("/new"), Some(("claude".into(), String::new())));
+        assert_eq!(new("/newer x"), None);
+        assert_eq!(new("hi /new x"), None);
     }
 
     #[test]

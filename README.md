@@ -374,6 +374,31 @@ agents ask each other without that, allow them in its settings
 (`permissions.allow`): `"Bash(artty agents:*)"`, `"Bash(artty ask:*)"`,
 `"Bash(artty thread:*)"`, `"Bash(artty guide)"`.
 
+### Starting agents with a task
+
+```sh
+artty new --agent claude --task "Review docs/plan.md for gaps" --cwd ~/notes
+artty new --background --task - -- codex < brief.md
+```
+
+opens a tab running the agent and gives it the task as its first message
+(an ask: its id goes to stderr, and `artty ask --result ID` waits for its
+answer). Run from an agent's pane, that agent is the new one's starter:
+its thread gets the task's card, and the new agent's thread shows who
+started it. Agents started by agents go two deep at most. In the Agents
+view (or the thread panel), `/new [claude|codex|gemini] TASK` starts one in
+the chosen agent's folder, its task's card in the chosen agent's thread (⌘⏎:
+and its answer brought back there).
+
+### Files agents change
+
+Each turn's files show in the agent's thread, before its reply: what its
+edit tools changed (Claude Code's Edit, MultiEdit, Write, NotebookEdit, as
+its hooks report them), with lines added and taken out; click a file for its
+changes. Files a shell command changes aren't seen. When two agents change
+the same file within 15 minutes, both threads say so ("web also changed
+docs/plan.md"), and you're notified.
+
 ### The queue
 
 What needs you, from every agent on the server: permission requests,

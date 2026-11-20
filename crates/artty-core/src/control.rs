@@ -245,6 +245,16 @@ pub enum Request {
         /// frontmost window) if there's none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<String>,
+        /// Its first message (for an agent the command starts): an ask,
+        /// given it once it's up.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+        /// As an ask's: the thread the task is written from (a card there
+        /// follows it), and whether its answer goes there too.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<SessionId>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        back: bool,
     },
     Focus {
         tab: SessionId,
@@ -430,6 +440,21 @@ pub struct AskFrom {
     pub agent: Option<String>,
 }
 
+/// A file an agent changed in a turn, and how (its edits' text, shortened).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEdit {
+    pub path: String,
+    /// Lines its edits put in and took out (a file written whole: all in).
+    pub added: u32,
+    pub removed: u32,
+    /// Written whole (not edited in place).
+    #[serde(default)]
+    pub written: bool,
+    /// Each edit: what was there, what's there now (shortened).
+    #[serde(default)]
+    pub hunks: Vec<(String, String)>,
+}
+
 /// One thing in an agent's thread.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadEntry {
@@ -480,6 +505,10 @@ pub enum ThreadItem {
         #[serde(default)]
         back: bool,
     },
+    /// Files it changed in a turn (its edit tools', as its hooks report).
+    Edited { files: Vec<FileEdit> },
+    /// Another agent changed a file this one did, a moment apart.
+    Overlap { file: String, other: AskFrom },
     /// Its turn stopped short (a permission prompt turned down there).
     Interrupted { reason: String },
 }
@@ -700,6 +729,11 @@ pub enum Response {
     },
     Ask {
         ask: AskInfo,
+    },
+    /// A tab opened with its first message: the new pane, and the ask.
+    Started {
+        id: SessionId,
+        ask: u64,
     },
     Asks {
         asks: Vec<AskInfo>,

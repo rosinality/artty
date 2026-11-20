@@ -7,6 +7,7 @@
 
 mod approvals;
 mod asks;
+mod edits;
 mod handover;
 mod inbox;
 mod queue;

@@ -27,7 +27,13 @@ can ask one of them something and get its answer. Your own pane's id is in
 - `artty ask --list [--tab N]` lists asks not yet answered;
   `artty ask --cancel ID` takes back one not yet given to its agent.
 - `artty thread --tab N --lines 20` shows agent N's last 20 thread entries:
-  what it was asked (by whom), what it answered, its permission requests.
+  what it was asked (by whom), what it answered, its permission requests,
+  the files it changed.
+- `artty new --background --agent claude --cwd DIR --task "..."` starts a
+  new agent in its own tab with that task (codex, gemini too); it prints
+  the new pane's id, and the task's ask id on stderr, for
+  `artty ask --result ID`. You're its starter: your thread shows how its
+  task goes.
 
 ## How to ask
 
@@ -52,7 +58,11 @@ can ask one of them something and get its answer. Your own pane's id is in
 - Don't type into other agents' terminals with `artty send`: `artty ask`
   waits for their turn, and gets their answer.
 - Don't start long chains of agents asking agents. When the user should
-  decide something, ask the user instead.
+  decide something, ask the user instead. Agents you start can start
+  others, two deep at most: prefer asking an agent already running.
+- Before changing a file another agent may be working on, check with it
+  (`artty thread --tab N`): when two agents change one file, the user is
+  told.
 - Permission requests (yours or others') are answered by the user, not by
   agents: `artty approval` is refused from inside artty's panes.
 - The user sees every ask in the agents' threads (artty's Agents view), as

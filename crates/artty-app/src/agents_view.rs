@@ -39,6 +39,8 @@ pub(super) struct Agents {
     pub(super) asks: Vec<artty_core::control::AskInfo>,
     pub(super) thread: Vec<ThreadEntry>,
     pub(super) thread_of: Option<PaneId>,
+    /// Edited files opened to show their changes: (entry's seq, file).
+    expanded: HashSet<(u64, usize)>,
     scroll: gpui::ScrollHandle,
     loading: bool,
     pub(super) loaded: bool,
@@ -434,8 +436,18 @@ impl WindowView {
                 .child(text);
             div().flex().justify_center().child(pill)
         };
+        let cwd = agent.cwd.clone();
+        let shown_path = move |path: &str| -> String {
+            let path = std::path::Path::new(path);
+            cwd.as_deref()
+                .and_then(|cwd| path.strip_prefix(cwd).ok())
+                .unwrap_or(path)
+                .display()
+                .to_string()
+        };
         let entries = agents.thread.iter().map(|entry| {
             let time = clock(entry.at_ms);
+            let seq = entry.seq;
             let element: gpui::AnyElement = match &entry.item {
                 ThreadItem::Prompt { text, ask, from } => div()
                     .flex()
@@ -638,6 +650,110 @@ impl WindowView {
                         })
                         .into_any_element()
                 },
+                ThreadItem::Edited { files } => {
+                    let (added, removed) =
+                        files.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+                    let count = match files.len() {
+                        1 => "edited a file".to_owned(),
+                        n => format!("edited {n} files"),
+                    };
+                    let rows = files.iter().enumerate().map(|(i, file)| {
+                        let open = agents.expanded.contains(&(seq, i));
+                        let counts = match file.written {
+                            true => format!("written · {} lines", file.added),
+                            false => format!("+{} −{}", file.added, file.removed),
+                        };
+                        let hunks = file.hunks.iter().map(|(old, new)| {
+                            let line = |mark: &str, text: &str, color: u32| {
+                                div()
+                                    .text_color(ui(color))
+                                    .whitespace_normal()
+                                    .child(format!("{mark} {text}"))
+                            };
+                            div()
+                                .flex()
+                                .flex_col()
+                                .py(px(3.))
+                                .border_t_1()
+                                .border_color(ui(0xffffff10))
+                                .children(old.lines().map(|l| line("−", l, 0xf7768ecc)))
+                                .children(new.lines().map(|l| line("+", l, 0x9ece6acc)))
+                        });
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("edit-{seq}-{i}")))
+                                    .flex()
+                                    .gap(px(8.))
+                                    .px(px(4.))
+                                    .rounded(px(4.))
+                                    .hover(|d| d.bg(ui(0xffffff0c)))
+                                    .child(div().text_color(ui(0xffffff60)).child(if open {
+                                        "▾"
+                                    } else {
+                                        "▸"
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .font_family(mono.clone())
+                                            .text_size(px(12.))
+                                            .text_color(ui(0xffffffd8))
+                                            .child(shown_path(&file.path)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(11.))
+                                            .text_color(ui(0xffffff70))
+                                            .child(counts),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.toggle_edit(which, seq, i, cx)
+                                    })),
+                            )
+                            .when(open, |d| {
+                                d.child(
+                                    div()
+                                        .flex()
+                                        .flex_col()
+                                        .ml(px(18.))
+                                        .font_family(mono.clone())
+                                        .text_size(px(11.5))
+                                        .children(hunks),
+                                )
+                            })
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded(px(8.))
+                        .bg(ui(0xffffff06))
+                        .border_1()
+                        .border_color(ui(0xffffff12))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(ui(0xffffff70))
+                                .child(format!("✎ {count} · +{added} −{removed} · {time}")),
+                        )
+                        .children(rows)
+                        .into_any_element()
+                },
+                ThreadItem::Overlap { file, other } => note(
+                    format!("⚠ {} also changed {} · {time}", other.title, shown_path(file)),
+                    WAITING,
+                )
+                .into_any_element(),
                 ThreadItem::Waiting { message } => {
                     note(format!("waiting for you · {message}"), WAITING).into_any_element()
                 },
@@ -773,6 +889,16 @@ impl WindowView {
                 d.child(row("Needs you", requests))
             })
             .children(agent.last_ms.map(|ms| row("Last activity", clock(ms))))
+    }
+
+    /// Show (or hide) what an edited file's changes were.
+    fn toggle_edit(&mut self, which: Shown, seq: u64, file: usize, cx: &mut Context<Self>) {
+        if let Some(agents) = self.agents_in_mut(which)
+            && !agents.expanded.remove(&(seq, file))
+        {
+            agents.expanded.insert((seq, file));
+        }
+        cx.notify();
     }
 
     /// Give an answer from another agent to the agent whose thread asked.
