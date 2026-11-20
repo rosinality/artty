@@ -45,7 +45,7 @@ fn no_wait(scratch: &Scratch, pane: &str, text: &str) -> String {
 fn started() -> (Scratch, String) {
     // (Resumed by this build: `artty` on the PATH may be another.)
     let scratch = Scratch::with_config(&format!(
-        "[acp]\nclaude = \"python3 '{ADAPTER}'\"\n[resume.claude-acp]\nsession = \"'{ARTTY}' acp \
+        "[acp]\nclaude = \"ARTTY_BIN='{ARTTY}' python3 '{ADAPTER}'\"\n[resume.claude-acp]\nsession = \"'{ARTTY}' acp \
          claude --resume {{session}}\"\n"
     ));
     let out = scratch.artty(&["new", "--background", "--agent", "claude-acp"]);
@@ -166,5 +166,56 @@ fn started_with_a_task() {
     let pane = stdout(&out);
     wait_for("its answer", || {
         thread(&scratch, &pane).iter().any(|(k, v)| k == "Reply" && v["text"] == "echo: first")
+    });
+}
+
+#[test]
+fn a_long_ask() {
+    let (scratch, pane) = started();
+    // Read in pieces: the paste's end may come split across them.
+    let long: String = (0..400).map(|n| format!("line {n} of a long message\n")).collect();
+    let long = long.trim_end();
+    let out = scratch.ask(&["--tab", &pane, "--timeout", "30", long]);
+    assert_eq!(stdout(&out), format!("echo: {long}"), "{}", stderr(&out));
+}
+
+#[test]
+fn its_own_turn_interrupted() {
+    let (scratch, pane) = started();
+    let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "bgslow"]);
+    assert_eq!(stdout(&out), "started", "{}", stderr(&out));
+    wait_for("its own turn", || thread(&scratch, &pane).iter().any(|(k, _)| k == "Notice"));
+    let out = scratch.artty(&["send", "--tab", &pane, "--no-enter", "\x1b"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    // Over: asks go on.
+    let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "after"]);
+    assert_eq!(stdout(&out), "echo: after", "{}", stderr(&out));
+    assert!(thread(&scratch, &pane).iter().any(|(k, _)| k == "Interrupted"));
+}
+
+#[test]
+fn its_hooks_keep_quiet() {
+    let (scratch, pane) = started();
+    let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "hook"]);
+    assert_eq!(stdout(&out), "echo: hook", "{}", stderr(&out));
+    let replies: Vec<Value> = thread(&scratch, &pane)
+        .into_iter()
+        .filter(|(k, _)| k == "Reply")
+        .map(|(_, v)| v["text"].clone())
+        .collect();
+    assert_eq!(replies, ["echo: hook"]);
+}
+
+#[test]
+fn an_adapter_that_fails_says_why() {
+    let scratch =
+        Scratch::with_config("[acp]\nclaude = \"echo no such adapter here >&2; exit 1\"\n");
+    let out = scratch.artty(&["new", "--background", "--agent", "claude-acp"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let pane = stdout(&out);
+    // The tab stays, saying why.
+    wait_for("the adapter's error", || {
+        let screen = stdout(&scratch.artty(&["read", "--tab", &pane, "--screen"]));
+        screen.contains("no such adapter here") && screen.contains("a key closes this")
     });
 }

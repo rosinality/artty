@@ -7,12 +7,16 @@ What a prompt does, by its text:
   slow       says "." every 0.2s until cancelled (stopReason cancelled)
   bg         answers "started", and a second later goes on by itself
              ("background done"), as after a background task
+  bgslow     answers "started", then goes on by itself until cancelled
+  hook       runs the agent's hooks as Claude Code would (artty status
+             --hook: under artty acp, they keep quiet), answers "echo: hook"
   else       answers "echo: TEXT"
 A loaded conversation is replayed first, as the real ones do.
 """
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -77,6 +81,23 @@ def prompt(rid, session, text):
             say(session, ".", "m-slow")
         send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "cancelled"}})
         return
+    elif text == "bgslow":
+        say(session, "started", "m-bg")
+
+        def on():
+            time.sleep(0.5)
+            while not cancelled.wait(0.2):
+                say(session, ".", "m-bgslow")
+        update(session, {"sessionUpdate": "usage_update", "used": 1, "size": 2, "cost": {"amount": 0, "currency": "USD"}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"stopReason": "end_turn"}})
+        cancelled.clear()
+        threading.Thread(target=on, daemon=True).start()
+        return
+    elif text == "hook":
+        event = json.dumps({"hook_event_name": "Stop", "last_assistant_message": "from the hook"})
+        subprocess.run([os.environ["ARTTY_BIN"], "status", "done", "--hook", "--agent", "claude"],
+                       input=event, text=True)
+        say(session, "echo: hook", "m-hook")
     elif text == "bg":
         say(session, "started", "m-bg")
 

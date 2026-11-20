@@ -84,12 +84,16 @@ struct Adapter {
 
 impl Adapter {
     fn start(command: &str, events: Sender<Event>, started: u64) -> Result<Self, String> {
-        let log = std::env::temp_dir().join(format!("artty-acp-{}.log", std::process::id()));
-        let stderr = std::fs::File::create(&log).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
+        let stderr =
+            std::fs::File::create(log_path()).map(Stdio::from).unwrap_or_else(|_| Stdio::null());
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(command)
             .env(HOST_ENV, "1")
+            // The login shell's PATH (an adapter run by npx, node from a
+            // version manager): the app, started from the Dock, has only
+            // macOS's.
+            .env("PATH", artty_core::tool_path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(stderr)
@@ -242,11 +246,16 @@ struct Host {
     session: Option<String>,
     resume: Option<String>,
     model: Option<String>,
+    /// Its permission mode (`default`, `acceptEdits`, `plan`, ...), else
+    /// the agent's own setting.
+    mode: Option<String>,
     phase: Phase,
     report: Option<Sender<Request>>,
     /// The message being typed, and a paste coming in.
     input: String,
     paste: Option<Vec<u8>>,
+    /// What a read ended in the middle of (an escape, a paste's end).
+    partial: Vec<u8>,
     queued: VecDeque<String>,
     /// The turn's last message (its id, its text), and what of it isn't
     /// shown yet (a line at a time).
@@ -260,12 +269,15 @@ struct Host {
     title: Option<String>,
     paused: Arc<AtomicBool>,
     quit: bool,
+    /// The adapter failed (the tab's kept open to say why).
+    failed: bool,
 }
 
 pub fn run(args: &[String]) -> Result<i32, String> {
     let mut agent = "claude".to_owned();
     let mut resume = None;
     let mut model = None;
+    let mut mode = None;
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -273,9 +285,10 @@ pub fn run(args: &[String]) -> Result<i32, String> {
                 resume = Some(rest.next().ok_or("--resume: which conversation?")?.clone())
             },
             "--model" => model = Some(rest.next().ok_or("--model: which?")?.clone()),
+            "--mode" => mode = Some(rest.next().ok_or("--mode: which?")?.clone()),
             "-h" | "--help" => {
                 println!(
-                    "artty acp [AGENT] [--resume ID] [--model M]\n  runs AGENT (claude) through \
+                    "artty acp [AGENT] [--resume ID] [--model M] [--mode MODE]\n  runs AGENT (claude) through \
                      its Agent Client Protocol adapter, in this tab:\n  Enter sends, Esc \
                      interrupts, ^T opens the conversation in its terminal UI, ^D quits.\n  The \
                      adapter's command is the `acp` setting (acp.AGENT)."
@@ -305,10 +318,12 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         session: None,
         resume,
         model,
+        mode,
         phase: Phase::Starting,
         report: reporter(),
         input: String::new(),
         paste: None,
+        partial: Vec::new(),
         queued: VecDeque::new(),
         reply: (None, String::new()),
         unshown: String::new(),
@@ -317,11 +332,33 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         title: None,
         paused,
         quit: false,
+        failed: false,
     };
     host.start()?;
-    host.main(rx);
+    host.main(&rx);
     if let Some(adapter) = host.adapter.take() {
         adapter.stop();
+    }
+    let log = log_path();
+    if host.failed {
+        // Kept open, to be read.
+        let tail = std::fs::read_to_string(&log).unwrap_or_default();
+        let lines: Vec<&str> = tail.lines().collect();
+        for line in &lines[lines.len().saturating_sub(15)..] {
+            host.say(&format!("\x1b[2m{line}\x1b[0m"));
+        }
+        host.say(&format!(
+            "\x1b[2m(the adapter's log: {}) · a key closes this\x1b[0m",
+            log.display()
+        ));
+        host.status(AgentState::Idle, None, Some(hook("SessionEnd")));
+        while let Ok(event) = rx.recv() {
+            if matches!(event, Event::Keys(_)) {
+                break;
+            }
+        }
+    } else {
+        let _ = std::fs::remove_file(&log);
     }
     host.status(AgentState::Idle, None, Some(hook("SessionEnd")));
     // (Let the reporter finish.)
@@ -329,6 +366,11 @@ pub fn run(args: &[String]) -> Result<i32, String> {
     std::thread::sleep(Duration::from_millis(200));
     print!("\r\n");
     Ok(0)
+}
+
+/// Where the adapter's own messages go (not into the tab).
+fn log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("artty-acp-{}.log", std::process::id()))
 }
 
 fn hook(event: &str) -> HookEvent {
@@ -352,7 +394,7 @@ impl Host {
         Ok(())
     }
 
-    fn main(&mut self, rx: Receiver<Event>) {
+    fn main(&mut self, rx: &Receiver<Event>) {
         while !self.quit {
             let Ok(event) = rx.recv() else { break };
             match event {
@@ -368,9 +410,7 @@ impl Host {
                         if let Some(adapter) = self.adapter.take() {
                             adapter.stop();
                         }
-                        let log = std::env::temp_dir()
-                            .join(format!("artty-acp-{}.log", std::process::id()));
-                        self.say(&format!("\x1b[2m(its log: {})\x1b[0m", log.display()));
+                        self.failed = true;
                         self.quit = true;
                     }
                 },
@@ -487,6 +527,10 @@ impl Host {
         if let Some(adapter) = &mut self.adapter {
             adapter.notify("session/cancel", json!({ "sessionId": session }));
         }
+        // A turn of the agent's own has no answer to say it's over: over now.
+        if self.phase == Phase::Working(false) {
+            self.interrupted("interrupted");
+        }
     }
 
     // --- The adapter ------------------------------------------------------
@@ -516,7 +560,10 @@ impl Host {
             let text = error.get("message").and_then(Value::as_str).unwrap_or("failed");
             self.say(&format!("\x1b[31m{asked:?}: {text}\x1b[0m"));
             match asked {
-                Asked::Initialize | Asked::NewSession | Asked::LoadSession => self.quit = true,
+                Asked::Initialize | Asked::NewSession | Asked::LoadSession => {
+                    self.failed = true;
+                    self.quit = true;
+                },
                 Asked::Prompt => self.interrupted("failed"),
                 Asked::Other => {},
             }
@@ -558,6 +605,15 @@ impl Host {
                     adapter.request(
                         "session/set_config_option",
                         json!({ "sessionId": session, "configId": "model", "value": model }),
+                        Asked::Other,
+                    );
+                }
+                if let (Some(mode), Some(adapter), Some(session)) =
+                    (self.mode.clone(), &mut self.adapter, &self.session)
+                {
+                    adapter.request(
+                        "session/set_mode",
+                        json!({ "sessionId": session, "modeId": mode }),
                         Asked::Other,
                     );
                 }
@@ -792,12 +848,16 @@ impl Host {
 
     // --- Keys -------------------------------------------------------------
 
-    fn keys(&mut self, keys: &[u8]) {
+    fn keys(&mut self, read: &[u8]) {
+        // (A key alone: Esc, as the user pressed it, not an escape's start.)
+        let alone = read == b"\x1b" && self.partial.is_empty();
+        let mut keys = std::mem::take(&mut self.partial);
+        keys.extend_from_slice(read);
         let mut at = 0;
         while at < keys.len() {
             let rest = &keys[at..];
             if let Some(paste) = &mut self.paste {
-                match find(rest, b"\x1b[201~") {
+                match find(rest, PASTE_END) {
                     Some(end) => {
                         paste.extend_from_slice(&rest[..end]);
                         let paste = self.paste.take().unwrap();
@@ -806,11 +866,22 @@ impl Host {
                         self.prompt_line();
                     },
                     None => {
-                        paste.extend_from_slice(rest);
+                        // (The end may come split, in the next read.)
+                        let keep = (1..PASTE_END.len())
+                            .rev()
+                            .find(|&n| rest.ends_with(&PASTE_END[..n]))
+                            .unwrap_or(0);
+                        paste.extend_from_slice(&rest[..rest.len() - keep]);
+                        self.partial = rest[rest.len() - keep..].to_vec();
                         at = keys.len();
                     },
                 }
                 continue;
+            }
+            // An escape cut short by the read: the rest comes next.
+            if rest[0] == 0x1b && !alone && unfinished_escape(rest) {
+                self.partial = rest.to_vec();
+                break;
             }
             if rest.starts_with(b"\x1b[200~") {
                 self.paste = Some(Vec::new());
@@ -820,7 +891,7 @@ impl Host {
             match rest[0] {
                 // Esc alone: interrupt. (Other escapes, as arrows: ignored.)
                 0x1b => {
-                    if rest.len() == 1 {
+                    if alone {
                         if matches!(self.phase, Phase::Working(_)) {
                             self.cancel();
                         }
@@ -929,6 +1000,7 @@ impl Host {
         }
         if let Err(err) = self.start() {
             self.say(&format!("\x1b[31m{err}\x1b[0m"));
+            self.failed = true;
             self.quit = true;
         }
     }
@@ -965,6 +1037,17 @@ impl Drop for Cooked {
             print!("\x1b[?2004h");
             let _ = std::io::stdout().flush();
         }
+    }
+}
+
+const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// Whether `rest` (from an ESC) ends before its escape does.
+fn unfinished_escape(rest: &[u8]) -> bool {
+    match rest {
+        [_] => true,
+        [_, b'[' | b'O', tail @ ..] => !tail.iter().any(|b| (0x40..=0x7e).contains(b)),
+        _ => false,
     }
 }
 

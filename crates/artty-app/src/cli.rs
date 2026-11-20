@@ -131,7 +131,7 @@ artty, your own pane is found automatically:
                                          every agent's thread (or pane N's)
                                          searched: newest matches first
   artty approve --hook --agent NAME      (an agent's PermissionRequest hook)
-  artty acp [AGENT] [--resume ID] [--model M]
+  artty acp [AGENT] [--resume ID] [--model M] [--mode MODE]
                                          run AGENT (claude) without its terminal
                                          UI, through its Agent Client Protocol
                                          adapter (the acp.AGENT setting), in
