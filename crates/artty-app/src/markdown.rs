@@ -72,12 +72,14 @@ pub struct CodeLine {
 pub enum Block {
     Paragraph(Vec<Span>),
     Heading(u8, Vec<Span>),
-    /// Its language (the fence's), lines, and where it starts and ends in
-    /// the markdown (fences and all).
+    /// Its language (the fence's), lines, where it starts and ends in the
+    /// markdown (fences and all), and its lines' colors (worked out once,
+    /// here: not each time it's drawn).
     Code {
         lang: String,
         lines: Vec<CodeLine>,
         src: Range<usize>,
+        colors: Vec<Vec<(Range<usize>, Kind)>>,
     },
     /// `start`: an ordered list's first number.
     List {
@@ -251,7 +253,8 @@ impl Builder<'_> {
         if text.is_empty() {
             lines.clear();
         }
-        self.push_block(Block::Code { lang: code.lang, lines, src: code.start..end });
+        let colors = highlight::highlight(&code.lang, text);
+        self.push_block(Block::Code { lang: code.lang, lines, src: code.start..end, colors });
     }
 
     fn pop_into_parent(&mut self) {
@@ -747,14 +750,12 @@ fn block_view(block: &Block, draw: &Draw, id: &str) -> AnyElement {
                 .child(text_view(&bold, draw, id, false))
                 .into_any_element()
         },
-        Block::Code { lang, lines, src } => {
+        Block::Code { lines, src, colors, .. } => {
             let group = SharedString::from(format!("{id}-code"));
             let copied: String =
                 lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
-            let code: String = copied.clone();
-            let colors = highlight::highlight(lang, &code);
             let mut next_id = draw.next_id.get();
-            let (line_spans, fences) = code_lines(lines, src, &colors, &mut next_id);
+            let (line_spans, fences) = code_lines(lines, src, colors, &mut next_id);
             draw.next_id.set(next_id);
             // Copied whole, its fences with it.
             if let Some(fences) = fences {
@@ -980,7 +981,10 @@ mod tests {
         let text = "# Plan\n\n```rust\nfn main() {}\n\nlet x = 1;\n```\n\n- one\n- **two**\n  1. a\n  2. b\n\n* [x] done\n* [ ] not\n\n> quoted\n\n---\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
         let blocks = parse(text);
         assert!(matches!(&blocks[0], Block::Heading(1, s) if plain(s) == "Plan"));
-        let Block::Code { lang, lines, src } = &blocks[1] else { panic!("{:?}", blocks[1]) };
+        let Block::Code { lang, lines, src, colors } = &blocks[1] else {
+            panic!("{:?}", blocks[1])
+        };
+        assert!(!colors[0].is_empty(), "colored once parsed");
         assert_eq!(lang, "rust");
         let shown: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(shown, ["fn main() {}", "", "let x = 1;"]);

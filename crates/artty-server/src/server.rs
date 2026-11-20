@@ -3338,7 +3338,16 @@ impl Server {
                         self.release_approval(release);
                     }
                     match (hook.turn(), hook.event.as_str()) {
-                        (Some(true), _) => self.replies.prompted(id, hook.prompt.as_deref()),
+                        (Some(true), _) => {
+                            // As the thread shows it: a notice by its summary.
+                            let prompt = hook.prompt.as_deref().map(crate::asks::unwrap_pastes);
+                            let shown =
+                                prompt.as_deref().map(|p| match crate::threads::notice(p) {
+                                    Some((_, summary)) => summary,
+                                    None => p.to_owned(),
+                                });
+                            self.replies.prompted(id, shown.as_deref());
+                        },
                         (Some(false), "Stop" | "AfterAgent") => {
                             let agent = reporter
                                 .or_else(|| self.panes.get(&id).and_then(|p| p.agent_name()));

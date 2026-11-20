@@ -1233,6 +1233,7 @@ fn thread_entry(entry: &ThreadEntry, agent: &str) -> String {
             };
             ("✎", head, list.join("\n"))
         },
+        ThreadItem::Notice { tag, summary, .. } => ("⚙", tag.clone(), summary.clone()),
         ThreadItem::Overlap { file, other } => {
             ("!", "overlap".to_owned(), format!("{} also changed {file}", other.title))
         },

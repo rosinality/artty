@@ -63,10 +63,32 @@ impl Threads {
         }
         let mut entries = self.store.entries(key, MOST);
         for entry in &mut entries {
-            if let ThreadItem::Permission { state: state @ ApprovalState::Pending, .. } =
-                &mut entry.item
-            {
-                *state = ApprovalState::Ended;
+            let changed = match &mut entry.item {
+                ThreadItem::Permission { state: state @ ApprovalState::Pending, .. } => {
+                    *state = ApprovalState::Ended;
+                    true
+                },
+                // Kept by a build before notices: told apart now.
+                ThreadItem::Prompt { text, .. }
+                    if text.contains("pasted_content") || notice(text).is_some() =>
+                {
+                    let prompt = crate::asks::unwrap_pastes(text);
+                    entry.item = match notice(&prompt) {
+                        Some((tag, summary)) => {
+                            ThreadItem::Notice { tag, summary, text: prompt.trim().to_owned() }
+                        },
+                        None => match &entry.item {
+                            ThreadItem::Prompt { ask, from, .. } => {
+                                ThreadItem::Prompt { text: prompt, ask: *ask, from: from.clone() }
+                            },
+                            _ => unreachable!(),
+                        },
+                    };
+                    true
+                },
+                _ => false,
+            };
+            if changed {
                 self.store.put_entry(key, entry);
             }
         }
@@ -258,6 +280,46 @@ impl Threads {
     }
 }
 
+/// A prompt that's what an agent put in itself, not someone's message: one
+/// element of a tag with a hyphen (as `<task-notification>…
+/// </task-notification>`, `<agent-message from="…">…</agent-message>`: no
+/// HTML's), and nothing else. Its tag, and what it says in short (its
+/// `<summary>`, else its first line that isn't a bracketed frame).
+pub fn notice(prompt: &str) -> Option<(String, String)> {
+    let prompt = prompt.trim();
+    let rest = prompt.strip_prefix('<')?;
+    let tag: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+    let valid = tag.contains('-') && tag.chars().next().is_some_and(|c| c.is_ascii_lowercase());
+    // Its opening tag ends there, or after attributes (on its line).
+    let after = &rest[tag.len()..];
+    let open_end = match after.chars().next() {
+        Some('>') => 0,
+        Some(c) if c.is_whitespace() => after.lines().next()?.find('>')?,
+        _ => return None,
+    };
+    let close = format!("</{tag}>");
+    if !valid || !prompt.ends_with(&close) {
+        return None;
+    }
+    let start = 1 + tag.len() + open_end + 1;
+    let inner = prompt.get(start..prompt.len() - close.len())?;
+    let element = |name: &str| {
+        let open = format!("<{name}>");
+        let start = inner.find(&open)? + open.len();
+        let end = start + inner[start..].find(&format!("</{name}>"))?;
+        Some(inner[start..end].trim().to_owned())
+    };
+    let summary = element("summary")
+        .or_else(|| element("status"))
+        .or_else(|| {
+            let line = |l: &&str| !l.is_empty() && !l.starts_with('[');
+            inner.lines().map(str::trim).find(line).map(str::to_owned)
+        })
+        .unwrap_or_default();
+    let summary: String = summary.chars().take(300).collect();
+    Some((tag, summary))
+}
+
 /// What an entry says that a search looks in, and what it is.
 fn searchable(item: &ThreadItem) -> Option<(&'static str, String)> {
     Some(match item {
@@ -273,6 +335,7 @@ fn searchable(item: &ThreadItem) -> Option<(&'static str, String)> {
         },
         ThreadItem::Overlap { file, .. } => ("overlap", file.clone()),
         ThreadItem::Interrupted { reason } => ("stopped", reason.clone()),
+        ThreadItem::Notice { text, .. } => ("notified", text.clone()),
         ThreadItem::Session { .. } => return None,
     })
 }
@@ -320,12 +383,13 @@ fn item_of(
     let text = |t: Option<&str>| t.unwrap_or_default().to_owned();
     match event.event.as_str() {
         "UserPromptSubmit" | "BeforeAgent" => {
+            // (Long text as Claude Code reports it, wrapped: without.)
+            let prompt = crate::asks::unwrap_pastes(&text(event.prompt.as_deref()));
+            if let Some((tag, summary)) = notice(&prompt) {
+                return Some(ThreadItem::Notice { tag, summary, text: prompt.trim().to_owned() });
+            }
             let (ask, from) = ask.unzip();
-            Some(ThreadItem::Prompt {
-                text: text(event.prompt.as_deref()),
-                ask,
-                from: from.flatten(),
-            })
+            Some(ThreadItem::Prompt { text: prompt, ask, from: from.flatten() })
         },
         "Stop" | "AfterAgent" => event
             .reply
@@ -415,6 +479,44 @@ mod tests {
         assert_eq!(texts(threads.entries(2, Some(seqs[2]), None)), ["3", "4"]);
         assert_eq!(texts(threads.entries(2, None, Some(2))), ["3", "4"]);
         assert!(threads.entries(3, None, None).is_empty());
+    }
+
+    #[test]
+    fn notices_told_from_messages() {
+        let pasted = "<pasted_content id=\"a1\">\n<task-notification>\n<task-id>w1</task-id>\n<status>completed</status>\n<summary>Workflow \"mend\" completed</summary>\n<result>{}</result>\n</task-notification>\n</pasted_content id=\"a1\">";
+        let mut threads = Threads::default();
+        let notified = HookEvent { prompt: Some(pasted.into()), ..event("UserPromptSubmit") };
+        threads.hook(1, &notified, None, None);
+        let [entry] = threads.entries(1, None, None).try_into().unwrap();
+        let ThreadItem::Notice { tag, summary, text } = entry.item else {
+            panic!("{:?}", entry.item)
+        };
+        assert_eq!(
+            (tag.as_str(), summary.as_str()),
+            ("task-notification", "Workflow \"mend\" completed")
+        );
+        assert!(text.starts_with("<task-notification>") && text.ends_with("</task-notification>"));
+        // A sub-agent's report handed back: by its report's first line.
+        let report = "<agent-message from=\"af1\">\n[Subagent hand-back] The text below is a report.\n  Part 4's outline now follows the design.\n  More.\n</agent-message>";
+        assert_eq!(
+            notice(report),
+            Some(("agent-message".into(), "Part 4's outline now follows the design.".into()))
+        );
+        // Messages, even ones of tags: as written.
+        for message in ["<div>hi</div>", "fix <task-notification> handling", "<b-x>a</b-y>"] {
+            assert_eq!(notice(message), None, "{message}");
+        }
+        // A paste in a message: without its wrapping.
+        let pasting = HookEvent {
+            prompt: Some("see\n<pasted_content id=\"b\">\nlog\n</pasted_content id=\"b\">".into()),
+            ..event("UserPromptSubmit")
+        };
+        threads.hook(2, &pasting, None, None);
+        let [entry] = threads.entries(2, None, None).try_into().unwrap();
+        assert_eq!(
+            entry.item,
+            ThreadItem::Prompt { text: "see\nlog\n".into(), ask: None, from: None }
+        );
     }
 
     #[test]

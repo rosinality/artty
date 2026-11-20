@@ -189,7 +189,7 @@ pub enum Back {
 
 /// A prompt as Claude Code reports a long paste in it: wrapped in
 /// `<pasted_content id="…">` and `</pasted_content id="…">`, which go.
-fn unwrap_pastes(prompt: &str) -> String {
+pub(crate) fn unwrap_pastes(prompt: &str) -> String {
     let mut out = String::with_capacity(prompt.len());
     let mut rest = prompt;
     while let Some(at) =

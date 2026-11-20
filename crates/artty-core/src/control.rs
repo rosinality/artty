@@ -567,6 +567,10 @@ pub enum ThreadItem {
     Overlap { file: String, other: AskFrom },
     /// Its turn stopped short (a permission prompt turned down there).
     Interrupted { reason: String },
+    /// A turn began with what the agent itself put in, not someone's
+    /// message: a background task's notification (`<task-notification>`),
+    /// a command's output. Its tag, what it says in short, and all of it.
+    Notice { tag: String, summary: String, text: String },
 }
 
 /// Someone's answer to a permission request.

@@ -44,6 +44,15 @@ impl TextSel {
     }
 }
 
+/// A thread's list: held to the end (the newest), as a chat is.
+pub(super) struct ThreadList(pub gpui::ListState);
+
+impl Default for ThreadList {
+    fn default() -> Self {
+        ThreadList(gpui::ListState::new(1, gpui::ListAlignment::Bottom, px(800.)))
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Agents {
     /// Every connected server's agents, pane ids tagged (see `ids`), with
@@ -63,7 +72,7 @@ pub(super) struct Agents {
     pub(super) pieces: std::cell::RefCell<HashMap<String, crate::markdown::Pieces>>,
     pub(super) text_sel: Option<TextSel>,
     /// Messages as markdown, parsed once (by their text's hash).
-    parsed: std::cell::RefCell<HashMap<u64, std::rc::Rc<crate::markdown::Doc>>>,
+    parsed: std::cell::RefCell<HashMap<String, (usize, std::rc::Rc<crate::markdown::Doc>)>>,
     /// The chosen agent's terminal shown, live (else folded away, and not
     /// sent).
     pub(super) peek_open: bool,
@@ -71,7 +80,9 @@ pub(super) struct Agents {
     /// the one shown standing out, since when.
     reveal: Option<u64>,
     flash: Option<(u64, Instant)>,
-    scroll: gpui::ScrollHandle,
+    /// The thread as a list (its entries, then what's queued): only those
+    /// in view are drawn.
+    pub(super) list: ThreadList,
     loading: bool,
     pub(super) loaded: bool,
 }
@@ -253,20 +264,23 @@ impl WindowView {
         which: Shown,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        text.hash(&mut hasher);
-        let key = hasher.finish();
+        // Parsed once a message (by its id; its length, should it change).
         let blocks = {
             let mut parsed = agents.parsed.borrow_mut();
             // (A long-running view: start over now and then.)
             if parsed.len() > 2000 {
                 parsed.clear();
             }
-            parsed
-                .entry(key)
-                .or_insert_with(|| std::rc::Rc::new(crate::markdown::parse_doc(&clip(text))))
-                .clone()
+            let known =
+                parsed.get(id).filter(|(len, _)| *len == text.len()).map(|(_, d)| d.clone());
+            match known {
+                Some(doc) => doc,
+                None => {
+                    let doc = std::rc::Rc::new(crate::markdown::parse_doc(&clip(text)));
+                    parsed.insert(id.to_owned(), (text.len(), doc.clone()));
+                    doc
+                },
+            }
         };
         let look = crate::markdown::Look {
             text: ui(0xffffffe0).into(),
@@ -510,11 +524,18 @@ impl WindowView {
                 if let Some((pane, entries, asks)) =
                     thread.filter(|(p, _, _)| agents.selected == Some(*p))
                 {
-                    // (Also a card at the end that changed: an answer came.)
-                    let grew = agents.thread_of != Some(pane)
-                        || entries.len() != agents.thread.len()
-                        || entries.last() != agents.thread.last()
-                        || asks.len() != agents.asks.len();
+                    // The list told what changed: another agent's thread,
+                    // all of it; else from the first entry that isn't as it
+                    // was (what's queued, at the end, each time).
+                    let list = &agents.list.0;
+                    let old = agents.thread.len();
+                    if agents.thread_of != Some(pane) || list.item_count() != old + 1 {
+                        list.reset(entries.len() + 1);
+                    } else if entries != agents.thread || asks != agents.asks {
+                        let same =
+                            agents.thread.iter().zip(&entries).take_while(|(a, b)| a == b).count();
+                        list.splice(same..old + 1, entries.len() + 1 - same);
+                    }
                     agents.thread_of = Some(pane);
                     agents.thread = entries;
                     agents.asks = asks;
@@ -526,18 +547,11 @@ impl WindowView {
                         Some(seq).zip(index)
                     });
                     if let Some((seq, index)) = found {
-                        // Once laid out as it is now (else the entries'
-                        // places are those of what was shown before).
-                        let scroll = agents.scroll.clone();
-                        cx.spawn(async move |this, cx| {
-                            cx.background_executor().timer(Duration::from_millis(50)).await;
-                            scroll.scroll_to_top_of_item(index);
-                            let _ = this.update(cx, |_, cx| cx.notify());
-                        })
-                        .detach();
+                        agents
+                            .list
+                            .0
+                            .scroll_to(gpui::ListOffset { item_ix: index, offset_in_item: px(0.) });
                         agents.flash = Some((seq, Instant::now()));
-                    } else if grew {
-                        agents.scroll.scroll_to_bottom();
                     }
                 }
                 if which == Shown::Panel {
@@ -579,6 +593,7 @@ impl WindowView {
             agents.pieces.borrow_mut().clear();
             agents.text_sel = None;
             agents.thread.clear();
+            agents.list.0.reset(1);
             agents.thread_of = None;
             self.refresh_in(Shown::View, cx);
         }
@@ -625,6 +640,20 @@ impl WindowView {
     }
 
     pub(super) fn agents_view(&self, cx: &mut Context<Self>) -> gpui::Div {
+        // (ARTTY_PROFILE: from here to its painting done.)
+        let started = Instant::now();
+        let timing = crate::profile::enabled().then(|| {
+            canvas(
+                |_, _, _| {},
+                move |_, _, _, _| crate::profile::record_view("agents", started.elapsed()),
+            )
+            .absolute()
+            .size_0()
+        });
+        self.agents_view_inner(cx).children(timing)
+    }
+
+    fn agents_view_inner(&self, cx: &mut Context<Self>) -> gpui::Div {
         let Some(agents) = self.agents.as_ref() else { return div() };
         let several =
             agents.agents.iter().map(|(_, server)| server).collect::<HashSet<_>>().len() > 1;
@@ -776,15 +805,27 @@ impl WindowView {
             .into_any_element()
     }
 
-    /// An agent's thread, with its header and the box to write to it in.
-    pub(super) fn agent_thread(
-        &self,
-        agents: &Agents,
-        agent: Option<&AgentInfo>,
-        which: Shown,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let Some(agent) = agent else { return div().flex_1() };
+    /// The thread's entry `ix`, as the list draws it (only those in view);
+    /// past the last, what's queued for the agent.
+    fn thread_item(&self, which: Shown, ix: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let Some(agents) = self.agents_in(which) else { return div().into_any_element() };
+        let chosen = agents.selected.and_then(|p| agents.agents.iter().find(|(a, _)| a.pane == p));
+        let Some((agent, _)) = chosen else { return div().into_any_element() };
+        let Some(entry) = agents.thread.get(ix) else {
+            return div()
+                .px(px(16.))
+                .pt(px(12.))
+                .pb(px(14.))
+                .when(agents.thread.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .text_color(ui(0xffffff60))
+                            .child("Nothing yet: what it's given and says from now on shows here."),
+                    )
+                })
+                .child(self.queued_asks(&agents.asks))
+                .into_any_element();
+        };
         let server = ids::server_of(agent.pane);
         let mono = self.metrics.font.family.clone();
         let bubble = |mine: bool| {
@@ -816,340 +857,378 @@ impl WindowView {
                 .display()
                 .to_string()
         };
-        let entries = agents.thread.iter().map(|entry| {
-            let time = clock(entry.at_ms);
-            let seq = entry.seq;
-            let element: gpui::AnyElement = match &entry.item {
-                ThreadItem::Prompt { text, ask, from } => div()
-                    .flex()
-                    .justify_end()
-                    .child(
-                        // The width is the column's: its bubble wraps in it.
-                        div()
-                            .max_w(relative_width(0.86))
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap(px(3.))
-                            .child(self.copyable(
-                                match (ask, from) {
-                                    (_, Some(from)) => format!("{} · {time}", from_label(from)),
-                                    (_, None) => format!("you · {time}"),
-                                },
-                                text,
-                                seq,
-                                cx,
-                            ))
-                            .child(bubble(true).child(self.markdown(
-                                agents,
-                                text,
-                                &seq.to_string(),
-                                which,
-                                cx,
-                            ))),
-                    )
-                    .into_any_element(),
-                ThreadItem::Reply { text } => div()
-                    .max_w(relative_width(0.86))
-                    .flex()
-                    .flex_col()
-                    .gap(px(3.))
-                    .child(self.copyable(format!("{} · {time}", agent.agent), text, seq, cx))
-                    .child(bubble(false).child(self.markdown(agents, text, &seq.to_string(), which, cx)))
-                    .into_any_element(),
-                ThreadItem::Permission { id, summary, state, .. } => {
-                    let pending = *state == ApprovalState::Pending;
-                    let (word, color) = match state {
-                        ApprovalState::Pending => ("asks permission", WAITING),
-                        ApprovalState::Allowed => ("allowed in artty", DONE),
-                        ApprovalState::AllowedThere => ("allowed at its prompt", DONE),
-                        ApprovalState::Denied => ("denied in artty", DENY),
-                        ApprovalState::Dismissed => ("turned down at its prompt", DENY),
-                        ApprovalState::Ended => ("ended with its turn", 0xffffff80),
-                        ApprovalState::Expired => ("left to its prompt", 0xffffff80),
-                    };
-                    let key = (server, QueueKind::Approval, *id);
+        let time = clock(entry.at_ms);
+        let seq = entry.seq;
+        let element: gpui::AnyElement = match &entry.item {
+            ThreadItem::Prompt { text, ask, from } => div()
+                .flex()
+                .justify_end()
+                .child(
+                    // The width is the column's: its bubble wraps in it.
                     div()
+                        .max_w(relative_width(0.86))
                         .flex()
                         .flex_col()
-                        .gap(px(5.))
-                        .px(px(10.))
-                        .py(px(7.))
-                        .rounded(px(8.))
-                        .border_l_2()
-                        .border_color(ui(color))
-                        .bg(ui(0xffffff08))
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(ui(color))
-                                .child(format!("{word} · {time}")),
-                        )
-                        .child(
-                            div()
-                                .font_family(mono.clone())
-                                .text_size(px(12.))
-                                .text_color(ui(0xffffffe0))
-                                .child(summary.clone()),
-                        )
-                        .when(pending, |d| {
-                            d.child(
-                                div()
-                                    .flex()
-                                    .gap(px(6.))
-                                    .child(
-                                        Self::small_button(
-                                            format!("thread-allow-{id}"),
-                                            "Allow",
-                                            0x1a1b26ff,
-                                            DONE,
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.decide(key, true, None, cx)
-                                            }),
-                                        ),
-                                    )
-                                    .child(
-                                        Self::small_button(
-                                            format!("thread-deny-{id}"),
-                                            "Deny",
-                                            DENY,
-                                            0xffffff12,
-                                        )
-                                        .on_click(
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.decide(key, false, None, cx)
-                                            }),
-                                        ),
-                                    ),
-                            )
-                        })
-                        .into_any_element()
-                },
-                ThreadItem::Handoff {
-                    ask: id,
-                    to,
-                    text,
-                    by_agent,
-                    state,
-                    reply,
-                    error,
-                    forwarded,
-                    back,
-                } => {
-                    use artty_core::control::AskState;
-                    let (word, color) = match state {
-                        AskState::Queued => ("waiting for its turn", 0xffffff80),
-                        AskState::Delivering => ("being given to it", BUSY),
-                        AskState::Running => ("working on it", BUSY),
-                        AskState::Answered => ("answered", DONE),
-                        AskState::Failed => ("failed", DENY),
-                        AskState::Cancelled => ("cancelled", 0xffffff80),
-                    };
-                    let who = if *by_agent { agent.agent.as_str() } else { "you" };
-                    let offer =
-                        !by_agent && !back && forwarded.is_none() && *state == AskState::Answered;
-                    let id = *id;
-                    let here = agent.title.clone();
-                    let target = match &to.agent {
-                        Some(a) => format!("{} · {a}", to.title),
-                        None => to.title.clone(),
-                    };
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(5.))
-                        .px(px(10.))
-                        .py(px(7.))
-                        .rounded(px(8.))
-                        .border_l_2()
-                        .border_color(ui(0x7aa2f7ff))
-                        .bg(ui(0xffffff08))
-                        // (Copy: its answer, once there's one.)
+                        .items_end()
+                        .gap(px(3.))
                         .child(self.copyable(
-                            format!("{who} → {target} · {time}"),
-                            reply.as_deref().unwrap_or(text),
+                            match (ask, from) {
+                                (_, Some(from)) => format!("{} · {time}", from_label(from)),
+                                (_, None) => format!("you · {time}"),
+                            },
+                            text,
                             seq,
                             cx,
                         ))
-                        .child(self.markdown(agents, text, &seq.to_string(), which, cx))
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(ui(color))
-                                .child(format!("{} {word}", to.title)),
-                        )
-                        .children(reply.as_ref().map(|reply| {
-                            div()
-                                .px(px(9.))
-                                .py(px(6.))
-                                .rounded(px(7.))
-                                .bg(ui(0xffffff0c))
-                                .text_color(ui(0xffffffd8))
-                                .child(self.markdown(agents, reply, &format!("{seq}-reply"), which, cx))
-                        }))
-                        .children(error.as_ref().map(|error| {
-                            div().text_size(px(11.)).text_color(ui(DENY)).child(error.clone())
-                        }))
-                        .when(forwarded.is_some(), |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(ui(0xffffff70))
-                                    .child(format!("↩ brought back to {here}")),
-                            )
-                        })
-                        .when(*back && forwarded.is_none() && error.is_none(), |d| {
-                            d.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(ui(0xffffff70))
-                                    .child(format!("↩ its answer comes back to {here}")),
-                            )
-                        })
-                        .when(offer, |d| {
-                            d.child(
-                                div().flex().child(
-                                    Self::small_button(
-                                        format!("thread-bring-{id}"),
-                                        &format!("↩ Send to {here}"),
-                                        0xffffffd0,
-                                        0xffffff14,
-                                    )
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| this.bring_back(server, id, cx),
-                                    )),
-                                ),
-                            )
-                        })
-                        .into_any_element()
-                },
-                ThreadItem::Edited { files } => {
-                    let (added, removed) =
-                        files.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
-                    let count = match files.len() {
-                        1 => "edited a file".to_owned(),
-                        n => format!("edited {n} files"),
-                    };
-                    let rows = files.iter().enumerate().map(|(i, file)| {
-                        let open = agents.expanded.contains(&(seq, i));
-                        let counts = match file.written {
-                            true => format!("written · {} lines", file.added),
-                            false => format!("+{} −{}", file.added, file.removed),
-                        };
-                        let hunks = file.hunks.iter().map(|(old, new)| {
-                            let line = |mark: &str, text: &str, color: u32| {
-                                div()
-                                    .text_color(ui(color))
-                                    .whitespace_normal()
-                                    .child(format!("{mark} {text}"))
-                            };
+                        .child(bubble(true).child(self.markdown(
+                            agents,
+                            text,
+                            &seq.to_string(),
+                            which,
+                            cx,
+                        ))),
+                )
+                .into_any_element(),
+            ThreadItem::Reply { text } => div()
+                .max_w(relative_width(0.86))
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(self.copyable(format!("{} · {time}", agent.agent), text, seq, cx))
+                .child(bubble(false).child(self.markdown(
+                    agents,
+                    text,
+                    &seq.to_string(),
+                    which,
+                    cx,
+                )))
+                .into_any_element(),
+            ThreadItem::Permission { id, summary, state, .. } => {
+                let pending = *state == ApprovalState::Pending;
+                let (word, color) = match state {
+                    ApprovalState::Pending => ("asks permission", WAITING),
+                    ApprovalState::Allowed => ("allowed in artty", DONE),
+                    ApprovalState::AllowedThere => ("allowed at its prompt", DONE),
+                    ApprovalState::Denied => ("denied in artty", DENY),
+                    ApprovalState::Dismissed => ("turned down at its prompt", DENY),
+                    ApprovalState::Ended => ("ended with its turn", 0xffffff80),
+                    ApprovalState::Expired => ("left to its prompt", 0xffffff80),
+                };
+                let key = (server, QueueKind::Approval, *id);
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .border_l_2()
+                    .border_color(ui(color))
+                    .bg(ui(0xffffff08))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(ui(color))
+                            .child(format!("{word} · {time}")),
+                    )
+                    .child(
+                        div()
+                            .font_family(mono.clone())
+                            .text_size(px(12.))
+                            .text_color(ui(0xffffffe0))
+                            .child(summary.clone()),
+                    )
+                    .when(pending, |d| {
+                        d.child(
                             div()
                                 .flex()
-                                .flex_col()
-                                .py(px(3.))
-                                .border_t_1()
-                                .border_color(ui(0xffffff10))
-                                .children(old.lines().map(|l| line("−", l, 0xf7768ecc)))
-                                .children(new.lines().map(|l| line("+", l, 0x9ece6acc)))
-                        });
+                                .gap(px(6.))
+                                .child(
+                                    Self::small_button(
+                                        format!("thread-allow-{id}"),
+                                        "Allow",
+                                        0x1a1b26ff,
+                                        DONE,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.decide(key, true, None, cx),
+                                    )),
+                                )
+                                .child(
+                                    Self::small_button(
+                                        format!("thread-deny-{id}"),
+                                        "Deny",
+                                        DENY,
+                                        0xffffff12,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.decide(key, false, None, cx),
+                                    )),
+                                ),
+                        )
+                    })
+                    .into_any_element()
+            },
+            ThreadItem::Handoff {
+                ask: id,
+                to,
+                text,
+                by_agent,
+                state,
+                reply,
+                error,
+                forwarded,
+                back,
+            } => {
+                use artty_core::control::AskState;
+                let (word, color) = match state {
+                    AskState::Queued => ("waiting for its turn", 0xffffff80),
+                    AskState::Delivering => ("being given to it", BUSY),
+                    AskState::Running => ("working on it", BUSY),
+                    AskState::Answered => ("answered", DONE),
+                    AskState::Failed => ("failed", DENY),
+                    AskState::Cancelled => ("cancelled", 0xffffff80),
+                };
+                let who = if *by_agent { agent.agent.as_str() } else { "you" };
+                let offer =
+                    !by_agent && !back && forwarded.is_none() && *state == AskState::Answered;
+                let id = *id;
+                let here = agent.title.clone();
+                let target = match &to.agent {
+                    Some(a) => format!("{} · {a}", to.title),
+                    None => to.title.clone(),
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .border_l_2()
+                    .border_color(ui(0x7aa2f7ff))
+                    .bg(ui(0xffffff08))
+                    // (Copy: its answer, once there's one.)
+                    .child(self.copyable(
+                        format!("{who} → {target} · {time}"),
+                        reply.as_deref().unwrap_or(text),
+                        seq,
+                        cx,
+                    ))
+                    .child(self.markdown(agents, text, &seq.to_string(), which, cx))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(ui(color))
+                            .child(format!("{} {word}", to.title)),
+                    )
+                    .children(reply.as_ref().map(|reply| {
+                        div()
+                            .px(px(9.))
+                            .py(px(6.))
+                            .rounded(px(7.))
+                            .bg(ui(0xffffff0c))
+                            .text_color(ui(0xffffffd8))
+                            .child(self.markdown(agents, reply, &format!("{seq}-reply"), which, cx))
+                    }))
+                    .children(error.as_ref().map(|error| {
+                        div().text_size(px(11.)).text_color(ui(DENY)).child(error.clone())
+                    }))
+                    .when(forwarded.is_some(), |d| {
+                        d.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(ui(0xffffff70))
+                                .child(format!("↩ brought back to {here}")),
+                        )
+                    })
+                    .when(*back && forwarded.is_none() && error.is_none(), |d| {
+                        d.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(ui(0xffffff70))
+                                .child(format!("↩ its answer comes back to {here}")),
+                        )
+                    })
+                    .when(offer, |d| {
+                        d.child(
+                            div().flex().child(
+                                Self::small_button(
+                                    format!("thread-bring-{id}"),
+                                    &format!("↩ Send to {here}"),
+                                    0xffffffd0,
+                                    0xffffff14,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.bring_back(server, id, cx),
+                                )),
+                            ),
+                        )
+                    })
+                    .into_any_element()
+            },
+            ThreadItem::Edited { files } => {
+                let (added, removed) =
+                    files.iter().fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+                let count = match files.len() {
+                    1 => "edited a file".to_owned(),
+                    n => format!("edited {n} files"),
+                };
+                let rows = files.iter().enumerate().map(|(i, file)| {
+                    let open = agents.expanded.contains(&(seq, i));
+                    let counts = match file.written {
+                        true => format!("written · {} lines", file.added),
+                        false => format!("+{} −{}", file.added, file.removed),
+                    };
+                    let hunks = file.hunks.iter().map(|(old, new)| {
+                        let line = |mark: &str, text: &str, color: u32| {
+                            div()
+                                .text_color(ui(color))
+                                .whitespace_normal()
+                                .child(format!("{mark} {text}"))
+                        };
                         div()
                             .flex()
                             .flex_col()
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("edit-{seq}-{i}")))
-                                    .flex()
-                                    .gap(px(8.))
-                                    .px(px(4.))
-                                    .rounded(px(4.))
-                                    .hover(|d| d.bg(ui(0xffffff0c)))
-                                    .child(div().text_color(ui(0xffffff60)).child(if open {
-                                        "▾"
-                                    } else {
-                                        "▸"
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .overflow_hidden()
-                                            .text_ellipsis()
-                                            .whitespace_nowrap()
-                                            .font_family(mono.clone())
-                                            .text_size(px(12.))
-                                            .text_color(ui(0xffffffd8))
-                                            .child(shown_path(&file.path)),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_none()
-                                            .text_size(px(11.))
-                                            .text_color(ui(0xffffff70))
-                                            .child(counts),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.toggle_edit(which, seq, i, cx)
-                                    })),
-                            )
-                            .when(open, |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .flex_col()
-                                        .ml(px(18.))
-                                        .font_family(mono.clone())
-                                        .text_size(px(11.5))
-                                        .children(hunks),
-                                )
-                            })
+                            .py(px(3.))
+                            .border_t_1()
+                            .border_color(ui(0xffffff10))
+                            .children(old.lines().map(|l| line("−", l, 0xf7768ecc)))
+                            .children(new.lines().map(|l| line("+", l, 0x9ece6acc)))
                     });
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(3.))
-                        .px(px(10.))
-                        .py(px(7.))
-                        .rounded(px(8.))
-                        .bg(ui(0xffffff06))
-                        .border_1()
-                        .border_color(ui(0xffffff12))
                         .child(
                             div()
-                                .text_size(px(11.))
-                                .text_color(ui(0xffffff70))
-                                .child(format!("✎ {count} · +{added} −{removed} · {time}")),
+                                .id(SharedString::from(format!("edit-{seq}-{i}")))
+                                .flex()
+                                .gap(px(8.))
+                                .px(px(4.))
+                                .rounded(px(4.))
+                                .hover(|d| d.bg(ui(0xffffff0c)))
+                                .child(div().text_color(ui(0xffffff60)).child(if open {
+                                    "▾"
+                                } else {
+                                    "▸"
+                                }))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .font_family(mono.clone())
+                                        .text_size(px(12.))
+                                        .text_color(ui(0xffffffd8))
+                                        .child(shown_path(&file.path)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .text_color(ui(0xffffff70))
+                                        .child(counts),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.toggle_edit(which, seq, i, cx)
+                                })),
                         )
-                        .children(rows)
-                        .into_any_element()
-                },
-                ThreadItem::Overlap { file, other } => note(
-                    format!("⚠ {} also changed {} · {time}", other.title, shown_path(file)),
-                    WAITING,
-                )
-                .into_any_element(),
-                ThreadItem::Waiting { message } => {
-                    note(format!("waiting for you · {message}"), WAITING).into_any_element()
-                },
-                ThreadItem::Session { event } => {
-                    note(format!("session {event} · {time}"), 0xffffff70).into_any_element()
-                },
-                ThreadItem::Interrupted { reason } => {
-                    note(format!("stopped · {reason}"), DENY).into_any_element()
-                },
-            };
-            // An entry just searched for stands out a moment.
-            let found = agents.flash.is_some_and(|(s, at)| s == seq && at.elapsed() < FLASH_FOUND);
-            div()
-                .group(SharedString::from(format!("entry-{seq}")))
-                .flex_none()
+                        .when(open, |d| {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .ml(px(18.))
+                                    .font_family(mono.clone())
+                                    .text_size(px(11.5))
+                                    .children(hunks),
+                            )
+                        })
+                });
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.))
+                    .px(px(10.))
+                    .py(px(7.))
+                    .rounded(px(8.))
+                    .bg(ui(0xffffff06))
+                    .border_1()
+                    .border_color(ui(0xffffff12))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(ui(0xffffff70))
+                            .child(format!("✎ {count} · +{added} −{removed} · {time}")),
+                    )
+                    .children(rows)
+                    .into_any_element()
+            },
+            // What the agent put in itself: its summary; Copy, all of it.
+            ThreadItem::Notice { tag, summary, text } => div()
+                .max_w(relative_width(0.86))
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .px(px(10.))
+                .py(px(6.))
                 .rounded(px(8.))
-                .when(found, |d| d.bg(ui(0xe0af6826)).border_1().border_color(ui(0xe0af6888)))
-                .child(element)
-        });
-        // (Built now: their buttons' listeners hold the context.)
-        let entries: Vec<gpui::Div> = entries.collect();
+                .border_1()
+                .border_color(ui(0xffffff14))
+                .bg(ui(0xffffff05))
+                .child(self.copyable(
+                    format!("⚙ {} · {time}", tag.replace('-', " ")),
+                    text,
+                    seq,
+                    cx,
+                ))
+                .child(div().text_size(px(12.5)).text_color(ui(0xffffffb0)).child(self.markdown(
+                    agents,
+                    summary,
+                    &seq.to_string(),
+                    which,
+                    cx,
+                )))
+                .into_any_element(),
+            ThreadItem::Overlap { file, other } => note(
+                format!("⚠ {} also changed {} · {time}", other.title, shown_path(file)),
+                WAITING,
+            )
+            .into_any_element(),
+            ThreadItem::Waiting { message } => {
+                note(format!("waiting for you · {message}"), WAITING).into_any_element()
+            },
+            ThreadItem::Session { event } => {
+                note(format!("session {event} · {time}"), 0xffffff70).into_any_element()
+            },
+            ThreadItem::Interrupted { reason } => {
+                note(format!("stopped · {reason}"), DENY).into_any_element()
+            },
+        };
+        // An entry just searched for stands out a moment.
+        let found = agents.flash.is_some_and(|(s, at)| s == seq && at.elapsed() < FLASH_FOUND);
+        div()
+            .group(SharedString::from(format!("entry-{seq}")))
+            .flex_none()
+            .rounded(px(8.))
+            .when(found, |d| d.bg(ui(0xe0af6826)).border_1().border_color(ui(0xe0af6888)))
+            .child(element)
+            .px(px(16.))
+            .pt(px(if ix == 0 { 14. } else { 12. }))
+            .into_any_element()
+    }
+
+    /// An agent's thread, with its header and the box to write to it in.
+    pub(super) fn agent_thread(
+        &self,
+        agents: &Agents,
+        agent: Option<&AgentInfo>,
+        which: Shown,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let Some(agent) = agent else { return div().flex_1() };
         let (label, color) = state_label(agent.state);
         let pane = agent.pane;
         let live =
@@ -1200,14 +1279,9 @@ impl WindowView {
             )
             .child(
                 div()
-                    .id(match which {
-                        Shown::View => "agent-thread",
-                        Shown::Panel => "panel-thread",
-                    })
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&agents.scroll)
+                    .text_size(px(13.))
                     // A press outside a message: what was selected isn't.
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1219,20 +1293,14 @@ impl WindowView {
                             }
                         }),
                     )
-                    // The entries are its own children: one can be scrolled to.
-                    .flex()
-                    .flex_col()
-                    .gap(px(12.))
-                    .px(px(16.))
-                    .py(px(14.))
-                    .text_size(px(13.))
-                    .children(entries)
-                    .when(agents.thread.is_empty(), |d| {
-                        d.child(div().text_color(ui(0xffffff60)).child(
-                            "Nothing yet: what it's given and says from now on shows here.",
-                        ))
-                    })
-                    .child(self.queued_asks(&agents.asks)),
+                    // Only the entries in view are drawn (and measured once).
+                    .child(
+                        gpui::list(
+                            agents.list.0.clone(),
+                            cx.processor(move |this, ix, _, cx| this.thread_item(which, ix, cx)),
+                        )
+                        .size_full(),
+                    ),
             )
             .child(self.compose_box(&agent.title, which, cx))
     }

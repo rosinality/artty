@@ -49,3 +49,29 @@ pub fn record(build: Duration, paint: Duration) {
         *stats = Stats { since: Instant::now(), build: Vec::new(), paint: Vec::new() };
     }
 }
+
+/// Record a view's frame (`label`): from building it to its painting done;
+/// printed every two seconds, as frames are.
+pub fn record_view(label: &'static str, took: Duration) {
+    if !enabled() {
+        return;
+    }
+    static VIEWS: OnceLock<Mutex<(Instant, Vec<Duration>)>> = OnceLock::new();
+    let views = VIEWS.get_or_init(|| Mutex::new((Instant::now(), Vec::new())));
+    let mut views = views.lock().unwrap();
+    views.1.push(took);
+    if views.0.elapsed() >= Duration::from_secs(2) {
+        let times = &mut views.1;
+        times.sort();
+        let ms = |d: Duration| d.as_secs_f64() * 1000.;
+        let p95 = times[(times.len() * 95 / 100).min(times.len() - 1)];
+        let mean = times.iter().sum::<Duration>() / times.len() as u32;
+        eprintln!(
+            "artty profile: {label}: {} frames, mean {:.2}ms p95 {:.2}ms",
+            times.len(),
+            ms(mean),
+            ms(p95)
+        );
+        *views = (Instant::now(), Vec::new());
+    }
+}
