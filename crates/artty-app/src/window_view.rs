@@ -36,6 +36,8 @@ mod activity;
 mod agents_view;
 #[path = "ask_sheet.rs"]
 mod ask_sheet;
+#[path = "compose.rs"]
+mod compose;
 #[path = "copy_mode.rs"]
 mod copy_mode;
 #[path = "files_drawer.rs"]
@@ -2086,6 +2088,9 @@ impl WindowView {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        if self.showing_agents() {
+            return self.compose_text(&text, cx);
+        }
         if let Some(search) = self.search.as_mut() {
             search.query.push_str(text.lines().next().unwrap_or_default());
             self.run_search(true, true, cx);
@@ -4430,6 +4435,10 @@ impl EntityInputHandler for WindowView {
             self.ask_text(text, cx);
             return;
         }
+        if self.showing_agents() {
+            self.compose_text(text, cx);
+            return;
+        }
         if self.palette.is_some() {
             self.palette_text(text, cx);
             return;
@@ -4481,6 +4490,10 @@ impl EntityInputHandler for WindowView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        // Writing to an agent: the input method's window by the box.
+        if self.showing_agents() {
+            return Some(element_bounds);
+        }
         let cursor = self.cursor?;
         Some(self.metrics.cell_bounds(element_bounds.origin, cursor.line, cursor.column, 1))
     }

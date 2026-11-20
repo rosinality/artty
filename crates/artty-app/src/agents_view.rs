@@ -23,9 +23,14 @@ const DENY: u32 = 0xf7768eff;
 pub(super) struct Agents {
     /// Every connected server's agents, pane ids tagged (see `ids`), with
     /// their server's name.
-    agents: Vec<(AgentInfo, String)>,
+    pub(super) agents: Vec<(AgentInfo, String)>,
     /// The agent shown (its pane), and its thread.
-    selected: Option<PaneId>,
+    pub(super) selected: Option<PaneId>,
+    /// What's being written to each agent.
+    pub(super) drafts: super::compose::Drafts,
+    /// The chosen agent's asks not yet over (some still waiting to be
+    /// given to it).
+    asks: Vec<artty_core::control::AskInfo>,
     thread: Vec<ThreadEntry>,
     thread_of: Option<PaneId>,
     scroll: gpui::ScrollHandle,
@@ -100,7 +105,13 @@ impl WindowView {
         let thread = selected.map(|pane| {
             let request =
                 Request::Thread { tab: ids::local_id(pane), after: None, limit: Some(THREAD) };
-            (pane, app_state::control_on(ids::server_of(pane), request, cx))
+            let server = ids::server_of(pane);
+            let waiting = Request::AskList { tab: Some(ids::local_id(pane)) };
+            (
+                pane,
+                app_state::control_on(server, request, cx),
+                app_state::control_on(server, waiting, cx),
+            )
         });
         cx.spawn(async move |this, cx| {
             let mut found = Vec::new();
@@ -113,9 +124,16 @@ impl WindowView {
                 }
             }
             let thread = match thread {
-                Some((pane, answer)) => match answer.await {
-                    Ok(Response::Thread { entries, .. }) => Some((pane, entries)),
-                    _ => Some((pane, Vec::new())),
+                Some((pane, answer, waiting)) => {
+                    let entries = match answer.await {
+                        Ok(Response::Thread { entries, .. }) => entries,
+                        _ => Vec::new(),
+                    };
+                    let asks = match waiting.await {
+                        Ok(Response::Asks { asks }) => asks,
+                        _ => Vec::new(),
+                    };
+                    Some((pane, entries, asks))
                 },
                 None => None,
             };
@@ -129,11 +147,15 @@ impl WindowView {
                     agents.selected.filter(|p| agents.agents.iter().any(|(a, _)| a.pane == *p));
                 agents.selected = chosen.or_else(|| agents.agents.first().map(|(a, _)| a.pane));
                 // (Only the thread of the agent still chosen.)
-                if let Some((pane, entries)) = thread.filter(|(p, _)| agents.selected == Some(*p)) {
-                    let grew =
-                        agents.thread_of != Some(pane) || entries.len() != agents.thread.len();
+                if let Some((pane, entries, asks)) =
+                    thread.filter(|(p, _, _)| agents.selected == Some(*p))
+                {
+                    let grew = agents.thread_of != Some(pane)
+                        || entries.len() != agents.thread.len()
+                        || asks.len() != agents.asks.len();
                     agents.thread_of = Some(pane);
                     agents.thread = entries;
+                    agents.asks = asks;
                     if grew {
                         agents.scroll.scroll_to_bottom();
                     }
@@ -168,7 +190,13 @@ impl WindowView {
     /// Keys while Agents is shown: ↑↓ choose an agent, Enter shows its
     /// terminal, Escape leaves. Returns whether the key was used.
     pub(super) fn agents_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        // The draft's keys first: editing, sending.
+        if self.compose_key(event, cx) {
+            return true;
+        }
         let Some(agents) = self.agents.as_ref() else { return false };
+        let writing =
+            agents.selected.and_then(|p| agents.drafts.get(&p)).is_some_and(|d| !d.text.is_empty());
         let panes: Vec<PaneId> = agents.agents.iter().map(|(a, _)| a.pane).collect();
         let at = agents.selected.and_then(|p| panes.iter().position(|&q| q == p));
         match event.keystroke.key.as_str() {
@@ -176,7 +204,7 @@ impl WindowView {
                 self.agents = None;
                 cx.notify();
             },
-            "up" | "down" if !panes.is_empty() => {
+            "up" | "down" if !panes.is_empty() && !writing => {
                 let next = match (event.keystroke.key.as_str(), at) {
                     ("up", Some(i)) => i.saturating_sub(1),
                     ("down", Some(i)) => (i + 1).min(panes.len() - 1),
@@ -538,9 +566,11 @@ impl WindowView {
                                     "Nothing yet: what it's given and says from now on shows here.",
                                 ))
                             })
-                            .children(entries),
+                            .children(entries)
+                            .child(self.queued_asks(&agents.asks)),
                     ),
             )
+            .child(self.compose_box(&agent.title, cx))
     }
 
     fn agent_details(

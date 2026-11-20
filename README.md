@@ -316,6 +316,13 @@ shows the chosen one's thread (a pending permission request is answered
 there too), and what's known about it. Threads last as long as the server
 and the pane do.
 
+Below the thread, write to the agent: ⏎ sends it as an `artty ask` (given
+to the agent once its turn ends; until then it shows as queued), ⇧⏎ starts
+a new line, Esc clears. Begin with `@tab` — the agent's tab title, spaces
+left out — to send it to another agent instead, or several (`@api @web
+…`); typing `@` lists them, and ⇥ completes. ↑↓ choose an agent while
+nothing's written.
+
 ```sh
 artty agents                          # pane, agent, state, workspace · tab
 artty thread --tab 4 --lines 20       # its last 20 entries
