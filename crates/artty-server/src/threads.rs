@@ -305,6 +305,15 @@ impl Threads {
         changed
     }
 
+    /// Forget `pane`'s thread: how many entries it had.
+    pub fn clear(&mut self, pane: PaneId) -> usize {
+        let Some(thread) = self.panes.remove(&pane) else { return 0 };
+        if let (Some(key), Some(last)) = (self.keys.get(&pane), thread.back()) {
+            self.store.trim(*key, last.seq);
+        }
+        thread.len()
+    }
+
     /// The prompt id of `pane`'s last turn, if its agent gave one.
     pub fn last_prompt_id(&self, pane: PaneId) -> Option<String> {
         self.panes.get(&pane)?.iter().rev().find_map(|e| match &e.item {

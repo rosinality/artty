@@ -1457,6 +1457,46 @@ impl WindowView {
                         .join(" · "),
                     )),
             )
+            .child({
+                let pane = agent.pane;
+                div()
+                    .id("clear-thread")
+                    .text_size(px(11.))
+                    .text_color(ui(0xffffff50))
+                    .hover(|d| d.text_color(ui(0xffffffb0)))
+                    .cursor_pointer()
+                    .child("Clear thread…")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.clear_thread(pane, window, cx)
+                    }))
+            })
+    }
+
+    /// Forget an agent's thread (asked first): its terminal isn't touched.
+    fn clear_thread(&mut self, pane: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            "Clear this agent's thread?",
+            Some("Its messages here are forgotten. Its terminal and conversation aren't touched."),
+            &["Clear", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await != Ok(0) {
+                return;
+            }
+            let request = Request::ThreadClear { tab: ids::local_id(pane) };
+            let Ok(answer) =
+                this.update(cx, |_, cx| app_state::control_on(ids::server_of(pane), request, cx))
+            else {
+                return;
+            };
+            if let Ok(Response::Error { message }) = answer.await {
+                let _ = this.update(cx, |this, cx| this.show_toast(message, cx));
+            }
+            let _ = this.update(cx, |this, cx| this.refresh_agents(cx));
+        })
+        .detach();
     }
 
     /// Show (or hide) what an edited file's changes were.

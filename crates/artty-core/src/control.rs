@@ -405,6 +405,11 @@ pub enum Request {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Forget a pane's thread (its entries, here and on disk): what's done
+    /// in its terminal isn't touched. Not from programs in artty's panes.
+    ThreadClear {
+        tab: SessionId,
+    },
     /// Every pane's thread (or `tab`'s) searched for `text` (case ignored
     /// unless it has capitals): the newest matches first.
     ThreadSearch {

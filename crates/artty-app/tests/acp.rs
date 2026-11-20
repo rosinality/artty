@@ -250,3 +250,23 @@ fn an_edit_shown_before_it_is_allowed() {
     let (_, permission) = entries.iter().find(|(k, _)| k == "Permission").unwrap();
     assert_eq!(permission["input"]["new_string"], "edited\n", "{permission:?}");
 }
+
+#[test]
+fn a_thread_cleared() {
+    let (mut scratch, pane) = started();
+    let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "to be forgotten"]);
+    assert_eq!(stdout(&out), "echo: to be forgotten", "{}", stderr(&out));
+    let out = scratch.artty(&["thread", "--clear", "--tab", &pane]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let left = thread(&scratch, &pane);
+    assert!(left.is_empty(), "{left:?}");
+    // Gone on disk too; the agent goes on.
+    scratch.restart();
+    wait_for("the agent to resume", || {
+        stdout(&scratch.artty(&["agents", "--json"])).contains("claude-acp")
+    });
+    let entries = thread(&scratch, &pane);
+    assert!(!entries.iter().any(|(_, v)| v.to_string().contains("forgotten")), "{entries:?}");
+    let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "again"]);
+    assert_eq!(stdout(&out), "echo: again", "{}", stderr(&out));
+}

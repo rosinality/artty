@@ -2229,6 +2229,21 @@ impl Server {
                     Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
                 }
             },
+            Request::ThreadClear { tab } => {
+                let response = if self.in_a_pane(peer) {
+                    Response::error(
+                        "a thread is the user's to clear, not from inside artty's panes",
+                    )
+                } else if !self.panes.contains_key(&tab) {
+                    Response::error(format!("no pane {tab}"))
+                } else {
+                    self.threads.clear(tab);
+                    self.replies.read_pane(tab);
+                    self.keep(Instant::now());
+                    Response::Ok
+                };
+                Self::answer(&self.clients, waiter, response);
+            },
             Request::Decide { id, allow, message, always } => {
                 let decision = Decision { allow, message, permissions: Vec::new() };
                 let response = self.decide(id, decision, always, peer);
@@ -3232,7 +3247,8 @@ impl Server {
             | Request::Approve { .. }
             | Request::AskWait { .. }
             | Request::Events { .. }
-            | Request::Decide { .. } => unreachable!("handled before"),
+            | Request::Decide { .. }
+            | Request::ThreadClear { .. } => unreachable!("handled before"),
             Request::AskForward { id } => {
                 let ask = self.forward(id)?;
                 self.pump_asks(Instant::now());

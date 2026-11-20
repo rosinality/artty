@@ -127,6 +127,8 @@ artty, your own pane is found automatically:
                                          its permission requests and sessions,
                                          oldest first (the last N; or after an
                                          entry's SEQ, from --json)
+  artty thread --clear --tab N          forget pane N's thread (its terminal
+                                         isn't touched)
   artty thread --search TEXT [--tab N] [--json]
                                          every agent's thread (or pane N's)
                                          searched: newest matches first
@@ -347,13 +349,15 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--pane" => {
                 switches.insert("pane");
             },
-            "--screen" | "--last" | "--no-enter" | "--background" | "--json" | "--hook" => {
+            "--screen" | "--last" | "--no-enter" | "--background" | "--json" | "--hook"
+            | "--clear" => {
                 switches.insert(match arg.as_str() {
                     "--screen" => "screen",
                     "--last" => "last",
                     "--no-enter" => "no-enter",
                     "--background" => "background",
                     "--json" => "json",
+                    "--clear" => "clear",
                     _ => "hook",
                 });
             },
@@ -668,6 +672,10 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                     .map(|v| v.parse().map_err(|_| format!("--{name}: not a number")))
                     .transpose()
             };
+            if switches.contains("clear") {
+                let tab = tab.ok_or("thread --clear: which pane? (--tab N)")?;
+                return print_response(send(&Request::ThreadClear { tab }, None)?, false);
+            }
             if let Some(text) = flags.get("search") {
                 // Every agent's thread, unless one's named.
                 return print_response(
