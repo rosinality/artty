@@ -431,6 +431,9 @@ pub struct WindowView {
     thread_panel: Option<thread_panel::ThreadPanel>,
     /// What's being written to each agent (in Agents or the panel).
     drafts: compose::Drafts,
+    /// The pane whose screens a server sends for the Agents view, and over
+    /// which connection (see `follow_peek`).
+    peeking: Option<(PaneId, u64)>,
     /// The pane in copy mode, if any.
     copy_mode: Option<PaneId>,
     /// A short message over the terminal, and when it appeared.
@@ -584,6 +587,7 @@ impl WindowView {
             agents: None,
             thread_panel: None,
             drafts: Default::default(),
+            peeking: None,
             copy_mode: None,
             toast: None,
             queue_all: false,
@@ -4001,6 +4005,7 @@ impl Render for WindowView {
         // Activity is over it: its programs aren't resized back and forth).
         let full = self.area.width;
         self.area.width = self.beside_panel(full);
+        self.follow_peek(cx);
         // The terminal's container ends where the panel begins: what's
         // placed by its right edge (find, toasts) stays in sight.
         let panel_cut = full - self.area.width;

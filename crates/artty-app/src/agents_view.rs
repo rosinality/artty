@@ -93,6 +93,80 @@ impl WindowView {
         cx.notify();
     }
 
+    /// The chosen agent's terminal, live, while Agents shows it: its
+    /// server sends its screens though no window shows it (`peek`).
+    pub(super) fn follow_peek(&mut self, cx: &mut Context<Self>) {
+        let want = self.agents.as_ref().and_then(|a| a.selected);
+        // Still asked of the same connection (a new one forgot it).
+        let current = self.peeking.filter(|&(pane, connection)| {
+            app_state::connection(ids::server_of(pane), cx) == Some(connection)
+        });
+        if want == current.map(|(pane, _)| pane) {
+            return;
+        }
+        if let Some((old, _)) = self.peeking.take()
+            && Some(old) != want
+        {
+            app_state::peek(ids::server_of(old), None, cx);
+        }
+        self.peeking = want.and_then(|pane| {
+            let connection = app_state::peek(ids::server_of(pane), Some(ids::local_id(pane)), cx)?;
+            Some((pane, connection))
+        });
+    }
+
+    /// The agent's terminal as it is now, shrunk to `width` (not grown).
+    fn terminal_peek(
+        &self,
+        pane: PaneId,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Stateful<gpui::Div>> {
+        let frame = app_state::screen_of(pane, cx)?.frame.clone();
+        if frame.columns == 0 || frame.lines.is_empty() {
+            return None;
+        }
+        let natural = frame.columns as f32 * f32::from(self.metrics.cell_width);
+        let scale = (width / natural).min(1.);
+        let mut metrics = self.metrics.clone();
+        metrics.font_size *= scale;
+        metrics.cell_width *= scale;
+        metrics.line_height *= scale;
+        let height = frame.lines.len() as f32 * f32::from(metrics.line_height);
+        let background = crate::terminal::hsla(frame.background);
+        Some(
+            div()
+                .id(SharedString::from(format!("peek-{pane}")))
+                .w(px(width))
+                .h(px(height))
+                .flex_none()
+                .rounded(px(6.))
+                .overflow_hidden()
+                .bg(background)
+                .border_1()
+                .border_color(ui(0xffffff1a))
+                .cursor_pointer()
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |bounds, _, window, cx| {
+                            let state = crate::terminal::PaintState {
+                                focused: false,
+                                cursor_visible: false,
+                                marked_text: None,
+                                fade: 0.,
+                                link: None,
+                                flash: 0.,
+                            };
+                            crate::terminal::paint(bounds, &frame, &metrics, state, window, cx);
+                        },
+                    )
+                    .size_full(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.show_agent_terminal(pane, cx))),
+        )
+    }
+
     pub(super) fn agents_in(&self, which: Shown) -> Option<&Agents> {
         match which {
             Shown::View => self.agents.as_ref(),
@@ -845,8 +919,14 @@ impl WindowView {
         agent: &AgentInfo,
         server: &str,
         several: bool,
-        _cx: &mut Context<Self>,
-    ) -> gpui::Div {
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        // Its terminal, live, above what's known of it: a third of the view
+        // (within reason), the thread keeping the most.
+        const PADDING: f32 = 14.;
+        let wide = (self.area.width * 0.3).clamp(260., 440.);
+        let peek = self.terminal_peek(agent.pane, wide - 2. * PADDING, cx);
+        let width = if peek.is_some() { wide } else { 240. };
         let row = |label: &str, value: String| {
             div()
                 .flex()
@@ -862,14 +942,29 @@ impl WindowView {
         };
         let (label, _) = state_label(agent.state);
         div()
-            .w(px(240.))
+            .id("agent-details")
+            .w(px(width))
             .flex_none()
             .flex()
             .flex_col()
             .gap(px(12.))
-            .p(px(14.))
+            .p(px(PADDING))
             .border_l_1()
             .border_color(ui(0xffffff12))
+            .overflow_y_scroll()
+            .children(peek.map(|peek| {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(ui(0xffffff60))
+                            .child("TERMINAL · click to open"),
+                    )
+                    .child(peek)
+            }))
             .child(row(
                 "Status",
                 match &agent.message {

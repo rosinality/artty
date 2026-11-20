@@ -1043,6 +1043,31 @@ pub mod extension {
     pub const STATUS: &str = "status";
     /// Server → app: [`super::QueueUpdate`].
     pub const QUEUE: &str = "queue";
+    /// App → server: [`super::Peek`].
+    pub const PEEK: &str = "peek";
+}
+
+/// The kinds a server reads from apps (it lists them, with those it sends,
+/// in its `Extensions`: an app sends only those).
+pub const CLIENT_KINDS: &[&str] = &[extension::PEEK];
+
+/// [`extension::PEEK`]: also send this pane's screens, though no window of
+/// the app shows it (the Agents view showing an agent's terminal); `None`:
+/// no longer. Its size stays as the windows that show it make it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Peek {
+    pub pane: Option<PaneId>,
+}
+
+impl Peek {
+    pub fn message(&self) -> ClientMessage {
+        let data = postcard::to_stdvec(self).unwrap_or_default();
+        ClientMessage::Extension { kind: extension::PEEK.to_owned(), data }
+    }
+
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        postcard::from_bytes(data).ok()
+    }
 }
 
 /// The server's extensions this build reads, decoded.
@@ -1413,7 +1438,16 @@ mod tests {
             bytes(&ServerMessage::Extensions { kinds: vec!["status".into()] }),
             FROZEN_KINDS
         );
+        // App → server.
+        let peek = Peek { pane: Some(300) };
+        let ClientMessage::Extension { kind, data } = peek.message() else { unreachable!() };
+        assert_eq!((kind.as_str(), data.as_slice()), ("peek", &FROZEN_PEEK[..]));
+        assert_eq!(Peek::decode(&data), Some(peek));
+        assert_eq!(Peek::decode(&[0]), Some(Peek { pane: None }));
     }
+
+    /// `peek`: pane 300.
+    const FROZEN_PEEK: [u8; 3] = [1, 172, 2];
 
     /// `status`: window 300, `l` bold in 1,2,3 on the left, `r` dim on
     /// 4,5,6 on the right.

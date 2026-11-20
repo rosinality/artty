@@ -598,6 +598,15 @@ impl Client {
         self.send(&ClientMessage::ClosePane { pane })
     }
 
+    /// Also be sent `pane`'s screens, though no window here shows it (or,
+    /// `None`, no longer); nothing with a server that doesn't read `peek`.
+    pub fn peek(&self, pane: Option<PaneId>) -> Result<(), String> {
+        if !self.supports(artty_core::protocol::extension::PEEK) {
+            return Ok(());
+        }
+        self.send(&artty_core::protocol::Peek { pane }.message())
+    }
+
     /// Focus a pane, its tab shown.
     pub fn focus_pane(&self, pane: PaneId) -> Result<(), String> {
         self.send(&ClientMessage::FocusPane { pane })

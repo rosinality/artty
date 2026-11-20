@@ -488,7 +488,7 @@ impl WindowView {
                     })
                     .child(if empty {
                         div().text_color(ui(0xffffff50)).child(format!(
-                            "{cursor}Message {title}… (/new claude [-w BRANCH] TASK starts another agent)"
+                            "{cursor}Message {title}… (/new to start an agent)"
                         ))
                     } else {
                         // The cursor as a bar; what an input method composes, before it.

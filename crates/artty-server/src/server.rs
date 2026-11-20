@@ -217,6 +217,9 @@ struct Client {
     last_used: Option<Instant>,
     /// The extension kinds it reads (its `Hello`'s).
     extensions: Vec<String>,
+    /// A pane whose screens it wants though no window of it shows it
+    /// (`peek`).
+    peek: Option<PaneId>,
 }
 
 impl Client {
@@ -1576,7 +1579,11 @@ impl Server {
                     version: artty_core::protocol::protocol_version(),
                     server_version: build,
                 });
-                let kinds = ServerExtension::KINDS.iter().map(|&k| k.to_owned()).collect();
+                let kinds = ServerExtension::KINDS
+                    .iter()
+                    .chain(artty_core::protocol::CLIENT_KINDS)
+                    .map(|&k| k.to_owned())
+                    .collect();
                 let _ = tx.send(ServerMessage::Extensions { kinds });
                 self.clients.insert(
                     id,
@@ -1595,6 +1602,7 @@ impl Server {
                         last_used: None,
                         pings: false,
                         extensions,
+                        peek: None,
                     },
                 );
             },
@@ -2047,9 +2055,17 @@ impl Server {
                 }
             },
             ClientMessage::Ping { id } => self.send(client, ServerMessage::Pong { id }),
-            // No kinds from apps yet.
-            ClientMessage::Extension { kind, .. } => {
-                log::debug!("skipped an extension of unknown kind {kind:?}");
+            ClientMessage::Extension { kind, data } => match kind.as_str() {
+                artty_core::protocol::extension::PEEK => {
+                    let peek = artty_core::protocol::Peek::decode(&data);
+                    if let (Some(peek), Some(client)) = (peek, self.clients.get_mut(&client)) {
+                        client.peek = peek.pane;
+                        if let Some(pane) = peek.pane {
+                            client.dirty.insert(pane);
+                        }
+                    }
+                },
+                _ => log::debug!("skipped an extension of unknown kind {kind:?}"),
             },
             ClientMessage::Unwatch { pane } => self.watches.unwatch(client, pane),
             ClientMessage::Reveal { pane, line, column, length } => {
@@ -3860,8 +3876,14 @@ impl Server {
                 .filter(|info| window_panes.contains(&info.id))
                 .filter_map(|info| Some(self.pane_state(self.panes.get(&info.id)?, info.clone())))
                 .collect();
-            let visible: Vec<PaneId> =
+            let mut visible: Vec<PaneId> =
                 windows.iter().flat_map(|(_, _, v)| v.iter().copied()).collect();
+            // And the one it peeks at.
+            let peek = self.clients.get(&client_id).and_then(|c| c.peek);
+            if let Some(pane) = peek.filter(|p| self.panes.contains_key(p) && !visible.contains(p))
+            {
+                visible.push(pane);
+            }
 
             let mut frames = Vec::new();
             {

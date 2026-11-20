@@ -205,6 +205,9 @@ pub struct Shared {
     /// What needs the user, each server's as it last sent it (pane ids
     /// tagged; see [`queue`]).
     queues: HashMap<ServerId, Vec<artty_core::protocol::QueueItem>>,
+    /// The extension kinds each server sends and reads (its `Extensions`),
+    /// and how many times it's said so (once a connection).
+    kinds: HashMap<ServerId, (Vec<String>, u64)>,
     /// Visual bells: when each pane last rang.
     pub flashes: HashMap<PaneId, Instant>,
     /// Typing shown before its echo comes back, per pane (see `echo`).
@@ -323,6 +326,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         panes: HashMap::new(),
         statuses: HashMap::new(),
         queues: HashMap::new(),
+        kinds: HashMap::new(),
         flashes: HashMap::new(),
         echoes: HashMap::new(),
         windows: HashMap::new(),
@@ -715,8 +719,14 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
             },
             None => {},
         },
-        // What the server sends and reads: every kind the app shows, so far.
-        ServerMessage::Extensions { .. } => {},
+        // What the server sends and reads: the app sends it only those.
+        ServerMessage::Extensions { kinds } => {
+            let known = &mut cx.global_mut::<Shared>().kinds;
+            let connection = known.get(&server).map_or(0, |(_, n)| n + 1);
+            known.insert(server, (kinds, connection));
+            // What windows asked of the last connection is asked again.
+            cx.refresh_windows();
+        },
         ServerMessage::WindowClosed { window } => {
             cx.global_mut::<Shared>().statuses.remove(&window);
             if let Some(view) =
@@ -876,6 +886,29 @@ pub fn send(mut message: ClientMessage, cx: &App) {
 }
 
 /// Send to `server` a message that names nothing of it (or names it).
+/// Have `server` also send `pane`'s screens (its local id), or none's, if
+/// it reads `peek` (an older build doesn't): the connection it went to (a
+/// new one forgets it), if it went.
+pub fn peek(server: ServerId, pane: Option<PaneId>, cx: &App) -> Option<u64> {
+    use artty_core::protocol::{Peek, extension};
+    let (kinds, connection) = cx.global::<Shared>().kinds.get(&server)?;
+    if !kinds.iter().any(|k| k == extension::PEEK) {
+        return None;
+    }
+    deliver(server, Peek { pane }.message(), cx);
+    Some(*connection)
+}
+
+/// `server`'s connection, as `peek` counts them.
+pub fn connection(server: ServerId, cx: &App) -> Option<u64> {
+    cx.global::<Shared>().kinds.get(&server).map(|(_, n)| *n)
+}
+
+/// A pane's screen as last received, if it's been sent.
+pub fn screen_of(pane: PaneId, cx: &App) -> Option<&Screen> {
+    cx.global::<Shared>().screens.get(&pane)
+}
+
 pub fn send_to(server: ServerId, mut message: ClientMessage, cx: &App) {
     ids::outgoing(&mut message);
     deliver(server, message, cx);
@@ -1752,6 +1785,7 @@ fn drop_remote(server: ServerId, cx: &mut App) {
     shared.windows.retain(|&window, _| ids::server_of(window) != server);
     shared.screens.retain(|&pane, _| ids::server_of(pane) != server);
     shared.panes.retain(|&pane, _| ids::server_of(pane) != server);
+    shared.kinds.remove(&server);
     shared.images.retain(|&image, _| ids::server_of(image) != server);
     cx.refresh_windows();
 }

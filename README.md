@@ -319,7 +319,9 @@ turn, its permission requests and how they went, and its sessions starting,
 resuming, compacting and ending. The Agents view (⇧⌘K, or Agents in the
 sidebar) lists every agent on every connected server with what it's doing,
 shows the chosen one's thread (a pending permission request is answered
-there too), and what's known about it. Threads are kept on disk (an
+there too), and what's known about it, with its terminal, live (shrunk to
+fit; click it to go there). The terminal is sent though no window shows it,
+at the size its own tab gives it (servers from before this don't send it). Threads are kept on disk (an
 `agents.db` beside the saved tabs, readable by you only; the last 1000
 entries of each): a tab reopened after a restart takes its thread back. A
 thread goes when its pane is closed. Unread replies (the queue's) don't
