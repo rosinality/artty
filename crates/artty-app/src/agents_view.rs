@@ -85,18 +85,46 @@ impl WindowView {
         self.agents.is_some()
     }
 
+    /// Show Agents, the agent of the tab you're on chosen (else the first);
+    /// or leave it (see `leave_agents`).
     pub(super) fn toggle_agents(&mut self, cx: &mut Context<Self>) {
-        if self.agents.take().is_none() {
-            self.close_search(cx);
-            self.picker = None;
-            self.activity = None;
-            if self.renaming.is_some() {
-                self.finish_rename(true, cx);
-            }
-            self.agents = Some(Agents::default());
-            self.refresh_in(Shown::View, cx);
+        if self.showing_agents() {
+            return self.leave_agents(cx);
+        }
+        self.close_search(cx);
+        self.picker = None;
+        self.activity = None;
+        if self.renaming.is_some() {
+            self.finish_rename(true, cx);
+        }
+        self.agents = Some(Agents { selected: self.focused_id(), ..Agents::default() });
+        self.refresh_in(Shown::View, cx);
+        cx.notify();
+    }
+
+    /// Back to the tabs, at the tab of the agent you were looking at.
+    pub(super) fn leave_agents(&mut self, cx: &mut Context<Self>) {
+        let Some(agents) = self.agents.take() else { return };
+        if let Some(pane) =
+            agents.selected.filter(|p| agents.agents.iter().any(|(a, _)| a.pane == *p))
+        {
+            self.open_queue_pane(pane, cx);
         }
         cx.notify();
+    }
+
+    /// Where an agent goes in the list: as its tab is in this window's
+    /// sidebar (workspace, tab, pane), then those elsewhere (another
+    /// window's, another machine's) by machine and workspace.
+    fn agent_order(&self, agent: &AgentInfo, server: &str) -> (u8, usize, usize, usize, String) {
+        for (w, workspace) in self.layout.workspaces.iter().enumerate() {
+            for (t, tab) in workspace.tabs.iter().enumerate() {
+                if let Some(p) = tab.root.panes().iter().position(|&p| p == agent.pane) {
+                    return (0, w, t, p, String::new());
+                }
+            }
+        }
+        (1, 0, 0, agent.pane as usize, format!("{server}\u{0}{}", agent.workspace))
     }
 
     /// The chosen agent's terminal, live, while Agents shows it: its
@@ -251,6 +279,9 @@ impl WindowView {
                 None => None,
             };
             let _ = this.update(cx, |this, cx| {
+                // As the sidebar has their tabs (↑↓ go that way too).
+                let mut found = found;
+                found.sort_by_cached_key(|(agent, server)| this.agent_order(agent, server));
                 let Some(agents) = this.agents_in_mut(which) else { return };
                 agents.loading = false;
                 agents.loaded = true;
@@ -352,10 +383,7 @@ impl WindowView {
         let panes: Vec<PaneId> = agents.agents.iter().map(|(a, _)| a.pane).collect();
         let at = agents.selected.and_then(|p| panes.iter().position(|&q| q == p));
         match event.keystroke.key.as_str() {
-            "escape" => {
-                self.agents = None;
-                cx.notify();
-            },
+            "escape" => self.leave_agents(cx),
             "up" | "down" if !panes.is_empty() && !writing => {
                 let next = match (event.keystroke.key.as_str(), at) {
                     ("up", Some(i)) => i.saturating_sub(1),
@@ -436,18 +464,38 @@ impl WindowView {
             )
     }
 
-    /// AGENTS, over the sidebar's list of them (in place of its tabs).
-    pub(super) fn agents_heading(&self, _cx: &mut Context<Self>) -> gpui::Div {
+    /// Over the sidebar's list of agents (in place of its tabs): Tabs |
+    /// Agents, saying which it shows, Tabs a click back.
+    pub(super) fn agents_heading(&self, cx: &mut Context<Self>) -> gpui::Div {
         let count = self.agents.as_ref().map_or(0, |a| a.agents.len());
-        div()
-            .flex()
-            .items_center()
-            .px_2()
-            .pb_1()
-            .text_size(px(10.5))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(ui(0xffffff70))
-            .child(format!("AGENTS · {count}"))
+        let segment = |id: &'static str, label: String, on: bool| {
+            div()
+                .id(id)
+                .flex_1()
+                .flex()
+                .justify_center()
+                .py(px(2.))
+                .rounded(px(5.))
+                .text_size(px(11.))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if on { ui(0xffffffee) } else { ui(0xffffff80) })
+                .when(on, |d| d.bg(ui(0xffffff1f)))
+                .when(!on, |d| d.hover(|d| d.bg(ui(0xffffff10)).text_color(ui(0xffffffd0))))
+                .child(label)
+        };
+        div().px(px(6.)).pb(px(6.)).child(
+            div()
+                .flex()
+                .gap(px(2.))
+                .p(px(2.))
+                .rounded(px(7.))
+                .bg(ui(0x00000026))
+                .child(
+                    segment("show-tabs", "Tabs".to_owned(), false)
+                        .on_click(cx.listener(|this, _, _, cx| this.leave_agents(cx))),
+                )
+                .child(segment("show-agents", format!("Agents · {count}"), true)),
+        )
     }
 
     /// The agents, as the sidebar lists tabs: its state's icon, its tab's
@@ -456,56 +504,81 @@ impl WindowView {
         let Some(agents) = self.agents.as_ref() else { return Vec::new() };
         let several =
             agents.agents.iter().map(|(_, server)| server).collect::<HashSet<_>>().len() > 1;
-        agents
-            .agents
-            .iter()
-            .map(|(agent, server)| {
-                let pane = agent.pane;
-                let chosen = agents.selected == Some(pane);
-                let icon = match agent.state {
-                    AgentState::Working => "busy",
-                    AgentState::Waiting => "waiting",
-                    AgentState::Done => "done",
-                    AgentState::Idle => "",
-                };
-                let (end, color) = match (agent.pending, agent.unread) {
-                    (n, _) if n > 0 => ("permission".to_owned(), WAITING),
-                    (_, n) if n > 0 => ("reply".to_owned(), DONE),
-                    _ => (agent.agent.clone(), 0xffffff60),
-                };
-                let mut title = agent.title.clone();
-                if several {
-                    title = format!("{title} · {server}");
-                }
-                let text = if chosen { ui(0xffffffee) } else { ui(0xffffffb0) };
-                div()
-                    .id(SharedString::from(format!("agent-{pane}")))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .h(px(32.))
-                    .pl(px(4.))
-                    .pr(px(8.))
-                    .rounded(px(7.))
-                    .when(chosen, |d| d.bg(ui(0xffffff1c)))
-                    .when(!chosen && agent.state == AgentState::Waiting, |d| d.bg(ui(0xe0af6814)))
-                    .hover(|d| d.bg(ui(0xffffff10)))
-                    .child(self.icon(icon))
-                    .child(
-                        Self::one_line(title)
-                            .flex_1()
-                            .min_w_0()
-                            .text_color(text)
-                            .when(agent.state == AgentState::Waiting, |d| {
-                                d.font_weight(FontWeight::SEMIBOLD)
-                            }),
-                    )
-                    .child(div().flex_none().text_size(px(11.5)).text_color(ui(color)).child(end))
-                    .on_click(cx.listener(move |this, _, _, cx| this.select_agent(pane, cx)))
-                    .into_any_element()
-            })
-            .collect()
+        // A workspace's (machine's) name over its agents, when they're of
+        // more than one.
+        let place = |agent: &AgentInfo, server: &str| match several {
+            true => format!("{server} · {}", agent.workspace),
+            false => agent.workspace.clone(),
+        };
+        let places: HashSet<String> = agents.agents.iter().map(|(a, s)| place(a, s)).collect();
+        let mut last_place = None;
+        let mut rows = Vec::new();
+        for (agent, server) in &agents.agents {
+            let here = place(agent, server);
+            if places.len() > 1 && last_place.as_ref() != Some(&here) {
+                rows.push(
+                    Self::one_line(here.clone())
+                        .px_2()
+                        .pt(px(6.))
+                        .pb(px(2.))
+                        .text_size(px(11.))
+                        .text_color(ui(0xffffff60))
+                        .into_any_element(),
+                );
+            }
+            last_place = Some(here);
+            rows.push(self.sidebar_agent(agents, agent, cx));
+        }
+        rows
+    }
+
+    fn sidebar_agent(
+        &self,
+        agents: &Agents,
+        agent: &AgentInfo,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let pane = agent.pane;
+        let chosen = agents.selected == Some(pane);
+        let icon = match agent.state {
+            AgentState::Working => "busy",
+            AgentState::Waiting => "waiting",
+            AgentState::Done => "done",
+            AgentState::Idle => "",
+        };
+        let (end, color) = match (agent.pending, agent.unread) {
+            (n, _) if n > 0 => ("permission".to_owned(), WAITING),
+            (_, n) if n > 0 => ("reply".to_owned(), DONE),
+            _ => (agent.agent.clone(), 0xffffff60),
+        };
+        let title = agent.title.clone();
+        let text = if chosen { ui(0xffffffee) } else { ui(0xffffffb0) };
+        div()
+            .id(SharedString::from(format!("agent-{pane}")))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .h(px(32.))
+            .pl(px(4.))
+            .pr(px(8.))
+            .rounded(px(7.))
+            .when(chosen, |d| d.bg(ui(0xffffff1c)))
+            .when(!chosen && agent.state == AgentState::Waiting, |d| d.bg(ui(0xe0af6814)))
+            .hover(|d| d.bg(ui(0xffffff10)))
+            .child(self.icon(icon))
+            .child(
+                Self::one_line(title)
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(text)
+                    .when(agent.state == AgentState::Waiting, |d| {
+                        d.font_weight(FontWeight::SEMIBOLD)
+                    }),
+            )
+            .child(div().flex_none().text_size(px(11.5)).text_color(ui(color)).child(end))
+            .on_click(cx.listener(move |this, _, _, cx| this.select_agent(pane, cx)))
+            .into_any_element()
     }
 
     /// An agent's thread, with its header and the box to write to it in.
@@ -566,8 +639,7 @@ impl WindowView {
                             .child(div().text_size(px(11.)).text_color(ui(0xffffff60)).child(
                                 match (ask, from) {
                                     (_, Some(from)) => format!("{} · {time}", from_label(from)),
-                                    (Some(_), None) => format!("you, by artty ask · {time}"),
-                                    (None, None) => format!("you · {time}"),
+                                    (_, None) => format!("you · {time}"),
                                 },
                             ))
                             .child(bubble(true).child(clip(text))),
@@ -877,6 +949,7 @@ impl WindowView {
         });
         let (label, color) = state_label(agent.state);
         let pane = agent.pane;
+        let live = app_state::screen_of(pane, cx).is_some_and(|s| s.frame.columns > 0);
         div()
             .flex_1()
             .min_w_0()
@@ -903,7 +976,9 @@ impl WindowView {
                     )
                     .child(div().flex_none().text_size(px(12.)).text_color(ui(color)).child(label))
                     .child(div().flex_1())
-                    .when(which == Shown::View, |d| {
+                    // (Its live terminal, beside, opens it with a click: only
+                    // without one, a button.)
+                    .when(which == Shown::View && !live, |d| {
                         d.child(
                             Self::small_button(
                                 format!("agent-terminal-{pane}"),
@@ -1005,10 +1080,6 @@ impl WindowView {
                     _ => label.to_owned(),
                 },
             ))
-            .when(several, |d| d.child(row("Machine", server.to_owned())))
-            .child(row("Workspace", agent.workspace.clone()))
-            .children(agent.cwd.as_ref().map(|cwd| row("Folder", cwd.display().to_string())))
-            .children(agent.ask.map(|id| row("Working on", format!("ask {id}"))))
             .when(agent.pending > 0, |d| {
                 let requests = match agent.pending {
                     1 => "1 permission request".to_owned(),
@@ -1016,7 +1087,30 @@ impl WindowView {
                 };
                 d.child(row("Needs you", requests))
             })
-            .children(agent.last_ms.map(|ms| row("Last activity", clock(ms))))
+            // The rest, small: where it is, what it's on, when it last did.
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .text_size(px(11.5))
+                    .text_color(ui(0xffffff80))
+                    .child(Self::one_line(match several {
+                        true => format!("{server} · {}", agent.workspace),
+                        false => agent.workspace.clone(),
+                    }))
+                    .children(agent.cwd.as_ref().map(|cwd| Self::one_line(short_home(cwd))))
+                    .child(Self::one_line(
+                        [
+                            agent.ask.map(|id| format!("on ask {id}")),
+                            agent.last_ms.map(|ms| format!("last at {}", clock(ms))),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    )),
+            )
     }
 
     /// Show (or hide) what an edited file's changes were.
@@ -1060,6 +1154,16 @@ pub(super) fn from_label(from: &artty_core::control::AskFrom) -> String {
     match &from.agent {
         Some(agent) => format!("from {} · {agent}", from.title),
         None => format!("from {}", from.title),
+    }
+}
+
+/// A folder as shown: the home folder as ~.
+fn short_home(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    match home.as_deref().and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
     }
 }
 

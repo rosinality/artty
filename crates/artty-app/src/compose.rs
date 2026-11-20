@@ -496,9 +496,9 @@ impl WindowView {
                     }),
             )
             .child(div().text_size(px(11.)).text_color(ui(0xffffff50)).child(match which {
-                _ if elsewhere => "⏎ send · ⌘⏎ send, and bring the answers back here · esc clears",
-                Shown::View => "⏎ send · ⇧⏎ new line · @tab sends to another agent · esc clears",
-                Shown::Panel if active => "⏎ send · ⇧⏎ new line · @tab · esc back to the terminal",
+                _ if elsewhere => "⏎ send · ⌘⏎ and bring the answers back here",
+                Shown::View => "⏎ send · ⇧⏎ new line · @name another agent",
+                Shown::Panel if active => "⏎ send · @name another agent · esc to the terminal",
                 Shown::Panel => "click to write · ⏎ send",
             }))
     }
