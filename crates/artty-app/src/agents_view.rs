@@ -63,7 +63,7 @@ pub(super) struct Agents {
     pub(super) pieces: std::cell::RefCell<HashMap<String, crate::markdown::Pieces>>,
     pub(super) text_sel: Option<TextSel>,
     /// Messages as markdown, parsed once (by their text's hash).
-    parsed: std::cell::RefCell<HashMap<u64, std::rc::Rc<Vec<crate::markdown::Block>>>>,
+    parsed: std::cell::RefCell<HashMap<u64, std::rc::Rc<crate::markdown::Doc>>>,
     /// The chosen agent's terminal shown, live (else folded away, and not
     /// sent).
     pub(super) peek_open: bool,
@@ -202,12 +202,18 @@ impl WindowView {
 
     /// What's selected in a message shown (Agents, or the panel), as it
     /// reads.
-    pub(super) fn selected_text(&self) -> Option<String> {
+    /// `as_shown`: as it reads; else as written (its markdown, the markup
+    /// of what's selected whole with it).
+    pub(super) fn selected_text(&self, as_shown: bool) -> Option<String> {
         [Shown::View, Shown::Panel].into_iter().find_map(|which| {
             let agents = self.agents_in(which)?;
             let sel = agents.text_sel.as_ref().filter(|s| s.anchor != s.head)?;
             let pieces = agents.pieces.borrow().get(&sel.message)?.clone();
-            Some(pieces.text(sel.range())).filter(|t| !t.is_empty())
+            let text = match as_shown {
+                true => pieces.text(sel.range()),
+                false => pieces.markdown(sel.range()),
+            };
+            Some(text).filter(|t| !t.is_empty())
         })
     }
 
@@ -259,7 +265,7 @@ impl WindowView {
             }
             parsed
                 .entry(key)
-                .or_insert_with(|| std::rc::Rc::new(crate::markdown::parse(&clip(text))))
+                .or_insert_with(|| std::rc::Rc::new(crate::markdown::parse_doc(&clip(text))))
                 .clone()
         };
         let look = crate::markdown::Look {
@@ -271,6 +277,7 @@ impl WindowView {
             font: ".SystemUIFont".into(),
             mono: self.metrics.font.family.clone(),
             selection: ui(0x5c8ae6aa).into(),
+            colors: code_color,
         };
         let pieces = agents.pieces.borrow_mut().entry(id.to_owned()).or_default().clone();
         let selected = agents
@@ -278,7 +285,9 @@ impl WindowView {
             .as_ref()
             .filter(|s| s.message == id && s.anchor != s.head)
             .map(TextSel::range);
-        let view = crate::markdown::view(&blocks, &look, &format!("md-{id}"), &pieces, selected);
+        let source = clip(text);
+        let view =
+            crate::markdown::view(&blocks, &source, &look, &format!("md-{id}"), &pieces, selected);
         let message = id.to_owned();
         let dragging = agents.text_sel.as_ref().is_some_and(|s| s.dragging && s.message == message);
         let down = pieces.clone();
@@ -1363,6 +1372,23 @@ pub(super) fn from_label(from: &artty_core::control::AskFrom) -> String {
         Some(agent) => format!("from {} · {agent}", from.title),
         None => format!("from {}", from.title),
     }
+}
+
+/// Code's colors, in the app's palette.
+fn code_color(kind: crate::highlight::Kind) -> Hsla {
+    use crate::highlight::Kind;
+    ui(match kind {
+        Kind::Keyword => 0xbb9af7ff,
+        Kind::String => 0x9ece6aff,
+        Kind::Comment => 0x7f86a8ff,
+        Kind::Number => 0xff9e64ff,
+        Kind::Type => 0x2ac3deff,
+        Kind::Call => 0x7aa2f7ff,
+        Kind::Added => 0x9ece6aff,
+        Kind::Removed => 0xf7768eff,
+        Kind::Hunk => 0x7dcfffff,
+    })
+    .into()
 }
 
 /// A folder as shown: the home folder as ~.

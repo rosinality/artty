@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 # Agents' messages shown as markdown.
 pulldown-cmark = { version = "0.13", default-features = false }
+# Code blocks' colors: Sublime Text's grammars (pure-Rust regexes, for the
+# cross-built Linux binaries).
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "parsing", "regex-fancy"] }
 artty-core = { path = "../artty-core" }
 # `artty attach`: the protocol and a terminal's view, without ssh built in.
 artty-client = { path = "../artty-client", default-features = false }

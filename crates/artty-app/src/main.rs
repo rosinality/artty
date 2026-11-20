@@ -20,6 +20,8 @@ mod edits;
 mod forward;
 #[cfg(target_os = "macos")]
 mod fuzzy;
+#[cfg(target_os = "macos")]
+mod highlight;
 mod hooks;
 #[cfg(target_os = "macos")]
 mod ids;

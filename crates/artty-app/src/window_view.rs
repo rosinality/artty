@@ -2111,7 +2111,7 @@ impl WindowView {
         // Text selected in an agent's thread, first; in Agents or Activity,
         // only that (the terminal isn't what's shown).
         if let Some(text) =
-            self.selected_text().filter(|_| self.showing_agents() || self.panel_shown())
+            self.selected_text(false).filter(|_| self.showing_agents() || self.panel_shown())
         {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
             return;
@@ -4248,7 +4248,14 @@ impl Render for WindowView {
                 cx.listener(|this, _: &JumpToNextPrompt, _, cx| this.jump_to_prompt(false, cx)),
             )
             .on_action(
-                cx.listener(|this, _: &CopyCommandOutput, _, cx| this.copy_command_output(cx)),
+                cx.listener(|this, _: &CopyCommandOutput, _, cx| {
+                    // In an agent's thread: what's selected, as it reads.
+                    let shown = this.showing_agents() || this.panel_shown();
+                    match this.selected_text(true).filter(|_| shown) {
+                        Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                        None => this.copy_command_output(cx),
+                    }
+                }),
             )
             .on_action(cx.listener(|this, _: &CopyMode, _, cx| this.toggle_copy_mode(cx)))
             .on_action(

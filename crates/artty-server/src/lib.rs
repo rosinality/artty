@@ -507,7 +507,9 @@ pub fn spawn(executable: &Path, env: &[(String, String)]) -> io::Result<()> {
         });
     }
     command.spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // (A copy just made is checked by the system on its first start, which
+    // can take a while for a large build, more with several at once.)
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
         if running() {
             return Ok(());

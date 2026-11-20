@@ -323,9 +323,11 @@ what it has for you. Activity, Terminals and Agents at the sidebar's top
 say which the window shows. Agents opens at the agent of the tab you're
 on, and Esc (or Terminals) goes back to the tab of the agent you were
 looking at. It shows the chosen one's thread (a pending permission request is answered
-there too; messages shown as markdown: code, lists, tables, links; drag
-to select in one, double-click for a word, triple-click for all of it, ⌘C
-to copy what's selected as it reads, or Copy for the message's markdown), and
+there too; messages shown as markdown: code colored by its language, lists,
+tables, links; drag to select in one, double-click for a word, triple-click
+for all of it; ⌘C copies what's selected as it was written — its markdown,
+the markup of what's selected whole with it — ⌥⌘C as it reads, and Copy
+the whole message's markdown), and
 what's known about it, with its terminal, live, once unfolded (shrunk to
 fit; click it to go there). The terminal is sent though no window shows it,
 at the size its own tab gives it (servers from before this don't send it). Threads are kept on disk (an
