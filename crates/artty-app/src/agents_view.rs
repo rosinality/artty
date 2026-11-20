@@ -464,38 +464,18 @@ impl WindowView {
             )
     }
 
-    /// Over the sidebar's list of agents (in place of its tabs): Tabs |
-    /// Agents, saying which it shows, Tabs a click back.
-    pub(super) fn agents_heading(&self, cx: &mut Context<Self>) -> gpui::Div {
+    /// AGENTS, over the sidebar's list of them (in place of its tabs).
+    pub(super) fn agents_heading(&self, _cx: &mut Context<Self>) -> gpui::Div {
         let count = self.agents.as_ref().map_or(0, |a| a.agents.len());
-        let segment = |id: &'static str, label: String, on: bool| {
-            div()
-                .id(id)
-                .flex_1()
-                .flex()
-                .justify_center()
-                .py(px(2.))
-                .rounded(px(5.))
-                .text_size(px(11.))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if on { ui(0xffffffee) } else { ui(0xffffff80) })
-                .when(on, |d| d.bg(ui(0xffffff1f)))
-                .when(!on, |d| d.hover(|d| d.bg(ui(0xffffff10)).text_color(ui(0xffffffd0))))
-                .child(label)
-        };
-        div().px(px(6.)).pb(px(6.)).child(
-            div()
-                .flex()
-                .gap(px(2.))
-                .p(px(2.))
-                .rounded(px(7.))
-                .bg(ui(0x00000026))
-                .child(
-                    segment("show-tabs", "Tabs".to_owned(), false)
-                        .on_click(cx.listener(|this, _, _, cx| this.leave_agents(cx))),
-                )
-                .child(segment("show-agents", format!("Agents · {count}"), true)),
-        )
+        div()
+            .flex()
+            .items_center()
+            .px_2()
+            .pb_1()
+            .text_size(px(10.5))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(ui(0xffffff70))
+            .child(format!("AGENTS · {count}"))
     }
 
     /// The agents, as the sidebar lists tabs: its state's icon, its tab's

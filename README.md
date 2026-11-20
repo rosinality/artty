@@ -318,10 +318,11 @@ The server keeps each agent's thread: what it was given (by
 turn, its permission requests and how they went, and its sessions starting,
 resuming, compacting and ending. The Agents view (⇧⌘K, or Agents in the
 sidebar) lists every agent on every connected server in the sidebar, in
-place of the tabs (in their order, by workspace; Tabs | Agents over them
-says which, and Tabs goes back), with what it's doing and what it has for
-you. It opens at the agent of the tab you're on, and Esc goes back to the
-tab of the agent you were looking at. It shows the chosen one's thread (a pending permission request is answered
+place of the tabs (in their order, by workspace), with what it's doing and
+what it has for you. Activity, Terminals and Agents at the sidebar's top
+say which the window shows. Agents opens at the agent of the tab you're
+on, and Esc (or Terminals) goes back to the tab of the agent you were
+looking at. It shows the chosen one's thread (a pending permission request is answered
 there too), and what's known about it, with its terminal, live (shrunk to
 fit; click it to go there). The terminal is sent though no window shows it,
 at the size its own tab gives it (servers from before this don't send it). Threads are kept on disk (an

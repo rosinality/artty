@@ -3325,6 +3325,50 @@ impl WindowView {
         }
     }
 
+    /// A row at the sidebar's top choosing what the window shows: Activity,
+    /// Terminals, Agents (one of them always chosen).
+    fn nav_row(
+        &self,
+        id: &'static str,
+        icon: &'static str,
+        color: u32,
+        label: &'static str,
+        keys: &'static str,
+        chosen: bool,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            // A box as a tab row's.
+            .h(px(28.))
+            .mb(px(2.))
+            .px_1()
+            .rounded(px(7.))
+            .text_color(if chosen { ui(0xffffffee) } else { ui(0xffffffb0) })
+            .when(chosen, |d| d.bg(ui(0xffffff1c)))
+            .hover(|d| d.bg(ui(0xffffff10)))
+            .child(div().w(px(10.)).flex_none().flex().justify_center().text_color(ui(color)).child(icon))
+            .child(div().flex_1().child(label))
+            // (Esc only means something away from the terminals.)
+            .when(!(chosen && keys == "esc"), |d| {
+                d.child(div().text_xs().text_color(ui(0xffffff66)).child(keys))
+            })
+    }
+
+    /// Back to the terminals, from Activity or Agents (at the tab of the
+    /// agent you were looking at).
+    fn show_terminals(&mut self, cx: &mut Context<Self>) {
+        if self.showing_agents() {
+            self.leave_agents(cx);
+        }
+        if self.showing_activity() {
+            self.toggle_activity(cx);
+        }
+        cx.notify();
+    }
+
     /// Activity or Agents is shown instead of the terminal.
     fn showing_view(&self) -> bool {
         self.showing_activity() || self.showing_agents()
@@ -3453,47 +3497,16 @@ impl WindowView {
             .px(px(4.))
             .pb(px(6.))
             .text_size(px(12.5))
-            .child(
-                div()
-                    .id("activity")
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    // A box as a tab row's.
-                    .h(px(28.))
-                    .mb(px(4.))
-                    .px_1()
-                    .rounded(px(7.))
-                    .text_color(if self.showing_activity() { ui(0xffffffee) } else { ui(0xffffffb0) })
-                    .when(self.showing_activity(), |d| d.bg(ui(0xffffff1c)))
-                    .hover(|d| d.bg(ui(0xffffff10)))
-                    .child(div().w(px(10.)).flex_none().flex().justify_center().text_color(ui(0x8fb4ffff)).child("◔"))
-                    .child(div().flex_1().child("Activity"))
-                    .child(div().text_xs().text_color(ui(0xffffff66)).child("⇧⌘A"))
-                    .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
-            )
-            .child(
-                div()
-                    .id("agents")
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .h(px(28.))
-                    .mb(px(4.))
-                    .px_1()
-                    .rounded(px(7.))
-                    .text_color(if self.showing_agents() { ui(0xffffffee) } else { ui(0xffffffb0) })
-                    .when(self.showing_agents(), |d| d.bg(ui(0xffffff1c)))
-                    .hover(|d| d.bg(ui(0xffffff10)))
-                    .child(div().w(px(10.)).flex_none().flex().justify_center().text_color(ui(0x9ece6aff)).child("◆"))
-                    .child(div().flex_1().child("Agents"))
-                    .child(div().text_xs().text_color(ui(0xffffff66)).child("⇧⌘K"))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if !this.showing_agents() {
-                            this.toggle_agents(cx);
-                        }
-                    })),
-            )
+            .child(self.nav_row("activity", "◔", 0x8fb4ffff, "Activity", "⇧⌘A", self.showing_activity())
+                .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))))
+            .child(self.nav_row("terminals", "❯", 0xc0caf5ff, "Terminals", "esc", !self.showing_view())
+                .on_click(cx.listener(|this, _, _, cx| this.show_terminals(cx))))
+            .child(self.nav_row("agents", "◆", 0x9ece6aff, "Agents", "⇧⌘K", self.showing_agents())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if !this.showing_agents() {
+                        this.toggle_agents(cx);
+                    }
+                })))
             .when_some(self.needs_you(cx), |d, section| d.child(section))
             // With Agents shown, the sidebar lists the agents instead of tabs.
             .when(self.showing_agents(), |d| d.child(self.agents_heading(cx)))
