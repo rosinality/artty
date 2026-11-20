@@ -176,8 +176,9 @@ impl WindowView {
         let Some(draft) = self.draft_mut() else { return false };
         match key {
             "enter" if modifiers.shift || modifiers.alt => draft.insert("\n"),
+            // ⌘⏎: to other agents, and their answers back to this one.
             "enter" if !empty => {
-                self.send_draft(cx);
+                self.send_draft(modifiers.platform, cx);
                 return true;
             },
             "backspace" if modifiers.platform => draft.delete_line_start(),
@@ -219,8 +220,10 @@ impl WindowView {
         found
     }
 
-    /// Send the draft: an ask to each agent it's for.
-    fn send_draft(&mut self, cx: &mut Context<Self>) {
+    /// Send the draft: an ask to each agent it's for. One to another agent
+    /// than the chosen one is part of the chosen one's thread (a card there
+    /// follows it); `back`: its answer goes to the chosen one too.
+    fn send_draft(&mut self, back: bool, cx: &mut Context<Self>) {
         let Some(agents) = self.composing().and_then(|w| self.agents_in(w)) else { return };
         let Some(draft) = self.draft() else { return };
         let list: Vec<(PaneId, String)> =
@@ -229,16 +232,23 @@ impl WindowView {
             Ok(found) => found,
             Err(message) => return self.show_toast(message, cx),
         };
+        let selected = agents.selected;
         if let Some(draft) = self.draft_mut() {
             *draft = Draft::default();
         }
         for pane in panes {
+            // (Only an agent on the same machine's server can be given it.)
+            let thread = selected
+                .filter(|&s| s != pane && ids::server_of(s) == ids::server_of(pane))
+                .map(ids::local_id);
             let request = Request::Ask {
                 tab: ids::local_id(pane),
                 text: text.clone(),
                 raw: false,
                 wait: false,
                 timeout_secs: None,
+                thread,
+                back: back && thread.is_some(),
             };
             let answer = app_state::control_on(ids::server_of(pane), request, cx);
             cx.spawn(async move |this, cx| {
@@ -309,6 +319,14 @@ impl WindowView {
         let focus = self.focus.clone();
         let entity = cx.entity();
         let matches = if active { self.mention_matches(which) } else { Vec::new() };
+        // Written to others from here: their answers can come back.
+        let elsewhere = active
+            && self.agents_in(which).is_some_and(|agents| {
+                let list: Vec<(PaneId, String)> =
+                    agents.agents.iter().map(|(a, _)| (a.pane, a.title.clone())).collect();
+                targets(&draft.text, &list, agents.selected)
+                    .is_ok_and(|(panes, _)| panes.iter().any(|&p| Some(p) != agents.selected))
+            });
         let cursor = if active { "▏" } else { "" };
         div()
             .flex()
@@ -393,6 +411,7 @@ impl WindowView {
                     }),
             )
             .child(div().text_size(px(11.)).text_color(ui(0xffffff50)).child(match which {
+                _ if elsewhere => "⏎ send · ⌘⏎ send, and bring the answers back here · esc clears",
                 Shown::View => "⏎ send · ⇧⏎ new line · @tab sends to another agent · esc clears",
                 Shown::Panel if active => "⏎ send · ⇧⏎ new line · @tab · esc back to the terminal",
                 Shown::Panel => "click to write · ⏎ send",

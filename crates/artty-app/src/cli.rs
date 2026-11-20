@@ -93,6 +93,8 @@ artty, your own pane is found automatically:
   artty ask --cancel all [--tab N]       ... every one (of pane N's), printing them
   artty ask --list [--tab N] [--json]    asks not yet over: id, pane, state, text
   artty ask --cancel ID --abandon        stop waiting for one with its agent
+  artty ask --bring-back ID              give an answered ask's answer to the
+                                         agent whose thread it was written from
   artty approvals [--tab N] [--json]     agents' permission requests (pending
                                          first): id, pane, state, what they'd do
   artty approval allow|deny ID [--message M] [--always N]
@@ -279,6 +281,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--root" => _ = flags.insert("root", args.value("--root")?),
             "--result" => _ = flags.insert("result", args.value("--result")?),
             "--cancel" => _ = flags.insert("cancel", args.value("--cancel")?),
+            "--bring-back" => _ = flags.insert("bring-back", args.value("--bring-back")?),
             "--always" => _ = flags.insert("always", args.value("--always")?),
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
             "--after" => _ = flags.insert("after", args.value("--after")?),
@@ -441,6 +444,8 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 Request::AskCancelQueued { tab }
             } else if let Some(id) = number("cancel")? {
                 Request::AskCancel { id, abandon: switches.contains("abandon") }
+            } else if let Some(id) = number("bring-back")? {
+                Request::AskForward { id }
             } else if let Some(id) = number("result")? {
                 Request::AskResult { id, wait: timeout_secs != Some(0), timeout_secs }
             } else {
@@ -464,6 +469,8 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                     raw: switches.contains("raw"),
                     wait: !switches.contains("no-wait"),
                     timeout_secs,
+                    thread: None,
+                    back: false,
                 }
             }
         },
@@ -626,13 +633,15 @@ fn run(args: Vec<String>) -> Result<i32, String> {
     };
     // A waiting ask: first its id, on stderr, so a caller cut short (a shell
     // tool's timeout) can pick the reply up rather than ask again.
-    if let Request::Ask { tab, text, raw, wait: true, timeout_secs } = &request {
+    if let Request::Ask { tab, text, raw, wait: true, timeout_secs, thread, back } = &request {
         let add = Request::Ask {
             tab: *tab,
             text: text.clone(),
             raw: *raw,
             wait: false,
             timeout_secs: None,
+            thread: *thread,
+            back: *back,
         };
         let response = send(&add, Some(Duration::from_secs(10)))?;
         let Response::Ask { ask } = &response else {
@@ -1086,6 +1095,22 @@ fn thread_entry(entry: &ThreadEntry, agent: &str) -> String {
         },
         ThreadItem::Prompt { text, ask: None, .. } => ("›", "you".to_owned(), text.clone()),
         ThreadItem::Reply { text } => ("‹", agent.to_owned(), text.clone()),
+        ThreadItem::Handoff { ask, to, text, state, reply, error, forwarded, .. } => {
+            let state = serde_json::to_value(state).unwrap_or_default();
+            let mut body = text.clone();
+            if let Some(reply) = reply {
+                body.push_str(&format!("\n‹ {}: {reply}", to.title));
+            }
+            if let Some(error) = error {
+                body.push_str(&format!("\n({error})"));
+            }
+            if let Some(forwarded) = forwarded {
+                body.push_str(&format!("\n(brought back: ask {forwarded})"));
+            }
+            let head =
+                format!("to {} (ask {ask}), {}", to.title, state.as_str().unwrap_or_default());
+            ("→", head, body)
+        },
         ThreadItem::Permission { id, summary, state, .. } => {
             let state = serde_json::to_value(state).unwrap_or_default();
             let state = state.as_str().unwrap_or_default().to_owned();

@@ -97,6 +97,8 @@ struct Ask {
     pane: PaneId,
     /// The agent that asked, if one did.
     from: Option<AskFrom>,
+    /// The handoff: the pane whose thread follows it (see [`Handoff`]).
+    handoff: Option<Handoff>,
     text: String,
     added: Instant,
     state: AskState,
@@ -123,6 +125,31 @@ pub struct Asks {
     typed: HashMap<PaneId, Instant>,
 }
 
+/// An ask written in another agent's thread (or by that agent): a card
+/// there follows it, and its answer may be brought back there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Handoff {
+    pub pane: PaneId,
+    /// Bring the answer back once answered.
+    pub back: bool,
+    /// The ask that brought it back.
+    pub forwarded: Option<u64>,
+    /// The card has it as it ended.
+    pub synced: bool,
+}
+
+/// A handoff as kept on disk: its pane by thread key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedHandoff {
+    pub thread: u64,
+    #[serde(default)]
+    pub back: bool,
+    #[serde(default)]
+    pub forwarded: Option<u64>,
+    #[serde(default)]
+    pub synced: bool,
+}
+
 /// An ask as kept on disk, across a restart or a hand-over (see
 /// [`Asks::saved`]). Times are wall-clock, in milliseconds.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -136,6 +163,8 @@ pub struct SavedAsk {
     pub state: AskState,
     #[serde(default)]
     pub from: Option<AskFrom>,
+    #[serde(default)]
+    pub handoff: Option<SavedHandoff>,
     #[serde(default)]
     pub warning: Option<String>,
     #[serde(default)]
@@ -210,6 +239,7 @@ impl Asks {
         let ask = Ask {
             pane,
             from,
+            handoff: None,
             text,
             added: now,
             state: AskState::Queued,
@@ -228,6 +258,16 @@ impl Asks {
     /// Every ask, to keep on disk (`key`: a pane's thread's key, given
     /// whether the ask is over).
     pub fn saved(&self, now: Instant, mut key: impl FnMut(PaneId, bool) -> u64) -> Vec<SavedAsk> {
+        let mut handoffs: Vec<Option<SavedHandoff>> = Vec::new();
+        for ask in self.asks.values() {
+            handoffs.push(ask.handoff.map(|h| SavedHandoff {
+                thread: key(h.pane, ask.state.finished() && h.synced),
+                back: h.back,
+                forwarded: h.forwarded,
+                synced: h.synced,
+            }));
+        }
+        let mut handoffs = handoffs.into_iter();
         let now_ms = crate::queue::now_ms();
         let wall = |at: Instant| now_ms.saturating_sub(now.duration_since(at).as_millis() as u64);
         self.asks
@@ -239,6 +279,7 @@ impl Asks {
                 text: ask.text.clone(),
                 state: ask.state,
                 from: ask.from.clone(),
+                handoff: handoffs.next().flatten(),
                 warning: ask.warning.clone(),
                 prompt_id: ask.prompt_id.clone(),
                 reply: ask.reply.clone(),
@@ -272,6 +313,10 @@ impl Asks {
                 },
                 None => None,
             };
+            let handoff = saved.handoff.and_then(|h| {
+                let (Back::Running(pane) | Back::Reopened(pane)) = back(h.thread)?;
+                Some(Handoff { pane, back: h.back, forwarded: h.forwarded, synced: h.synced })
+            });
             let back = back(saved.thread);
             let pane = match back {
                 Some(Back::Running(pane) | Back::Reopened(pane)) => pane,
@@ -280,6 +325,7 @@ impl Asks {
             let mut ask = Ask {
                 pane,
                 from: saved.from,
+                handoff,
                 text: saved.text,
                 added: now,
                 state: saved.state,
@@ -325,6 +371,37 @@ impl Asks {
             warning: ask.warning.clone(),
             text,
         })
+    }
+
+    /// `id` is written in `pane`'s thread (see [`Handoff`]).
+    pub fn set_handoff(&mut self, id: u64, pane: PaneId, back: bool) {
+        if let Some(ask) = self.asks.get_mut(&id) {
+            ask.handoff = Some(Handoff { pane, back, forwarded: None, synced: false });
+        }
+    }
+
+    pub fn handoff(&self, id: u64) -> Option<Handoff> {
+        self.asks.get(&id)?.handoff
+    }
+
+    /// Handoffs whose cards may be behind: not yet seen as they ended.
+    pub fn handoffs_due(&self) -> Vec<u64> {
+        let due = |a: &Ask| a.handoff.is_some_and(|h| !h.synced);
+        self.asks.iter().filter(|(_, a)| due(a)).map(|(&id, _)| id).collect()
+    }
+
+    /// Its card has it as it ended (and, `forwarded`, the ask bringing
+    /// the answer back).
+    pub fn handoff_synced(&mut self, id: u64, forwarded: Option<u64>) {
+        if let Some(h) = self.asks.get_mut(&id).and_then(|a| a.handoff.as_mut()) {
+            h.synced = true;
+            h.forwarded = forwarded.or(h.forwarded);
+        }
+    }
+
+    /// The message as written (not shortened, as `info`'s).
+    pub fn text_of(&self, id: u64) -> Option<&str> {
+        self.asks.get(&id).map(|a| a.text.as_str())
     }
 
     /// Who asked `id`, if an agent did.

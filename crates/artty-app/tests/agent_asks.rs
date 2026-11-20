@@ -52,6 +52,14 @@ fn an_agent_asking_another_is_named_and_its_own_pane_refused() {
     assert_eq!(prompts[1]["from"]["title"], "planner", "{entries}");
     let text = stdout(&scratch.artty(&["thread", "--tab", &agent]));
     assert!(text.contains("planner (pane "), "{text}");
+    // And the planner's own thread has the card, as the asker.
+    let planner = prompts[1]["from"]["pane"].to_string();
+    let card = handoffs(&scratch, &planner);
+    assert_eq!(card.len(), 1, "{card:?}");
+    assert_eq!(
+        (card[0]["by_agent"].as_bool(), card[0]["state"].as_str()),
+        (Some(true), Some("answered"))
+    );
 
     // An ask of its own pane would wait for the turn it's in: refused by
     // the command, and (not knowing its pane) by the server.
@@ -72,6 +80,78 @@ fn an_agent_asking_another_is_named_and_its_own_pane_refused() {
         ),
     );
     assert!(refused.contains("would wait for the turn"), "{refused}");
+}
+
+/// `pane`'s thread's handoff cards.
+fn handoffs(scratch: &Scratch, pane: &str) -> Vec<Value> {
+    let out = scratch.artty(&["thread", "--tab", pane, "--json"]);
+    let entries: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    entries.as_array().unwrap().iter().filter_map(|e| e["item"].get("Handoff").cloned()).collect()
+}
+
+fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !done() {
+        assert!(Instant::now() < deadline, "waited too long for {what}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// An ask written in `here`'s thread to `to` (as the app sends one).
+fn ask_from_thread(scratch: &Scratch, to: &str, here: &str, text: &str, back: bool) -> String {
+    let request = serde_json::json!({
+        "cmd": "ask", "tab": to.parse::<u64>().unwrap(), "text": text, "wait": false,
+        "thread": here.parse::<u64>().unwrap(), "back": back,
+    });
+    let reply: Value = serde_json::from_str(&scratch.control(&request.to_string())).unwrap();
+    reply["ask"]["id"].to_string()
+}
+
+#[test]
+fn answers_brought_back_to_the_thread_they_were_asked_from() {
+    let scratch = Scratch::new();
+    let (api, web) = (scratch.agent("0.3"), scratch.agent("0.3"));
+    for pane in [&api, &web] {
+        let out = scratch.ask(&["--tab", pane, "--timeout", "20", "warm up"]);
+        assert_eq!(stdout(&out), "echo: warm up", "{}", stderr(&out));
+    }
+
+    // Written from api's thread to web, its answer to come back.
+    ask_from_thread(&scratch, &web, &api, "which tests cover login?", true);
+    wait_for("the answer to come back", || {
+        handoffs(&scratch, &api).first().is_some_and(|c| !c["forwarded"].is_null())
+    });
+    let card = &handoffs(&scratch, &api)[0];
+    assert_eq!(card["state"], "answered", "{card}");
+    assert_eq!(card["reply"], "echo: which tests cover login?", "{card}");
+    // api is given it, from web.
+    let forwarded = card["forwarded"].to_string();
+    let out = scratch.ask(&["--result", &forwarded, "--timeout", "20"]);
+    let answer = stdout(&out);
+    assert!(answer.starts_with("echo: Answer from "), "{answer}");
+    assert!(
+        answer.contains("> which tests cover login?")
+            && answer.ends_with("echo: which tests cover login?"),
+        "{answer}"
+    );
+    let out = scratch.artty(&["thread", "--tab", &api, "--json"]);
+    assert!(stdout(&out).contains(&format!("\"pane\": {web}")), "from web");
+
+    // Not asked to come back: brought back by hand, once.
+    let id = ask_from_thread(&scratch, &web, &api, "and the logout ones?", false);
+    let out = scratch.ask(&["--result", &id, "--timeout", "20"]);
+    assert_eq!(stdout(&out), "echo: and the logout ones?", "{}", stderr(&out));
+    // (Exit 3: the new ask isn't answered yet.)
+    let out = scratch.artty(&["ask", "--bring-back", &id, "--json"]);
+    let brought: Value = serde_json::from_str(&stdout(&out)).unwrap_or(Value::Null);
+    assert_eq!(brought["pane"].to_string(), api, "{}", stderr(&out));
+    let again = scratch.artty(&["ask", "--bring-back", &id]);
+    assert!(stderr(&again).contains("already brought back"), "{}", stderr(&again));
+    wait_for("the card to say so", || {
+        handoffs(&scratch, &api).get(1).is_some_and(|c| !c["forwarded"].is_null())
+    });
+    // web's own thread has no cards: it was only asked.
+    assert!(handoffs(&scratch, &web).is_empty());
 }
 
 #[test]

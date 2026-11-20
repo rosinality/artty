@@ -332,6 +332,14 @@ left out — to send it to another agent instead, or several (`@api @web
 …`); typing `@` lists them, and ⇥ completes. ↑↓ choose an agent while
 nothing's written.
 
+A message to another agent stays part of the thread it was written in: a
+card there follows it (waiting for its turn, working on it, answered) with
+its answer. ⌘⏎ instead of ⏎ also gives the answer, once it comes, to the
+agent whose thread it is (as a message from the one that answered, quoting
+what was asked); without it, the card's "Send to …" does that later
+(`artty ask --bring-back ID`). An agent asking another with `artty ask`
+gets the card in its own thread too.
+
 To keep an agent's terminal in sight, open its thread beside it instead
 (⇧⌘J, or View → Agent Thread): the same thread and box at the window's
 right, for whichever pane has the focus (the terminal narrows to fit). The

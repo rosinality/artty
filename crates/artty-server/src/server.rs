@@ -8,9 +8,9 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
 use artty_core::control::{
-    AgentInfo, AgentState, Decision, PaneProcesses, ProcessRow, ReadSource, Request, Response,
-    SESSION_ENV, SOCKET_ENV, ServerInfo, ServerUsage, SplitDirection, TabInfo, ThreadItem,
-    WorkspaceInfo,
+    AgentInfo, AgentState, AskState, Decision, PaneProcesses, ProcessRow, ReadSource, Request,
+    Response, SESSION_ENV, SOCKET_ENV, ServerInfo, ServerUsage, SplitDirection, TabInfo,
+    ThreadItem, WorkspaceInfo,
 };
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
@@ -2176,9 +2176,18 @@ impl Server {
                 },
                 Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
             },
-            Request::Ask { tab, text, raw, wait, timeout_secs } => {
+            Request::Ask { tab, text, raw, wait, timeout_secs, thread, back } => {
                 let from = self.pane_of_peer(peer);
-                match self.add_ask(tab, text, raw, from) {
+                let added = self.add_ask(tab, text, raw, from);
+                if let Ok(ask) = added {
+                    // Written from an agent's thread (or by that agent):
+                    // a card there follows it.
+                    let here = from.or(thread).filter(|&p| p != tab);
+                    if let Some(here) = here.filter(|p| self.panes.contains_key(p)) {
+                        self.start_handoff(ask, here, from.is_some(), back && from.is_none());
+                    }
+                }
+                match added {
                     Ok(ask) if wait => self.ask_waiters.push(AskWaiter {
                         ask,
                         waiter,
@@ -2216,6 +2225,100 @@ impl Server {
 
     /// A request from a program running in one of artty's panes (or one
     /// that can't be told apart from one). Apps' requests aren't.
+    /// The agent in `pane`, as an ask names it.
+    fn ask_from(&self, pane: PaneId) -> Option<artty_core::control::AskFrom> {
+        let p = self.panes.get(&pane)?;
+        let agent = match &p.status {
+            Status::Agent { name, .. } => Some(name.clone()),
+            _ => p.agent_name(),
+        };
+        Some(artty_core::control::AskFrom { pane, title: p.title(), agent })
+    }
+
+    /// Ask `ask` was written in `here`'s thread (by its agent, `by_agent`):
+    /// a card there follows it; `back`: its answer goes there too.
+    fn start_handoff(&mut self, ask: u64, here: PaneId, by_agent: bool, back: bool) {
+        let Some(info) = self.asks.info(ask) else { return };
+        let Some(to) = self.ask_from(info.pane) else { return };
+        let text = self.asks.text_of(ask).unwrap_or_default().to_owned();
+        self.asks.set_handoff(ask, here, back);
+        let card = ThreadItem::Handoff {
+            ask,
+            to,
+            text,
+            by_agent,
+            state: info.state,
+            reply: None,
+            error: None,
+            forwarded: None,
+            back,
+        };
+        self.threads.add(here, card);
+        self.keep(Instant::now());
+    }
+
+    /// Bring handoffs' cards up to date with their asks; give the answers
+    /// asked for back.
+    fn follow_handoffs(&mut self, now: Instant) {
+        for id in self.asks.handoffs_due() {
+            let (Some(info), Some(handoff)) = (self.asks.info(id), self.asks.handoff(id)) else {
+                continue;
+            };
+            self.threads.handoff(id, info.state, info.reply.clone(), info.error.clone(), None);
+            if !info.state.finished() {
+                continue;
+            }
+            let mut forwarded = None;
+            if handoff.back && info.state == AskState::Answered {
+                match self.forward(id) {
+                    Ok(ask) => forwarded = Some(ask),
+                    Err(message) => {
+                        let error = format!("not brought back: {message}");
+                        self.threads.handoff(id, info.state, info.reply, Some(error), None);
+                    },
+                }
+            }
+            self.asks.handoff_synced(id, forwarded);
+            self.keep(now);
+        }
+    }
+
+    /// Give answered ask `id`'s answer to the agent whose thread it was
+    /// written in: an ask of its own, from the agent that answered.
+    fn forward(&mut self, id: u64) -> Result<u64, String> {
+        let handoff = self.asks.handoff(id).ok_or("that ask wasn't written in another thread")?;
+        if let Some(already) = handoff.forwarded {
+            return Err(format!("already brought back (ask {already})"));
+        }
+        let info = self.asks.info(id).ok_or(format!("no ask {id}"))?;
+        let reply = info.reply.clone().filter(|_| info.state == AskState::Answered);
+        let reply = reply.ok_or("it isn't answered (yet)")?;
+        let to = self.ask_from(info.pane);
+        let name = match to.as_ref() {
+            Some(to) => match &to.agent {
+                Some(agent) => format!("{} ({agent})", to.title),
+                None => to.title.clone(),
+            },
+            None => format!("pane {}", info.pane),
+        };
+        let asked: String = self
+            .asks
+            .text_of(id)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| format!("> {line}\n"))
+            .collect();
+        let text = format!(
+            "Answer from {name}, to a message the user sent it from your thread (in artty):\n\
+             {asked}\n{reply}"
+        );
+        let ask = self.add_ask(handoff.pane, text, false, Some(info.pane))?;
+        self.asks.handoff_synced(id, Some(ask));
+        self.threads.handoff(id, info.state, Some(reply), None, Some(ask));
+        self.keep(Instant::now());
+        Ok(ask)
+    }
+
     /// The pane `peer` runs in (a program started in it, or under one).
     fn pane_of_peer(&self, peer: Option<Peer>) -> Option<PaneId> {
         let pid = peer?.pid?;
@@ -2827,6 +2930,11 @@ impl Server {
             | Request::AskResult { .. }
             | Request::Approve { .. }
             | Request::Decide { .. } => unreachable!("handled before"),
+            Request::AskForward { id } => {
+                let ask = self.forward(id)?;
+                self.pump_asks(Instant::now());
+                Response::Ask { ask: self.asks.info(ask).ok_or("the ask is gone")? }
+            },
             Request::Queue => Response::Queue { items: self.queue_items() },
             Request::Agents => {
                 let mut agents: Vec<AgentInfo> = self
@@ -3281,6 +3389,7 @@ impl Server {
         if self.asks.pending() || !self.ask_waiters.is_empty() {
             self.pump_asks(now);
         }
+        self.follow_handoffs(now);
         self.clear_seen();
         self.push_updates(now);
         if now.duration_since(self.last_save) >= SAVE_INTERVAL {

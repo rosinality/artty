@@ -1676,6 +1676,16 @@ impl WindowView {
     fn key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform {
+            // Writing to an agent: ⌘⏎, ⌘⌫, ⌘← and ⌘→ are the box's.
+            if self.composing().is_some()
+                && !self.asking()
+                && self.palette.is_none()
+                && self.search_all.is_none()
+                && self.compose_key(event, cx)
+            {
+                cx.stop_propagation();
+                return;
+            }
             if let Some(digit) = keystroke.key.parse::<usize>().ok().filter(|d| (1..=9).contains(d))
                 && !keystroke.modifiers.alt
             {

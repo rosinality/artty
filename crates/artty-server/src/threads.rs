@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use artty_core::control::{ApprovalState, AskFrom, HookEvent, ThreadEntry, ThreadItem};
+use artty_core::control::{ApprovalState, AskFrom, AskState, HookEvent, ThreadEntry, ThreadItem};
 use artty_core::layout::PaneId;
 
 use crate::store::Store;
@@ -149,6 +149,39 @@ impl Threads {
                     if let Some(&key) = self.keys.get(pane) {
                         self.store.put_entry(key, entry);
                     }
+                }
+            }
+        }
+    }
+
+    /// A handoff's card as its ask now is (`forwarded`: the ask that brought
+    /// its answer back, once there is one).
+    pub fn handoff(
+        &mut self,
+        id: u64,
+        now: AskState,
+        answer: Option<String>,
+        failure: Option<String>,
+        brought: Option<u64>,
+    ) {
+        for (pane, thread) in &mut self.panes {
+            for entry in thread {
+                let ThreadItem::Handoff { ask, state, reply, error, forwarded, .. } =
+                    &mut entry.item
+                else {
+                    continue;
+                };
+                if *ask != id {
+                    continue;
+                }
+                let brought = brought.or(*forwarded);
+                if (*state, &*reply, &*error, *forwarded) == (now, &answer, &failure, brought) {
+                    continue;
+                }
+                (*state, *reply, *error, *forwarded) =
+                    (now, answer.clone(), failure.clone(), brought);
+                if let Some(&key) = self.keys.get(pane) {
+                    self.store.put_entry(key, entry);
                 }
             }
         }

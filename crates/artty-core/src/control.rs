@@ -299,6 +299,19 @@ pub enum Request {
         /// Answer with how far it got after this long (it carries on).
         #[serde(default)]
         timeout_secs: Option<u64>,
+        /// The agent whose thread this is part of (written from its view,
+        /// to another agent): a card there follows the ask. An agent
+        /// asking from its own pane needs none (its pane is known).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<SessionId>,
+        /// Once answered, give the answer to `thread`'s agent too.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        back: bool,
+    },
+    /// Give an answered ask's answer to the agent whose thread it was
+    /// written from (as an ask of its own); the new ask.
+    AskForward {
+        id: u64,
     },
     /// Where an ask is; with `wait`, once it's over.
     AskResult {
@@ -446,6 +459,27 @@ pub enum ThreadItem {
     Waiting { message: String },
     /// Its session: `started`, `resumed`, `cleared`, `compacted`, `ended`.
     Session { event: String },
+    /// A message to another agent, from this thread (by the user, from this
+    /// agent's view, or by this agent itself): how it went, and its answer.
+    Handoff {
+        ask: u64,
+        to: AskFrom,
+        text: String,
+        /// This agent sent it (and had the answer as it came).
+        #[serde(default)]
+        by_agent: bool,
+        state: AskState,
+        #[serde(default)]
+        reply: Option<String>,
+        #[serde(default)]
+        error: Option<String>,
+        /// The answer was brought back here: the ask that did.
+        #[serde(default)]
+        forwarded: Option<u64>,
+        /// It was sent to be brought back once answered.
+        #[serde(default)]
+        back: bool,
+    },
     /// Its turn stopped short (a permission prompt turned down there).
     Interrupted { reason: String },
 }

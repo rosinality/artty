@@ -184,8 +184,10 @@ impl WindowView {
                 if let Some((pane, entries, asks)) =
                     thread.filter(|(p, _, _)| agents.selected == Some(*p))
                 {
+                    // (Also a card at the end that changed: an answer came.)
                     let grew = agents.thread_of != Some(pane)
                         || entries.len() != agents.thread.len()
+                        || entries.last() != agents.thread.last()
                         || asks.len() != agents.asks.len();
                     agents.thread_of = Some(pane);
                     agents.thread = entries;
@@ -539,6 +541,103 @@ impl WindowView {
                         })
                         .into_any_element()
                 },
+                ThreadItem::Handoff {
+                    ask: id,
+                    to,
+                    text,
+                    by_agent,
+                    state,
+                    reply,
+                    error,
+                    forwarded,
+                    back,
+                } => {
+                    use artty_core::control::AskState;
+                    let (word, color) = match state {
+                        AskState::Queued => ("waiting for its turn", 0xffffff80),
+                        AskState::Delivering => ("being given to it", BUSY),
+                        AskState::Running => ("working on it", BUSY),
+                        AskState::Answered => ("answered", DONE),
+                        AskState::Failed => ("failed", DENY),
+                        AskState::Cancelled => ("cancelled", 0xffffff80),
+                    };
+                    let who = if *by_agent { agent.agent.as_str() } else { "you" };
+                    let offer =
+                        !by_agent && !back && forwarded.is_none() && *state == AskState::Answered;
+                    let id = *id;
+                    let here = agent.title.clone();
+                    let target = match &to.agent {
+                        Some(a) => format!("{} · {a}", to.title),
+                        None => to.title.clone(),
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.))
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded(px(8.))
+                        .border_l_2()
+                        .border_color(ui(0x7aa2f7ff))
+                        .bg(ui(0xffffff08))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(ui(0xffffff70))
+                                .child(format!("{who} → {target} · {time}")),
+                        )
+                        .child(div().text_color(ui(0xffffffd0)).child(clip(text)))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(ui(color))
+                                .child(format!("{} {word}", to.title)),
+                        )
+                        .children(reply.as_ref().map(|reply| {
+                            div()
+                                .px(px(9.))
+                                .py(px(6.))
+                                .rounded(px(7.))
+                                .bg(ui(0xffffff0c))
+                                .text_color(ui(0xffffffd8))
+                                .child(clip(reply))
+                        }))
+                        .children(error.as_ref().map(|error| {
+                            div().text_size(px(11.)).text_color(ui(DENY)).child(error.clone())
+                        }))
+                        .when(forwarded.is_some(), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(ui(0xffffff70))
+                                    .child(format!("↩ brought back to {here}")),
+                            )
+                        })
+                        .when(*back && forwarded.is_none() && error.is_none(), |d| {
+                            d.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(ui(0xffffff70))
+                                    .child(format!("↩ its answer comes back to {here}")),
+                            )
+                        })
+                        .when(offer, |d| {
+                            d.child(
+                                div().flex().child(
+                                    Self::small_button(
+                                        format!("thread-bring-{id}"),
+                                        &format!("↩ Send to {here}"),
+                                        0xffffffd0,
+                                        0xffffff14,
+                                    )
+                                    .on_click(cx.listener(
+                                        move |this, _, _, cx| this.bring_back(server, id, cx),
+                                    )),
+                                ),
+                            )
+                        })
+                        .into_any_element()
+                },
                 ThreadItem::Waiting { message } => {
                     note(format!("waiting for you · {message}"), WAITING).into_any_element()
                 },
@@ -674,6 +773,18 @@ impl WindowView {
                 d.child(row("Needs you", requests))
             })
             .children(agent.last_ms.map(|ms| row("Last activity", clock(ms))))
+    }
+
+    /// Give an answer from another agent to the agent whose thread asked.
+    fn bring_back(&mut self, server: ServerId, id: u64, cx: &mut Context<Self>) {
+        let answer = app_state::control_on(server, Request::AskForward { id }, cx);
+        cx.spawn(async move |this, cx| {
+            if let Ok(Response::Error { message }) = answer.await {
+                let _ = this.update(cx, |this, cx| this.show_toast(message, cx));
+            }
+            let _ = this.update(cx, |this, cx| this.refresh_agents(cx));
+        })
+        .detach();
     }
 
     fn small_button(id: String, label: &str, fg: u32, bg: u32) -> gpui::Stateful<gpui::Div> {
