@@ -459,13 +459,23 @@ impl Asks {
     /// gets no answer. (Whether the agent goes on, as with feedback given
     /// at the prompt, or is idle can't be told: the turn stays open until
     /// a hook says otherwise.)
-    pub fn interrupted(&mut self, pane: PaneId, now: Instant) {
+    pub fn interrupted(&mut self, pane: PaneId, why: &str, now: Instant) {
         for ask in self.asks.values_mut().filter(|a| a.pane == pane && a.state.in_agent()) {
-            ask.fail(
-                "the agent's turn was interrupted at a permission prompt (check the pane)",
-                now,
-            );
+            ask.fail(why, now);
         }
+    }
+
+    /// The pane's agent stopped its turn without its hooks saying (Claude
+    /// Code interrupted with Esc fires no `Stop`): its ask gets no answer,
+    /// and it's between turns.
+    pub fn turn_cut_short(&mut self, pane: PaneId, why: &str, now: Instant) {
+        self.interrupted(pane, why, now);
+        self.turns.insert(pane, (Turn::Between, now));
+    }
+
+    /// Since when the pane's agent has been at work on a turn, if it is.
+    pub fn turn_open_since(&self, pane: PaneId) -> Option<Instant> {
+        self.turns.get(&pane).filter(|(turn, _)| *turn == Turn::Open).map(|(_, at)| *at)
     }
 
     /// Someone typed in `pane`.

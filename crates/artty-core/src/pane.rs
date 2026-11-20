@@ -24,6 +24,9 @@ pub struct PaneMeta {
     /// The agent has set the terminal's title (see `Pane::agent_titled`).
     #[serde(default)]
     agent_titled: bool,
+    /// The terminal's title (a program's), till it sets another.
+    #[serde(default)]
+    title: Option<String>,
 }
 
 /// What a pane is doing, as shown in the sidebar.
@@ -217,6 +220,16 @@ impl Pane {
         self.session_title = Some((session.to_owned(), title));
     }
 
+    /// The agent's conversation id, from its hooks.
+    pub fn agent_session(&self) -> Option<&str> {
+        self.agent_session.as_deref()
+    }
+
+    /// When the title last changed (an agent at work animates it).
+    pub fn title_since(&self) -> Option<Instant> {
+        self.title_changes.last().copied()
+    }
+
     pub fn set_title(&mut self, title: Option<String>) {
         // While an agent is in the foreground, what titles the terminal is it
         // (a title that's only its name isn't one).
@@ -351,6 +364,7 @@ impl Pane {
                 .map(|(command, since)| (command.clone(), since.elapsed().as_secs())),
             last_exit: self.last_exit,
             agent_titled: self.agent_titled,
+            title: self.title.clone(),
         }
     }
 
@@ -368,6 +382,9 @@ impl Pane {
         });
         self.last_exit = meta.last_exit;
         self.agent_titled = meta.agent_titled;
+        if self.title.is_none() {
+            self.title = meta.title;
+        }
         self.refresh();
     }
 

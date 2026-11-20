@@ -186,10 +186,20 @@ impl WindowView {
 
     /// A message's line over it (who, when), and on hover, Copy: the
     /// message as written (its markdown).
-    fn copyable(&self, label: String, text: &str, seq: u64, cx: &mut Context<Self>) -> gpui::Div {
+    /// (`right`: over a message on the right, Copy on the left of the line,
+    /// so the line ends at the message's edge.)
+    fn copyable(
+        &self,
+        label: String,
+        text: &str,
+        seq: u64,
+        right: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let text = text.to_owned();
         div()
             .flex()
+            .when(right, |d| d.flex_row_reverse())
             .items_center()
             .gap(px(8.))
             .text_size(px(11.))
@@ -211,8 +221,7 @@ impl WindowView {
             )
     }
 
-    /// What's selected in a message shown (Agents, or the panel), as it
-    /// reads.
+    /// What's selected in a message shown (Agents, or the panel):
     /// `as_shown`: as it reads; else as written (its markdown, the markup
     /// of what's selected whole with it).
     pub(super) fn selected_text(&self, as_shown: bool) -> Option<String> {
@@ -860,7 +869,7 @@ impl WindowView {
         let time = clock(entry.at_ms);
         let seq = entry.seq;
         let element: gpui::AnyElement = match &entry.item {
-            ThreadItem::Prompt { text, ask, from } => div()
+            ThreadItem::Prompt { text, ask, from, .. } => div()
                 .flex()
                 .justify_end()
                 .child(
@@ -878,6 +887,7 @@ impl WindowView {
                             },
                             text,
                             seq,
+                            true,
                             cx,
                         ))
                         .child(bubble(true).child(self.markdown(
@@ -894,7 +904,7 @@ impl WindowView {
                 .flex()
                 .flex_col()
                 .gap(px(3.))
-                .child(self.copyable(format!("{} · {time}", agent.agent), text, seq, cx))
+                .child(self.copyable(format!("{} · {time}", agent.agent), text, seq, false, cx))
                 .child(bubble(false).child(self.markdown(
                     agents,
                     text,
@@ -1013,6 +1023,7 @@ impl WindowView {
                         format!("{who} → {target} · {time}"),
                         reply.as_deref().unwrap_or(text),
                         seq,
+                        false,
                         cx,
                     ))
                     .child(self.markdown(agents, text, &seq.to_string(), which, cx))
@@ -1182,6 +1193,7 @@ impl WindowView {
                     format!("⚙ {} · {time}", tag.replace('-', " ")),
                     text,
                     seq,
+                    false,
                     cx,
                 ))
                 .child(div().text_size(px(12.5)).text_color(ui(0xffffffb0)).child(self.markdown(
@@ -1209,12 +1221,28 @@ impl WindowView {
         };
         // An entry just searched for stands out a moment.
         let found = agents.flash.is_some_and(|(s, at)| s == seq && at.elapsed() < FLASH_FOUND);
+        // Undone in the agent (rewound): faded, its prompt saying so.
+        let rewound = entry.rewound;
+        let starts_rewound = rewound && matches!(entry.item, ThreadItem::Prompt { .. });
         div()
             .group(SharedString::from(format!("entry-{seq}")))
             .flex_none()
+            .flex()
+            .flex_col()
             .rounded(px(8.))
             .when(found, |d| d.bg(ui(0xe0af6826)).border_1().border_color(ui(0xe0af6888)))
-            .child(element)
+            .when(starts_rewound, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .justify_center()
+                        .pb(px(4.))
+                        .text_size(px(11.))
+                        .text_color(ui(0xffffff70))
+                        .child("↶ rewound in the agent: not in its conversation any more"),
+                )
+            })
+            .child(div().when(rewound, |d| d.opacity(0.4)).child(element))
             .px(px(16.))
             .pt(px(if ix == 0 { 14. } else { 12. }))
             .into_any_element()

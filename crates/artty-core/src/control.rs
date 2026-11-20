@@ -519,6 +519,10 @@ pub struct ThreadEntry {
     /// When, in milliseconds since the Unix epoch.
     pub at_ms: u64,
     pub item: ThreadItem,
+    /// Undone in the agent (Claude Code's rewind): no longer in its
+    /// conversation, though it happened.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rewound: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,6 +535,9 @@ pub enum ThreadItem {
         ask: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         from: Option<AskFrom>,
+        /// The agent's id for it (Claude Code's `prompt_id`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
     },
     /// A turn ended: the agent's last message.
     Reply { text: String },

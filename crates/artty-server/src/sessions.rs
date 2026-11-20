@@ -52,19 +52,78 @@ pub fn claude_title(session: &str) -> Option<String> {
     claude_title_in(&claude, session)
 }
 
-/// [`claude_title`], Claude Code's folder being `claude`.
-fn claude_title_in(claude: &Path, session: &str) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
+/// A Claude Code conversation's transcript, by its id.
+fn claude_transcript(claude: &Path, session: &str) -> Option<PathBuf> {
     // (A session id names a file: nothing else in it.)
     if session.is_empty() || !session.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
     let name = format!("{session}.jsonl");
-    let path = std::fs::read_dir(claude.join("projects"))
+    std::fs::read_dir(claude.join("projects"))
         .ok()?
         .flatten()
         .map(|dir| dir.path().join(&name))
-        .find(|path| path.is_file())?;
+        .find(|path| path.is_file())
+}
+
+/// The prompts (their ids) in a Claude Code conversation as it stands now,
+/// back from the one `prompt` (its turn's): those it was rewound past (Esc
+/// Esc, restored to before them) aren't. The transcript keeps every
+/// message, each naming the one before it; a rewind starts a new line from
+/// an earlier one.
+pub fn claude_prompts_kept(
+    session: &str,
+    prompt: &str,
+) -> Option<std::collections::HashSet<String>> {
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| Some(home()?.join(".claude")))?;
+    claude_prompts_kept_in(&claude, session, prompt)
+}
+
+fn claude_prompts_kept_in(
+    claude: &Path,
+    session: &str,
+    prompt: &str,
+) -> Option<std::collections::HashSet<String>> {
+    use std::io::Read;
+    let path = claude_transcript(claude, session)?;
+    let mut text = String::new();
+    std::fs::File::open(path).ok()?.take(256 << 20).read_to_string(&mut text).ok()?;
+    // Each message: the one before it, and its prompt.
+    let mut before: std::collections::HashMap<String, (Option<String>, Option<String>)> =
+        Default::default();
+    let mut start = None;
+    for line in text.lines().filter(|l| l.contains("\"uuid\"")) {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        let text = |key: &str| entry.get(key).and_then(Value::as_str).map(str::to_owned);
+        let Some(uuid) = text("uuid") else { continue };
+        // (Compacted: a new line, naming where the old one ended.)
+        let parent = text("parentUuid").or_else(|| text("logicalParentUuid"));
+        let prompt_id = text("promptId");
+        if prompt_id.as_deref() == Some(prompt) && text("type").as_deref() == Some("user") {
+            start = Some(uuid.clone());
+        }
+        before.insert(uuid, (parent, prompt_id));
+    }
+    let mut kept = std::collections::HashSet::new();
+    let mut at = start?;
+    // (A loop can't be, but the file isn't ours.)
+    for _ in 0..before.len() {
+        let Some((parent, prompt_id)) = before.get(&at) else { break };
+        kept.extend(prompt_id.clone());
+        match parent {
+            Some(parent) => at = parent.clone(),
+            None => break,
+        }
+    }
+    Some(kept)
+}
+
+/// [`claude_title`], Claude Code's folder being `claude`.
+fn claude_title_in(claude: &Path, session: &str) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = claude_transcript(claude, session)?;
     let title_in = |text: &str| -> Option<String> {
         let mut found: (Option<String>, Option<String>) = (None, None);
         for line in text.lines().filter(|l| l.contains("-title\"")) {
@@ -269,6 +328,40 @@ fn shorten(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prompts_kept_after_a_rewind() {
+        let dir = std::env::temp_dir().join(format!("artty-rewind-{}", std::process::id()));
+        let project = dir.join("projects/-src");
+        std::fs::create_dir_all(&project).unwrap();
+        let user = |uuid: &str, parent: &str, prompt: &str| {
+            format!(
+                "{{\"type\":\"user\",\"uuid\":\"{uuid}\",\"parentUuid\":{parent},\"promptId\":\"{prompt}\"}}\n"
+            )
+        };
+        let reply = |uuid: &str, parent: &str, prompt: &str| {
+            format!(
+                "{{\"type\":\"assistant\",\"uuid\":\"{uuid}\",\"parentUuid\":\"{parent}\",\"promptId\":\"{prompt}\"}}\n"
+            )
+        };
+        // p1, p2, then rewound to before p2: p3 follows p1's reply.
+        let transcript = [
+            user("u1", "null", "p1"),
+            reply("a1", "u1", "p1"),
+            user("u2", "\"a1\"", "p2"),
+            reply("a2", "u2", "p2"),
+            user("u3", "\"a1\"", "p3"),
+            reply("a3", "u3", "p3"),
+        ]
+        .concat();
+        std::fs::write(project.join("s-1.jsonl"), transcript).unwrap();
+        let kept = claude_prompts_kept_in(&dir, "s-1", "p3").unwrap();
+        let mut kept: Vec<&str> = kept.iter().map(String::as_str).collect();
+        kept.sort();
+        assert_eq!(kept, ["p1", "p3"]);
+        assert_eq!(claude_prompts_kept_in(&dir, "s-1", "nope"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn claude_titles() {

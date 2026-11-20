@@ -272,6 +272,10 @@ impl AskWaiter {
     }
 }
 
+/// The prompts a Claude Code conversation still has, once its transcript's
+/// read (see `Server::check_rewinds`).
+type KeptPrompts = std::sync::mpsc::Receiver<Option<HashSet<String>>>;
+
 /// Someone waiting for thread entries after `after` (`artty events`).
 struct EventWaiter {
     after: u64,
@@ -315,6 +319,9 @@ pub(crate) struct Server {
     threads: crate::threads::Threads,
     /// Files agents change: each turn's, and who changed which lately.
     edits: crate::edits::Edits,
+    /// Claude Code conversations being read for what was rewound (see
+    /// `check_rewinds`): pane, the turn's prompt, and the prompts kept.
+    rewinds: Vec<(PaneId, String, KeptPrompts)>,
     /// The pane each agent was started from by another (`artty new
     /// --task` from inside a pane).
     parents: HashMap<PaneId, PaneId>,
@@ -611,6 +618,7 @@ impl Server {
             threads: crate::threads::Threads::new(crate::store::Store::open()),
             edits: crate::edits::Edits::default(),
             parents: HashMap::new(),
+            rewinds: Vec::new(),
             worktrees: HashMap::new(),
             next_pane: 1,
             next_window: 1,
@@ -2623,7 +2631,8 @@ impl Server {
         self.approval_waiters.remove(&conn);
         let now = Instant::now();
         if let Some(pane) = self.approvals.hangup(conn, now) {
-            self.asks.interrupted(pane, now);
+            let why = "the agent's turn was interrupted at a permission prompt (check the pane)";
+            self.asks.interrupted(pane, why, now);
             let reason = "a permission prompt was turned down".to_owned();
             self.threads.add(pane, ThreadItem::Interrupted { reason });
             if let Some(pane) = self.panes.get_mut(&pane) {
@@ -3338,6 +3347,16 @@ impl Server {
                     for release in self.approvals.hook(id, hook, now) {
                         self.release_approval(release);
                     }
+                    // A Claude Code turn over: anything rewound since?
+                    let claude = self.panes.get(&id).is_some_and(
+                        |p| matches!(&p.status, Status::Agent { name, .. } if name == "claude"),
+                    );
+                    if claude
+                        && hook.event == "Stop"
+                        && let Some(prompt) = hook.prompt_id.clone()
+                    {
+                        self.check_rewinds(id, prompt);
+                    }
                     match (hook.turn(), hook.event.as_str()) {
                         (Some(true), _) => {
                             // As the thread shows it: a notice by its summary.
@@ -3699,6 +3718,7 @@ impl Server {
             self.pump_asks(now);
         }
         self.follow_handoffs(now);
+        self.follow_rewinds();
         self.follow_events(now);
         self.clear_seen();
         self.push_updates(now);
@@ -3724,12 +3744,85 @@ impl Server {
         }
     }
 
+    /// Claude Code turns cut short with no hook to say so (Esc fires no
+    /// `Stop`): at work by its hooks, for a while, and its title at rest
+    /// (`✳`, no spinner) for a while — not asking permission meanwhile.
+    fn turns_cut_short(&mut self, now: Instant) {
+        const SETTLED: Duration = Duration::from_secs(3);
+        let cut: Vec<PaneId> = self
+            .panes
+            .iter()
+            .filter(|(_, pane)| {
+                matches!(
+                    &pane.status,
+                    Status::Agent { name, state: AgentState::Working } if name == "claude"
+                )
+            })
+            .filter(|(_, pane)| pane.title.as_deref().is_some_and(|t| t.starts_with('✳')))
+            .filter(|(_, pane)| pane.title_since().is_none_or(|at| now.duration_since(at) >= SETTLED))
+            // (Not known since when: one from before this build took over.)
+            .filter(|&(&id, _)| {
+                self.asks.turn_open_since(id).is_none_or(|at| now.duration_since(at) >= SETTLED)
+            })
+            .filter(|&(&id, _)| !self.approvals.pending_in(id))
+            .map(|(&id, _)| id)
+            .collect();
+        for pane in cut {
+            let why = "the agent's turn was interrupted in its terminal (no answer)";
+            self.asks.turn_cut_short(pane, why, now);
+            let files = self.edits.take_turn(pane);
+            if !files.is_empty() {
+                self.threads.add(pane, ThreadItem::Edited { files });
+            }
+            let reason = "interrupted in its terminal".to_owned();
+            self.threads.add(pane, ThreadItem::Interrupted { reason });
+            if let Some(prompt) = self.threads.last_prompt_id(pane) {
+                self.check_rewinds(pane, prompt);
+            }
+            if let Some(pane) = self.panes.get_mut(&pane) {
+                pane.report(AgentState::Idle, None, None, None);
+            }
+        }
+    }
+
+    /// A Claude Code turn ended (`prompt`: its prompt's id): read its
+    /// transcript (off this loop) for what was rewound since, to mark it.
+    fn check_rewinds(&mut self, pane: PaneId, prompt: String) {
+        let Some(session) = self.panes.get(&pane).and_then(|p| p.agent_session()) else { return };
+        let session = session.to_owned();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let wanted = prompt.clone();
+        let started = std::thread::Builder::new().name("artty-rewinds".into()).spawn(move || {
+            let _ = tx.send(crate::sessions::claude_prompts_kept(&session, &wanted));
+        });
+        if started.is_ok() {
+            self.rewinds.push((pane, prompt, rx));
+        }
+    }
+
+    /// What reading transcripts for rewinds found: marked in the threads.
+    fn follow_rewinds(&mut self) {
+        let mut done = Vec::new();
+        self.rewinds.retain(|(pane, prompt, rx)| match rx.try_recv() {
+            Ok(kept) => {
+                done.extend(kept.map(|kept| (*pane, prompt.clone(), kept)));
+                false
+            },
+            Err(std::sync::mpsc::TryRecvError::Empty) => true,
+            Err(_) => false,
+        });
+        for (pane, prompt, kept) in done {
+            self.threads.mark_rewound(pane, &kept, &prompt);
+        }
+    }
+
     fn poll(&mut self) {
         // Conversations whose agent hasn't reported since (one running when
         // this build took over): their titles too.
         for pane in self.panes.values_mut() {
             Self::title_session(pane);
         }
+        self.turns_cut_short(Instant::now());
         // Files drawers following a pane's directory: it moved.
         let panes = &self.panes;
         let moved = self.watches.moved(|pane| panes.get(&pane)?.session.cwd());

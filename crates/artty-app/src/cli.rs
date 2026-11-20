@@ -1211,10 +1211,10 @@ fn sender(from: &artty_core::control::AskFrom, ask: &str) -> String {
 /// lines indented under the first).
 fn thread_entry(entry: &ThreadEntry, agent: &str) -> String {
     let (mark, head, text) = match &entry.item {
-        ThreadItem::Prompt { text, ask: Some(id), from: Some(from) } => {
+        ThreadItem::Prompt { text, ask: Some(id), from: Some(from), .. } => {
             ("›", sender(from, &format!("ask {id}")), text.clone())
         },
-        ThreadItem::Prompt { text, ask: Some(id), from: None } => {
+        ThreadItem::Prompt { text, ask: Some(id), from: None, .. } => {
             ("›", format!("you (ask {id})"), text.clone())
         },
         ThreadItem::Prompt { text, ask: None, .. } => ("›", "you".to_owned(), text.clone()),
@@ -1264,6 +1264,7 @@ fn thread_entry(entry: &ThreadEntry, agent: &str) -> String {
     };
     let mut lines = text.lines();
     let first = lines.next().map(|l| format!(": {l}")).unwrap_or_default();
+    let head = if entry.rewound { format!("{head} (rewound)") } else { head };
     let mut out = format!("{}  {mark} {head}{first}\n", clock(entry.at_ms));
     for line in lines {
         out.push_str(&format!("          {line}\n"));

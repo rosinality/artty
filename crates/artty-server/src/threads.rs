@@ -78,8 +78,11 @@ impl Threads {
                             ThreadItem::Notice { tag, summary, text: prompt.trim().to_owned() }
                         },
                         None => match &entry.item {
-                            ThreadItem::Prompt { ask, from, .. } => {
-                                ThreadItem::Prompt { text: prompt, ask: *ask, from: from.clone() }
+                            ThreadItem::Prompt { ask, from, prompt_id, .. } => ThreadItem::Prompt {
+                                text: prompt,
+                                ask: *ask,
+                                from: from.clone(),
+                                prompt_id: prompt_id.clone(),
                             },
                             _ => unreachable!(),
                         },
@@ -107,7 +110,7 @@ impl Threads {
     /// Add `item` to `pane`'s thread; its `seq`.
     pub fn add(&mut self, pane: PaneId, item: ThreadItem) -> u64 {
         let seq = crate::queue::next_id();
-        let entry = ThreadEntry { seq, at_ms: crate::queue::now_ms(), item };
+        let entry = ThreadEntry { seq, at_ms: crate::queue::now_ms(), item, rewound: false };
         let key = self.key(pane);
         self.store.put_entry(key, &entry);
         self.newest = self.newest.max(seq);
@@ -265,6 +268,51 @@ impl Threads {
         }
     }
 
+    /// The agent's conversation as it stands, back from `prompt` (its
+    /// turn's): `kept`, the prompts still in it. Those before `prompt` that
+    /// aren't were rewound past, with what followed each (replies, edits):
+    /// marked so. Whether any changed.
+    pub fn mark_rewound(
+        &mut self,
+        pane: PaneId,
+        kept: &std::collections::HashSet<String>,
+        prompt: &str,
+    ) -> bool {
+        let Some(thread) = self.panes.get_mut(&pane) else { return false };
+        let is_it = |e: &ThreadEntry| matches!(&e.item, ThreadItem::Prompt { prompt_id: Some(p), .. } if p == prompt);
+        let Some(end) = thread.iter().rposition(is_it) else { return false };
+        let key = self.keys.get(&pane).copied();
+        let mut undone = false;
+        let mut changed = false;
+        for entry in thread.iter_mut().take(end) {
+            match &entry.item {
+                ThreadItem::Prompt { prompt_id: Some(id), .. } => undone = !kept.contains(id),
+                // (One not known to the agent's transcript, a session's
+                // start: not judged.)
+                ThreadItem::Prompt { prompt_id: None, .. } | ThreadItem::Session { .. } => {
+                    undone = false
+                },
+                _ => {},
+            }
+            if undone != entry.rewound {
+                entry.rewound = undone;
+                changed = true;
+                if let Some(key) = key {
+                    self.store.put_entry(key, entry);
+                }
+            }
+        }
+        changed
+    }
+
+    /// The prompt id of `pane`'s last turn, if its agent gave one.
+    pub fn last_prompt_id(&self, pane: PaneId) -> Option<String> {
+        self.panes.get(&pane)?.iter().rev().find_map(|e| match &e.item {
+            ThreadItem::Prompt { prompt_id, .. } => Some(prompt_id.clone()),
+            _ => None,
+        })?
+    }
+
     /// The pane closed: its thread is over. (It stays on disk until the
     /// next start, which forgets those no saved tab names: tabs saved a
     /// moment before may yet reopen with theirs, as when the shells end
@@ -389,7 +437,12 @@ fn item_of(
                 return Some(ThreadItem::Notice { tag, summary, text: prompt.trim().to_owned() });
             }
             let (ask, from) = ask.unzip();
-            Some(ThreadItem::Prompt { text: prompt, ask, from: from.flatten() })
+            Some(ThreadItem::Prompt {
+                text: prompt,
+                ask,
+                from: from.flatten(),
+                prompt_id: event.prompt_id.clone(),
+            })
         },
         "Stop" | "AfterAgent" => event
             .reply
@@ -450,7 +503,12 @@ mod tests {
         assert_eq!(
             items,
             [
-                ThreadItem::Prompt { text: "fix it".into(), ask: Some(42), from: None },
+                ThreadItem::Prompt {
+                    text: "fix it".into(),
+                    ask: Some(42),
+                    from: None,
+                    prompt_id: None,
+                },
                 ThreadItem::Permission {
                     id: 7,
                     tool_name: "Bash".into(),
@@ -515,8 +573,40 @@ mod tests {
         let [entry] = threads.entries(2, None, None).try_into().unwrap();
         assert_eq!(
             entry.item,
-            ThreadItem::Prompt { text: "see\nlog\n".into(), ask: None, from: None }
+            ThreadItem::Prompt {
+                text: "see\nlog\n".into(),
+                ask: None,
+                from: None,
+                prompt_id: None
+            }
         );
+    }
+
+    #[test]
+    fn rewound_turns_marked() {
+        let mut threads = Threads::default();
+        let prompt = |id: &str| ThreadItem::Prompt {
+            text: id.into(),
+            ask: None,
+            from: None,
+            prompt_id: Some(id.into()),
+        };
+        for item in [
+            prompt("p1"),
+            ThreadItem::Reply { text: "r1".into() },
+            prompt("p2"),
+            ThreadItem::Reply { text: "r2".into() },
+            prompt("p3"),
+            ThreadItem::Reply { text: "r3".into() },
+        ] {
+            threads.add(1, item);
+        }
+        let kept: std::collections::HashSet<String> = ["p1", "p3"].map(String::from).into();
+        assert!(threads.mark_rewound(1, &kept, "p3"));
+        let rewound: Vec<bool> = threads.entries(1, None, None).iter().map(|e| e.rewound).collect();
+        assert_eq!(rewound, [false, false, true, true, false, false]);
+        assert!(!threads.mark_rewound(1, &kept, "p3"), "nothing more");
+        assert_eq!(threads.last_prompt_id(1).as_deref(), Some("p3"));
     }
 
     #[test]
@@ -524,7 +614,12 @@ mod tests {
         let mut threads = Threads::default();
         threads.add(
             1,
-            ThreadItem::Prompt { text: "Fix the Login\nredirect".into(), ask: None, from: None },
+            ThreadItem::Prompt {
+                text: "Fix the Login\nredirect".into(),
+                ask: None,
+                from: None,
+                prompt_id: None,
+            },
         );
         threads.add(2, ThreadItem::Reply { text: "Done: the login page redirects home.".into() });
         threads.add(2, ThreadItem::Session { event: "login".into() });

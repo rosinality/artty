@@ -19,7 +19,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 /// Bumped when the tables change incompatibly (an older file is started
 /// afresh).
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 
 pub struct Store {
     db: Option<Connection>,
@@ -41,7 +41,13 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
     db.pragma_update(None, "journal_mode", "WAL")?;
     db.pragma_update(None, "synchronous", "NORMAL")?;
     db.busy_timeout(std::time::Duration::from_secs(2))?;
-    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let mut version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    // 1 → 2: entries undone (rewound) in their agent.
+    if version == 1 {
+        db.execute_batch("ALTER TABLE entries ADD COLUMN rewound INTEGER NOT NULL DEFAULT 0;")?;
+        db.pragma_update(None, "user_version", 2)?;
+        version = 2;
+    }
     if version != VERSION {
         if version != 0 {
             log::warn!(
@@ -60,6 +66,7 @@ fn open(path: &Path) -> rusqlite::Result<Connection> {
              seq INTEGER NOT NULL,
              at_ms INTEGER NOT NULL,
              item TEXT NOT NULL,
+             rewound INTEGER NOT NULL DEFAULT 0,
              PRIMARY KEY (thread, seq)
          ) WITHOUT ROWID;
          CREATE TABLE IF NOT EXISTS records (
@@ -105,13 +112,15 @@ impl Store {
         let Ok(item) = serde_json::to_string(&entry.item) else { return };
         self.with("saving an entry", |db| {
             db.prepare_cached(
-                "INSERT OR REPLACE INTO entries (thread, seq, at_ms, item) VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO entries (thread, seq, at_ms, item, rewound) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )?
             .execute(params![
                 thread as i64,
                 entry.seq as i64,
                 entry.at_ms as i64,
-                item
+                item,
+                entry.rewound
             ])
         });
     }
@@ -129,21 +138,27 @@ impl Store {
     pub fn entries(&self, thread: u64, most: usize) -> Vec<ThreadEntry> {
         let entries = self.with("reading a thread", |db| {
             let mut query = db.prepare(
-                "SELECT seq, at_ms, item FROM entries WHERE thread = ?1 ORDER BY seq DESC LIMIT ?2",
+                "SELECT seq, at_ms, item, rewound FROM entries WHERE thread = ?1 \
+                 ORDER BY seq DESC LIMIT ?2",
             )?;
             let rows = query.query_map(params![thread as i64, most as i64], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?))
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, bool>(3)?,
+                ))
             })?;
             rows.collect::<rusqlite::Result<Vec<_>>>()
         });
         let mut entries: Vec<ThreadEntry> = entries
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|(seq, at_ms, item)| {
+            .filter_map(|(seq, at_ms, item, rewound)| {
                 let item = serde_json::from_str(&item)
                     .inspect_err(|err| log::warn!("thread {thread}, entry {seq}: {err}"))
                     .ok()?;
-                Some(ThreadEntry { seq: seq as u64, at_ms: at_ms as u64, item })
+                Some(ThreadEntry { seq: seq as u64, at_ms: at_ms as u64, item, rewound })
             })
             .collect();
         entries.reverse();
@@ -203,7 +218,12 @@ mod tests {
     use super::*;
 
     fn entry(seq: u64, text: &str) -> ThreadEntry {
-        ThreadEntry { seq, at_ms: seq * 10, item: ThreadItem::Reply { text: text.into() } }
+        ThreadEntry {
+            seq,
+            at_ms: seq * 10,
+            item: ThreadItem::Reply { text: text.into() },
+            rewound: false,
+        }
     }
 
     #[test]
