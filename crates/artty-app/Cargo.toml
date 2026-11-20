@@ -7,6 +7,8 @@ edition = "2024"
 publish = false
 
 [dependencies]
+# Agents' messages shown as markdown.
+pulldown-cmark = { version = "0.13", default-features = false }
 artty-core = { path = "../artty-core" }
 # `artty attach`: the protocol and a terminal's view, without ssh built in.
 artty-client = { path = "../artty-client", default-features = false }

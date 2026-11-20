@@ -28,6 +28,8 @@ mod keymap;
 #[cfg(target_os = "macos")]
 mod keys;
 #[cfg(target_os = "macos")]
+mod markdown;
+#[cfg(target_os = "macos")]
 mod mouse;
 #[cfg(target_os = "macos")]
 mod notify;

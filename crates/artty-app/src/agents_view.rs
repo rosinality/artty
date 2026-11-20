@@ -43,6 +43,11 @@ pub(super) struct Agents {
     pub(super) thread_of: Option<PaneId>,
     /// Edited files opened to show their changes: (entry's seq, file).
     expanded: HashSet<(u64, usize)>,
+    /// Messages as markdown, parsed once (by their text's hash).
+    parsed: std::cell::RefCell<HashMap<u64, std::rc::Rc<Vec<crate::markdown::Block>>>>,
+    /// The chosen agent's terminal shown, live (else folded away, and not
+    /// sent).
+    pub(super) peek_open: bool,
     /// An entry to scroll to once the thread's in (one searched for), and
     /// the one shown standing out, since when.
     reveal: Option<u64>,
@@ -130,7 +135,7 @@ impl WindowView {
     /// The chosen agent's terminal, live, while Agents shows it: its
     /// server sends its screens though no window shows it (`peek`).
     pub(super) fn follow_peek(&mut self, cx: &mut Context<Self>) {
-        let want = self.agents.as_ref().and_then(|a| a.selected);
+        let want = self.agents.as_ref().filter(|a| a.peek_open).and_then(|a| a.selected);
         // Still asked of the same connection (a new one forgot it).
         let current = self.peeking.filter(|&(pane, connection)| {
             app_state::connection(ids::server_of(pane), cx) == Some(connection)
@@ -147,6 +152,43 @@ impl WindowView {
             let connection = app_state::peek(ids::server_of(pane), Some(ids::local_id(pane)), cx)?;
             Some((pane, connection))
         });
+    }
+
+    /// A message, drawn as markdown (`id`: unique in the thread).
+    fn markdown(&self, agents: &Agents, text: &str, id: &str) -> gpui::Div {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        let key = hasher.finish();
+        let blocks = {
+            let mut parsed = agents.parsed.borrow_mut();
+            // (A long-running view: start over now and then.)
+            if parsed.len() > 2000 {
+                parsed.clear();
+            }
+            parsed
+                .entry(key)
+                .or_insert_with(|| std::rc::Rc::new(crate::markdown::parse(&clip(text))))
+                .clone()
+        };
+        let look = crate::markdown::Look {
+            text: ui(0xffffffe0).into(),
+            dim: ui(0xffffff90).into(),
+            link: ui(0x8fb4ffff).into(),
+            code_bg: ui(0x00000040).into(),
+            rule: ui(0xffffff22).into(),
+            font: ".SystemUIFont".into(),
+            mono: self.metrics.font.family.clone(),
+        };
+        crate::markdown::view(&blocks, &look, &format!("md-{id}"))
+    }
+
+    /// Show (or fold away) the chosen agent's terminal.
+    fn toggle_peek(&mut self, cx: &mut Context<Self>) {
+        if let Some(agents) = self.agents.as_mut() {
+            agents.peek_open = !agents.peek_open;
+        }
+        cx.notify();
     }
 
     /// The agent's terminal as it is now, shrunk to `width` (not grown).
@@ -622,7 +664,11 @@ impl WindowView {
                                     (_, None) => format!("you · {time}"),
                                 },
                             ))
-                            .child(bubble(true).child(clip(text))),
+                            .child(bubble(true).child(self.markdown(
+                                agents,
+                                text,
+                                &seq.to_string(),
+                            ))),
                     )
                     .into_any_element(),
                 ThreadItem::Reply { text } => div()
@@ -636,7 +682,7 @@ impl WindowView {
                             .text_color(ui(0xffffff60))
                             .child(format!("{} · {time}", agent.agent)),
                     )
-                    .child(bubble(false).child(clip(text)))
+                    .child(bubble(false).child(self.markdown(agents, text, &seq.to_string())))
                     .into_any_element(),
                 ThreadItem::Permission { id, summary, state, .. } => {
                     let pending = *state == ApprovalState::Pending;
@@ -753,7 +799,7 @@ impl WindowView {
                                 .text_color(ui(0xffffff70))
                                 .child(format!("{who} → {target} · {time}")),
                         )
-                        .child(div().text_color(ui(0xffffffd0)).child(clip(text)))
+                        .child(self.markdown(agents, text, &seq.to_string()))
                         .child(
                             div()
                                 .text_size(px(11.))
@@ -767,7 +813,7 @@ impl WindowView {
                                 .rounded(px(7.))
                                 .bg(ui(0xffffff0c))
                                 .text_color(ui(0xffffffd8))
-                                .child(clip(reply))
+                                .child(self.markdown(agents, reply, &format!("{seq}-reply")))
                         }))
                         .children(error.as_ref().map(|error| {
                             div().text_size(px(11.)).text_color(ui(DENY)).child(error.clone())
@@ -929,7 +975,8 @@ impl WindowView {
         });
         let (label, color) = state_label(agent.state);
         let pane = agent.pane;
-        let live = app_state::screen_of(pane, cx).is_some_and(|s| s.frame.columns > 0);
+        let live =
+            agents.peek_open && app_state::screen_of(pane, cx).is_some_and(|s| s.frame.columns > 0);
         div()
             .flex_1()
             .min_w_0()
@@ -1013,8 +1060,22 @@ impl WindowView {
         // (within reason), the thread keeping the most.
         const PADDING: f32 = 14.;
         let wide = (self.area.width * 0.3).clamp(260., 440.);
-        let peek = self.terminal_peek(agent.pane, wide - 2. * PADDING, cx);
+        let open = self.agents.as_ref().is_some_and(|a| a.peek_open);
+        let peek = open.then(|| self.terminal_peek(agent.pane, wide - 2. * PADDING, cx)).flatten();
         let width = if peek.is_some() { wide } else { 240. };
+        // Folded away (at first), or open: a click on its line either way.
+        let fold = div()
+            .id("peek-fold")
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .text_size(px(10.5))
+            .text_color(ui(0xffffff60))
+            .hover(|d| d.text_color(ui(0xffffffb0)))
+            .cursor_pointer()
+            .child(if open { "▾ TERMINAL" } else { "▸ TERMINAL" })
+            .when(peek.is_some(), |d| d.child("· click it to open"))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_peek(cx)));
         let row = |label: &str, value: String| {
             div()
                 .flex()
@@ -1040,19 +1101,7 @@ impl WindowView {
             .border_l_1()
             .border_color(ui(0xffffff12))
             .overflow_y_scroll()
-            .children(peek.map(|peek| {
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(ui(0xffffff60))
-                            .child("TERMINAL · click to open"),
-                    )
-                    .child(peek)
-            }))
+            .child(div().flex().flex_col().gap(px(4.)).child(fold).children(peek))
             .child(row(
                 "Status",
                 match &agent.message {

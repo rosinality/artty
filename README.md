@@ -323,7 +323,8 @@ what it has for you. Activity, Terminals and Agents at the sidebar's top
 say which the window shows. Agents opens at the agent of the tab you're
 on, and Esc (or Terminals) goes back to the tab of the agent you were
 looking at. It shows the chosen one's thread (a pending permission request is answered
-there too), and what's known about it, with its terminal, live (shrunk to
+there too; messages shown as markdown: code, lists, tables, links), and
+what's known about it, with its terminal, live, once unfolded (shrunk to
 fit; click it to go there). The terminal is sent though no window shows it,
 at the size its own tab gives it (servers from before this don't send it). Threads are kept on disk (an
 `agents.db` beside the saved tabs, readable by you only; the last 1000
