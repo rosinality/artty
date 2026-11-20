@@ -331,8 +331,8 @@ impl WindowView {
                 .flex_col()
                 .gap(px(2.))
                 .px(px(8.))
-                .py(px(6.))
-                .rounded(px(7.))
+                .py(px(5.))
+                .rounded(px(6.))
                 .when(chosen, |d| d.bg(ui(0xffffff1c)))
                 .hover(|d| d.bg(ui(0xffffff10)))
                 .child(
@@ -340,7 +340,7 @@ impl WindowView {
                         .flex()
                         .items_center()
                         .gap(px(6.))
-                        .child(div().size(px(7.)).flex_none().rounded_full().bg(ui(color)))
+                        .child(div().size(px(6.)).flex_none().rounded_full().bg(ui(color)))
                         .child(
                             div()
                                 .flex_1()
@@ -363,7 +363,7 @@ impl WindowView {
                 )
                 .child(
                     div()
-                        .pl(px(13.))
+                        .pl(px(12.))
                         .text_size(px(11.))
                         .text_color(ui(0xffffff70))
                         .overflow_hidden()
@@ -384,6 +384,8 @@ impl WindowView {
             .flex_col()
             .gap(px(2.))
             .p(px(8.))
+            // As the sidebar's tabs.
+            .text_size(px(12.5))
             .border_r_1()
             .border_color(ui(0xffffff12))
             .overflow_y_scroll()
