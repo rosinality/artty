@@ -82,6 +82,11 @@ impl Threads {
     pub fn pane_closed(&mut self, pane: PaneId) {
         self.panes.remove(&pane);
     }
+
+    /// When `pane`'s thread last had something.
+    pub fn last_ms(&self, pane: PaneId) -> Option<u64> {
+        self.panes.get(&pane)?.back().map(|e| e.at_ms)
+    }
 }
 
 /// What a hook event adds to a thread, if anything. Permission prompts come

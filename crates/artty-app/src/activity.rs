@@ -152,6 +152,7 @@ impl WindowView {
             if self.renaming.is_some() {
                 self.finish_rename(true, cx);
             }
+            self.agents = None;
             self.activity = Some(Activity::default());
             self.refresh_activity(cx);
         }

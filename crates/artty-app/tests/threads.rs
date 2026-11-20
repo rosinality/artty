@@ -80,6 +80,13 @@ fn turns_asks_and_permissions_in_order() {
         ]
     );
 
+    // Listed among the agents, with its unread replies.
+    let out = scratch.artty(&["agents", "--json"]);
+    let agents: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let agent = &agents[0];
+    assert_eq!((agent["pane"].to_string(), agent["agent"].as_str()), (pane.clone(), Some("fake")));
+    assert_eq!(agent["unread"], 2, "{agent}");
+
     // The last few, and what came after one.
     let out = scratch.artty(&["thread", "--tab", &pane, "--lines", "2"]);
     let text = stdout(&out);

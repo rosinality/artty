@@ -366,6 +366,8 @@ pub enum Request {
     QueueDismiss {
         id: u64,
     },
+    /// Every pane running an agent, with what it's doing.
+    Agents,
     /// What a pane's agent and the user said and did, oldest first: its
     /// entries after `after` (an entry's `seq`), the last `limit` of them.
     Thread {
@@ -375,6 +377,32 @@ pub enum Request {
         #[serde(default)]
         limit: Option<usize>,
     },
+}
+
+/// A pane's agent, as `Agents` lists it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentInfo {
+    pub pane: SessionId,
+    /// `claude`, `codex`, ...
+    pub agent: String,
+    /// Its tab's title, and its workspace's name.
+    pub title: String,
+    pub workspace: String,
+    pub state: AgentState,
+    /// What it last said (or asks).
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    /// When its thread last had something (Unix ms).
+    #[serde(default)]
+    pub last_ms: Option<u64>,
+    /// Its permission requests pending, and replies unread.
+    pub pending: usize,
+    pub unread: usize,
+    /// The ask it's at work on.
+    #[serde(default)]
+    pub ask: Option<u64>,
 }
 
 /// One thing in an agent's thread.
@@ -636,6 +664,9 @@ pub enum Response {
         pane: SessionId,
         agent: Option<String>,
         entries: Vec<ThreadEntry>,
+    },
+    Agents {
+        agents: Vec<AgentInfo>,
     },
 }
 

@@ -92,6 +92,10 @@ impl Replies {
         self.prompts.remove(&pane);
     }
 
+    pub fn unread_in(&self, pane: PaneId) -> usize {
+        self.unread.iter().filter(|r| r.pane == pane).count()
+    }
+
     /// Unread, newest first.
     pub fn unread(&self) -> impl Iterator<Item = &Reply> {
         self.unread.iter().rev()

@@ -65,6 +65,7 @@ the Xcode Metal toolchain isn't needed. `ARTTY_PROFILE=1` prints frame timings.
 | ⌘⇧N | New workspace (name it, then Enter) |
 | ⌘⇧O | Open a workspace: a hidden one, or one in another window |
 | ⇧⌘A | Activity: every pane's processes, CPU and memory |
+| ⇧⌘K | Agents: every agent on every server, and the chosen one's thread (↑↓ choose, Enter shows its terminal) |
 | ⇧⌘E | Files: the focused pane's folder, on its machine |
 | ⌘⇧F | Search everything: what every pane on every server printed (history too), and Claude Code's and Codex's conversations on those machines (✳ Claude Code, ◇ Codex; matches highlighted); a line goes to its pane, selected, a conversation carries on in a new tab |
 | ⌘P / ⌘⇧P | Go to any pane on any server (fuzzy: title, workspace, folder, program, agent) / run any command (`>` in ⌘P) |
@@ -303,6 +304,22 @@ artty approval deny 1795129609022 --message "Use the staging database"
 "Always" offers only what the agent itself suggests with the request
 (Claude Code's `permission_suggestions`, such as allowing a folder for the
 session), passed back as it is: never more than its own prompt would.
+
+### Agents and their threads
+
+The server keeps each agent's thread while it runs: what it was given (by
+`artty ask`, or typed in its terminal), what it said at the end of each
+turn, its permission requests and how they went, and its sessions starting,
+resuming, compacting and ending. The Agents view (⇧⌘K, or Agents in the
+sidebar) lists every agent on every connected server with what it's doing,
+shows the chosen one's thread (a pending permission request is answered
+there too), and what's known about it. Threads last as long as the server
+and the pane do.
+
+```sh
+artty agents                          # pane, agent, state, workspace · tab
+artty thread --tab 4 --lines 20       # its last 20 entries
+```
 
 ### The queue
 

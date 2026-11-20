@@ -285,7 +285,13 @@ impl WindowView {
     }
 
     /// Answer a permission request on its server.
-    fn decide(&mut self, key: Key, allow: bool, always: Option<usize>, cx: &mut Context<Self>) {
+    pub(super) fn decide(
+        &mut self,
+        key: Key,
+        allow: bool,
+        always: Option<usize>,
+        cx: &mut Context<Self>,
+    ) {
         let (server, _, id) = key;
         self.queue_always = None;
         let request = Request::Decide { id, allow, message: None, always };
@@ -312,7 +318,7 @@ impl WindowView {
     }
 
     /// Show a queue item's pane: here, or brought here by its server.
-    fn open_queue_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+    pub(super) fn open_queue_pane(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         let here = self.tabs.iter().any(|tab| tab.root.panes().contains(&pane));
         if here {
             self.focus_pane(pane, cx);

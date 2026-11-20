@@ -207,6 +207,10 @@ impl Approvals {
             .collect()
     }
 
+    pub fn pending_count(&self, pane: PaneId) -> usize {
+        self.items.values().filter(|a| a.pane == pane && a.state == ApprovalState::Pending).count()
+    }
+
     pub fn pending_in(&self, pane: PaneId) -> bool {
         self.items.values().any(|a| a.pane == pane && a.state == ApprovalState::Pending)
     }

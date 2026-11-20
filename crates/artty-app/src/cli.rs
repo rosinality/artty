@@ -27,6 +27,7 @@ pub const COMMANDS: &[&str] = &[
     "approval",
     "queue",
     "thread",
+    "agents",
     "notify",
     "status",
     "focus",
@@ -102,6 +103,9 @@ artty, your own pane is found automatically:
   artty queue [--json]                   what needs you: permission requests,
                                          agents waiting, unread replies
   artty queue --dismiss ID               mark a reply read
+  artty agents [--json]                  panes running agents: what each is
+                                         doing, its pending permission requests
+                                         and unread replies
   artty thread --tab N [--lines N] [--after SEQ] [--json]
                                          what pane N's agent was given and said,
                                          its permission requests and sessions,
@@ -542,6 +546,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 .transpose()?;
             Request::Decide { id, allow, message: flags.get("message").cloned(), always }
         },
+        "agents" => Request::Agents,
         "thread" => {
             let number = |name: &str| -> Result<Option<u64>, String> {
                 flags
@@ -717,6 +722,36 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
                 };
                 let text = item.text.lines().next().unwrap_or_default();
                 println!("{:>14}  pane {:<3} {:<10} {}", item.id, item.pane, kind, text);
+            }
+            Ok(0)
+        },
+        Response::Agents { agents } if json => {
+            println!("{}", serde_json::to_string_pretty(&agents).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Agents { agents } => {
+            for agent in &agents {
+                let state = serde_json::to_value(agent.state).unwrap_or_default();
+                let mut notes = Vec::new();
+                if agent.pending > 0 {
+                    notes.push(format!("{} asking permission", agent.pending));
+                }
+                if agent.unread > 0 {
+                    notes.push(format!("{} unread", agent.unread));
+                }
+                println!(
+                    "{:>4}  {:<8} {:<8} {} · {}{}",
+                    agent.pane,
+                    agent.agent,
+                    state.as_str().unwrap_or_default(),
+                    agent.workspace,
+                    agent.title,
+                    if notes.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", notes.join(", "))
+                    }
+                );
             }
             Ok(0)
         },

@@ -32,6 +32,8 @@ use crate::terminal::{self, Metrics, hsla};
 
 #[path = "activity.rs"]
 mod activity;
+#[path = "agents_view.rs"]
+mod agents_view;
 #[path = "ask_sheet.rs"]
 mod ask_sheet;
 #[path = "copy_mode.rs"]
@@ -63,6 +65,7 @@ actions!(
         NewWorkspace,
         OpenWorkspace,
         ShowActivity,
+        ShowAgents,
         NextWorkspace,
         PreviousWorkspace,
         SplitRight,
@@ -415,6 +418,8 @@ pub struct WindowView {
     picker: Option<Picker>,
     /// The Activity view, when it's shown instead of the active tab.
     activity: Option<activity::Activity>,
+    /// The Agents view, while shown (instead of the terminal).
+    agents: Option<agents_view::Agents>,
     /// The pane in copy mode, if any.
     copy_mode: Option<PaneId>,
     /// A short message over the terminal, and when it appeared.
@@ -565,6 +570,7 @@ impl WindowView {
             closing_workspace: None,
             picker: None,
             activity: None,
+            agents: None,
             copy_mode: None,
             toast: None,
             queue_all: false,
@@ -714,6 +720,7 @@ impl WindowView {
                 // Something opened or switched tabs: show it.
                 if !self.layout.workspaces.is_empty() {
                     self.activity = None;
+                    self.agents = None;
                 }
             }
             self.tabs = layout.tabs().map(|(_, _, tab)| tab.clone()).collect();
@@ -1255,6 +1262,7 @@ impl WindowView {
         if let Some(&(workspace, tab)) = self.places.get(tab) {
             self.close_search(cx);
             self.activity = None;
+            self.agents = None;
             self.set_front(ids::server_of(workspace), cx);
             self.send(ClientMessage::SelectTab { workspace, tab }, cx);
             cx.notify();
@@ -1575,6 +1583,9 @@ impl WindowView {
         if self.showing_activity() {
             self.refresh_activity(cx);
         }
+        if self.showing_agents() {
+            self.refresh_agents(cx);
+        }
         if self.toast.as_ref().is_some_and(|(_, shown)| shown.elapsed() >= pane_actions::TOAST_TIME)
         {
             self.toast = None;
@@ -1704,6 +1715,12 @@ impl WindowView {
         if self.showing_activity() {
             // Nothing typed here goes to a terminal.
             if self.activity_key(event, cx) {
+                cx.stop_propagation();
+            }
+            return;
+        }
+        if self.showing_agents() {
+            if self.agents_key(event, cx) {
                 cx.stop_propagation();
             }
             return;
@@ -2141,7 +2158,7 @@ impl WindowView {
         tab: &TabLayout,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
-        let selected = index == self.active && !self.showing_activity();
+        let selected = index == self.active && !self.showing_view();
         let ids = tab.root.panes();
         let split = ids.len() > 1;
         let states: Vec<Option<&PaneState>> =
@@ -3271,6 +3288,11 @@ impl WindowView {
         }
     }
 
+    /// Activity or Agents is shown instead of the terminal.
+    fn showing_view(&self) -> bool {
+        self.showing_activity() || self.showing_agents()
+    }
+
     fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         // Workspaces are sections (there's always one); a folded one still
         // shows the tab on screen.
@@ -3412,6 +3434,28 @@ impl WindowView {
                     .child(div().flex_1().child("Activity"))
                     .child(div().text_xs().text_color(ui(0xffffff66)).child("⇧⌘A"))
                     .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
+            )
+            .child(
+                div()
+                    .id("agents")
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .h(px(28.))
+                    .mb(px(4.))
+                    .px_1()
+                    .rounded(px(7.))
+                    .text_color(if self.showing_agents() { ui(0xffffffee) } else { ui(0xffffffb0) })
+                    .when(self.showing_agents(), |d| d.bg(ui(0xffffff1c)))
+                    .hover(|d| d.bg(ui(0xffffff10)))
+                    .child(div().w(px(10.)).flex_none().flex().justify_center().text_color(ui(0x9ece6aff)).child("◆"))
+                    .child(div().flex_1().child("Agents"))
+                    .child(div().text_xs().text_color(ui(0xffffff66)).child("⇧⌘K"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if !this.showing_agents() {
+                            this.toggle_agents(cx);
+                        }
+                    })),
             )
             .when_some(self.needs_you(cx), |d, section| d.child(section))
             .when(!app_state::several_servers(cx), |d| d.child(self.sidebar_heading(cx)))
@@ -3979,15 +4023,14 @@ impl Render for WindowView {
             && self.search.is_none()
             && self.renaming.is_none()
             && self.picker.is_none()
-            && !self.showing_activity();
+            && !self.showing_view();
         self.blink_enabled =
             typing && (self.config.cursor_blink || self.cursor.is_some_and(|c| c.blinking));
 
-        let title = match self.showing_activity() {
-            true => "Activity".into(),
-            false => {
-                self.tabs.get(self.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default()
-            },
+        let title = match (self.showing_activity(), self.showing_agents()) {
+            (true, _) => "Activity".into(),
+            (_, true) => "Agents".into(),
+            _ => self.tabs.get(self.active).map(|tab| self.tab_title(tab, cx)).unwrap_or_default(),
         };
         window.set_window_title(&title);
 
@@ -4032,6 +4075,7 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
             .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
+            .on_action(cx.listener(|this, _: &ShowAgents, _, cx| this.toggle_agents(cx)))
             .on_action(cx.listener(|this, _: &ToggleFiles, _, cx| this.toggle_files(cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(
@@ -4042,7 +4086,7 @@ impl Render for WindowView {
                 cx.listener(|this, _: &RunCommand, window, cx| this.open_palette(true, window, cx)),
             )
             .on_action(cx.listener(|this, action: &SendText, _, cx| {
-                if !this.showing_activity() {
+                if !this.showing_view() {
                     this.input(action.text.clone().into_bytes(), cx);
                 }
             }))
@@ -4229,7 +4273,10 @@ impl Render for WindowView {
                     .when(self.showing_activity(), |d| {
                         d.child(div().flex_1().min_h_0().child(self.activity_view(cx)))
                     })
-                    .when(!self.showing_activity(), |d| {
+                    .when(self.showing_agents(), |d| {
+                        d.child(div().flex_1().min_h_0().child(self.agents_view(cx)))
+                    })
+                    .when(!self.showing_view(), |d| {
                         d.child(
                             div()
                                 .id("terminal")
@@ -4455,6 +4502,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-n", NewWorkspace, None),
         KeyBinding::new("cmd-shift-o", OpenWorkspace, None),
         KeyBinding::new("cmd-shift-a", ShowActivity, None),
+        KeyBinding::new("cmd-shift-k", ShowAgents, None),
         KeyBinding::new("cmd-shift-e", ToggleFiles, None),
         KeyBinding::new("cmd-b", ToggleSidebar, None),
         KeyBinding::new("cmd-p", GoTo, None),

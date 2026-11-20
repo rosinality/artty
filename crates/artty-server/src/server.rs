@@ -8,8 +8,9 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant, SystemTime};
 
 use artty_core::control::{
-    AgentState, Decision, PaneProcesses, ProcessRow, ReadSource, Request, Response, SESSION_ENV,
-    SOCKET_ENV, ServerInfo, ServerUsage, SplitDirection, TabInfo, ThreadItem, WorkspaceInfo,
+    AgentInfo, AgentState, Decision, PaneProcesses, ProcessRow, ReadSource, Request, Response,
+    SESSION_ENV, SOCKET_ENV, ServerInfo, ServerUsage, SplitDirection, TabInfo, ThreadItem,
+    WorkspaceInfo,
 };
 use artty_core::layout::{Axis, Node, PaneId};
 use artty_core::pane::{Pane, Status};
@@ -2772,9 +2773,41 @@ impl Server {
             | Request::Approve { .. }
             | Request::Decide { .. } => unreachable!("handled before"),
             Request::Queue => Response::Queue { items: self.queue_items() },
+            Request::Agents => {
+                let mut agents: Vec<AgentInfo> = self
+                    .panes
+                    .iter()
+                    .filter_map(|(&id, pane)| {
+                        let Status::Agent { name, state } = &pane.status else { return None };
+                        let workspace = self
+                            .place_of(id)
+                            .and_then(|(w, _)| self.workspaces.get(&w))
+                            .map(|w| w.name.clone().unwrap_or_else(|| w.title.clone()))
+                            .unwrap_or_default();
+                        Some(AgentInfo {
+                            pane: id,
+                            agent: name.clone(),
+                            title: pane.title(),
+                            workspace,
+                            state: *state,
+                            message: pane.message.clone(),
+                            cwd: pane.session.cwd(),
+                            last_ms: self.threads.last_ms(id),
+                            pending: self.approvals.pending_count(id),
+                            unread: self.replies.unread_in(id),
+                            ask: self.asks.running_in(id),
+                        })
+                    })
+                    .collect();
+                agents.sort_by_key(|a| a.pane);
+                Response::Agents { agents }
+            },
             Request::Thread { tab, after, limit } => {
                 let pane = self.panes.get(&tab).ok_or(format!("no pane {tab}"))?;
-                let agent = pane.agent_name();
+                let agent = match &pane.status {
+                    Status::Agent { name, .. } => Some(name.clone()),
+                    _ => pane.agent_name(),
+                };
                 // Permission requests as they are now (answered since, say).
                 let now = Instant::now();
                 for id in self.threads.permission_ids(tab) {
