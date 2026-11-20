@@ -44,9 +44,6 @@ const FRAMES_IN_FLIGHT: u64 = 2;
 /// Used within this long, an app is the one its user is at: notifications go to it alone.
 const IN_USE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// Agents started by agents (`artty new --task` from a pane), this many
-/// deep at most.
-const MAX_DEPTH: usize = 2;
 const SAVE_INTERVAL: Duration = Duration::from_secs(5);
 /// An app silent this long (it pings every 5 s) is taken as gone.
 const CLIENT_SILENCE: Duration = Duration::from_secs(60);
@@ -2288,7 +2285,8 @@ impl Server {
         while let Some(&parent) = self.parents.get(&at) {
             depth += 1;
             at = parent;
-            if depth > MAX_DEPTH {
+            // (A loop can't be made, but just in case.)
+            if depth > self.panes.len() {
                 break;
             }
         }
@@ -2323,12 +2321,14 @@ impl Server {
             return Err("--task: a message for the agent (not a /, ! or # command)".into());
         }
         let parent = self.pane_of_peer(peer);
+        let most = self.config.max_agent_depth;
         if let Some(parent) = parent
-            && self.depth(parent) >= MAX_DEPTH
+            && most > 0
+            && self.depth(parent) >= most
         {
             return Err(format!(
-                "agents started by agents go {MAX_DEPTH} deep at most: ask the user, or do it \
-                 yourself"
+                "agents started by agents go {most} deep at most (the user's max-agent-depth \
+                 setting)"
             ));
         }
         let open = Request::New {

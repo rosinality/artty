@@ -385,7 +385,8 @@ opens a tab running the agent and gives it the task as its first message
 (an ask: its id goes to stderr, and `artty ask --result ID` waits for its
 answer). Run from an agent's pane, that agent is the new one's starter:
 its thread gets the task's card, and the new agent's thread shows who
-started it. Agents started by agents go two deep at most. In the Agents
+started it. Agents started by agents go two deep at most, unless the
+`max-agent-depth` setting says otherwise (0: no limit). In the Agents
 view (or the thread panel), `/new [claude|codex|gemini] [-w BRANCH] TASK`
 starts one in the chosen agent's folder, its task's card in the chosen
 agent's thread (⌘⏎: and its answer brought back there).

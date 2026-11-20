@@ -126,7 +126,8 @@ artty, your own pane is found automatically:
                                          gemini), given TEXT as its first
                                          message (an ask: its id on stderr).
                                          From an agent's pane, it's the new
-                                         agent's starter (2 deep at most).
+                                         agent's starter (max-agent-depth deep
+                                         at most: 2 unless set).
                                          --worktree: in a git worktree of the
                                          repository (here, or --cwd), beside it
                                          in REPO.worktrees/BRANCH on BRANCH;

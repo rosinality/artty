@@ -75,6 +75,9 @@ pub struct Config {
     pub resume_agents: bool,
     /// How to resume each agent, by process name.
     pub resume: BTreeMap<String, ResumeCommand>,
+    /// How many agents deep agents may start agents (`artty new --task`
+    /// from an agent's pane); 0: no limit.
+    pub max_agent_depth: usize,
     pub colors: Colors,
     /// Key bindings over the defaults: keystrokes (as in `cmd-shift-t`, or
     /// several separated by spaces; Ghostty's `cmd+e>1` too) to what they do.
@@ -389,6 +392,7 @@ impl Default for Config {
             restore_sessions: true,
             restore_scrollback: 1000,
             resume_agents: true,
+            max_agent_depth: 2,
             resume: BTreeMap::from([
                 (
                     "claude".to_owned(),

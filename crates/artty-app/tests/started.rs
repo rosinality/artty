@@ -31,10 +31,10 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
-#[test]
-fn agents_start_agents_two_deep_at_most() {
-    let scratch = Scratch::new();
-    // Each level's pane starts the next (with a task), and says how it went.
+/// A chain of panes each starting the next with a task, with `config`:
+/// what each of the first `levels` said, once the last has.
+fn chain(config: &str, levels: u32) -> (Scratch, String, Vec<String>) {
+    let scratch = Scratch::with_config(config);
     let script = scratch.dir.join("chain.sh");
     let dir = scratch.dir.display();
     std::fs::write(
@@ -58,11 +58,25 @@ fn agents_start_agents_two_deep_at_most() {
         "1",
     ]));
     let level = |n: u32| std::fs::read_to_string(scratch.dir.join(format!("level{n}.txt")));
-    wait_for("three levels", || level(3).is_ok());
-    let started = |n: u32| level(n).unwrap();
-    assert!(started(1).contains("its task is ask"), "{}", started(1));
-    assert!(started(2).contains("its task is ask"), "{}", started(2));
-    assert!(started(3).contains("2 deep at most"), "{}", started(3));
+    wait_for("the chain", || level(levels).is_ok());
+    let said = (1..=levels).map(|n| level(n).unwrap()).collect();
+    (scratch, first, said)
+}
+
+#[test]
+fn as_deep_as_the_setting_says() {
+    let (_scratch, _, said) = chain("max-agent-depth = 1\n", 2);
+    assert!(said[0].contains("its task is ask"), "{}", said[0]);
+    assert!(said[1].contains("1 deep at most"), "{}", said[1]);
+}
+
+#[test]
+fn agents_start_agents_two_deep_at_most() {
+    let (scratch, first, said) = chain("", 3);
+    assert!(said[0].contains("its task is ask"), "{}", said[0]);
+    assert!(said[1].contains("its task is ask"), "{}", said[1]);
+    assert!(said[2].contains("2 deep at most"), "{}", said[2]);
+    let started = |n: usize| said[n - 1].clone();
 
     // The first one's task came from the top pane, whose thread has its card.
     let child = started(1).lines().next().unwrap().trim().to_owned();

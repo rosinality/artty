@@ -92,6 +92,9 @@ restore-sessions = true
 restore-scrollback = 1000
 # Resume coding agents that were running in restored tabs.
 resume-agents = true
+# How many agents deep agents may start other agents (artty new --task from
+# an agent's pane: its starter's starter, ...); 0 for no limit.
+max-agent-depth = 2
 
 # How long a key sequence ("cmd-e 1" in [keys] below) waits for its next key, in
 # seconds; 0 waits as long as it takes (as Ghostty does). While it waits, the
