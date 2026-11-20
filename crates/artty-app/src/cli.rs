@@ -121,12 +121,16 @@ artty, your own pane is found automatically:
                                          your own, or the focused one); prints
                                          the new pane's id. --workspace opens it
                                          in that workspace, creating it if needed
-  artty new --agent NAME [--task TEXT | --task -] [...]
+  artty new --agent NAME [--task TEXT | --task -] [--worktree BRANCH] [...]
                                          ... running agent NAME (claude, codex,
                                          gemini), given TEXT as its first
                                          message (an ask: its id on stderr).
                                          From an agent's pane, it's the new
-                                         agent's starter (2 deep at most)
+                                         agent's starter (2 deep at most).
+                                         --worktree: in a git worktree of the
+                                         repository (here, or --cwd), beside it
+                                         in REPO.worktrees/BRANCH on BRANCH;
+                                         removed with the tab if unchanged
   artty focus N | artty close N
   artty rename [--tab N] TITLE           name the tab holding pane N (empty
                                          title: back to automatic)
@@ -289,6 +293,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--cancel" => _ = flags.insert("cancel", args.value("--cancel")?),
             "--bring-back" => _ = flags.insert("bring-back", args.value("--bring-back")?),
             "--task" => _ = flags.insert("task", args.value("--task")?),
+            "--worktree" => _ = flags.insert("worktree", args.value("--worktree")?),
             "--always" => _ = flags.insert("always", args.value("--always")?),
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
             "--after" => _ = flags.insert("after", args.value("--after")?),
@@ -509,9 +514,17 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             if task.is_some() && command.is_empty() {
                 return Err("new: --task needs an agent to give it to (--agent NAME)".into());
             }
+            let worktree = flags.get("worktree").cloned();
+            // A worktree of the repository you're in, unless --cwd says.
+            let cwd = match flags.get("cwd") {
+                Some(cwd) => Some(std::path::absolute(cwd).map_err(|err| format!("--cwd: {err}"))?),
+                None if worktree.is_some() => std::env::current_dir().ok(),
+                None => None,
+            };
             Request::New {
                 workspace,
-                cwd: flags.get("cwd").map(PathBuf::from),
+                worktree,
+                cwd,
                 command,
                 title: flags.get("title").cloned(),
                 focus: !switches.contains("background"),

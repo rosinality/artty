@@ -17,6 +17,7 @@ mod status;
 mod store;
 mod threads;
 mod watch;
+mod worktrees;
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::fd::{AsRawFd, FromRawFd};

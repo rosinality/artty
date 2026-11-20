@@ -245,6 +245,11 @@ pub enum Request {
         /// frontmost window) if there's none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<String>,
+        /// Run it in a git worktree of its own: this branch's, beside the
+        /// repository `cwd` is in (made if need be; removed with the tab if
+        /// it has no changes).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<String>,
         /// Its first message (for an agent the command starts): an ask,
         /// given it once it's up.
         #[serde(default, skip_serializing_if = "Option::is_none")]

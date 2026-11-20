@@ -291,6 +291,9 @@ pub(crate) struct Server {
     /// The pane each agent was started from by another (`artty new
     /// --task` from inside a pane).
     parents: HashMap<PaneId, PaneId>,
+    /// The worktrees tabs were opened in (`artty new --worktree`), removed
+    /// with them if they have no changes.
+    worktrees: HashMap<PaneId, crate::worktrees::Worktree>,
     next_pane: PaneId,
     next_window: WindowId,
     next_workspace: WorkspaceId,
@@ -579,6 +582,7 @@ impl Server {
             threads: crate::threads::Threads::new(crate::store::Store::open()),
             edits: crate::edits::Edits::default(),
             parents: HashMap::new(),
+            worktrees: HashMap::new(),
             next_pane: 1,
             next_window: 1,
             sizes: HashMap::new(),
@@ -1454,6 +1458,9 @@ impl Server {
         self.threads.pane_closed(pane);
         self.edits.pane_closed(pane);
         self.parents.remove(&pane);
+        if let Some(tree) = self.worktrees.remove(&pane) {
+            crate::worktrees::remove(tree);
+        }
         for release in self.approvals.pane_closed(pane, Instant::now()) {
             self.release_approval(release);
         }
@@ -2304,6 +2311,7 @@ impl Server {
             split,
             target,
             workspace,
+            worktree,
             task: Some(task),
             thread,
             back,
@@ -2331,6 +2339,7 @@ impl Server {
             split,
             target,
             workspace,
+            worktree,
             task: None,
             thread: None,
             back: false,
@@ -2979,7 +2988,25 @@ impl Server {
                 session.write(bytes);
                 Response::Ok
             },
-            Request::New { cwd, command, title, focus, split, target, workspace, .. } => {
+            Request::New {
+                cwd, command, title, focus, split, target, workspace, worktree, ..
+            } => {
+                // In a worktree: the tab makes it, then runs the command there.
+                let (command, cwd, title, worktree) = match worktree {
+                    None => (command, cwd, title, None),
+                    Some(name) => {
+                        crate::worktrees::check_name(&name)?;
+                        if command.is_empty() {
+                            return Err("--worktree: what to run in it (--agent NAME)".into());
+                        }
+                        let folder = cwd.ok_or("--worktree: a folder in the repository (--cwd)")?;
+                        let repo = crate::worktrees::repo_of(&folder)?;
+                        let dir = crate::worktrees::dir_for(&repo, &name);
+                        let tree = crate::worktrees::Worktree { repo: repo.clone(), dir };
+                        let command = crate::worktrees::command(&tree, &name, command);
+                        (command, Some(repo), title.or(Some(name)), Some(tree))
+                    },
+                };
                 let command = (!command.is_empty()).then_some(command);
                 let spec = PaneSpec { command, cwd, title };
                 let named =
@@ -3016,6 +3043,9 @@ impl Server {
                 };
                 if focus {
                     self.focus_pane(id);
+                }
+                if let Some(tree) = worktree {
+                    self.worktrees.insert(id, tree);
                 }
                 Response::Tab { id }
             },

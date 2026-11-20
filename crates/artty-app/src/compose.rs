@@ -130,19 +130,40 @@ pub(super) fn targets(
 /// The agents `/new` starts by name (else Claude Code).
 const AGENTS: [&str; 3] = ["claude", "codex", "gemini"];
 
-/// `/new [AGENT] TASK`: the agent to start and its task.
-pub(super) fn new_agent(text: &str) -> Option<(String, String)> {
+/// `/new [AGENT] [-w BRANCH] TASK`.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct NewAgent {
+    pub agent: String,
+    pub worktree: Option<String>,
+    pub task: String,
+}
+
+/// `/new [AGENT] [-w BRANCH] TASK`: the agent to start (else Claude Code),
+/// the worktree to start it in, and its task.
+pub(super) fn new_agent(text: &str) -> Option<NewAgent> {
     let rest = text.trim_start().strip_prefix("/new")?;
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
-    let rest = rest.trim();
-    let (first, after) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
-    let (agent, task) = match AGENTS.iter().find(|a| a.eq_ignore_ascii_case(first)) {
-        Some(agent) => (agent.to_string(), after.trim()),
-        None => ("claude".to_owned(), rest),
+    let mut rest = rest.trim();
+    let word = |rest: &mut &str| -> String {
+        let (first, after) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let first = first.to_owned();
+        *rest = after.trim_start();
+        first
     };
-    Some((agent, task.to_owned()))
+    let mut agent = "claude".to_owned();
+    let mut worktree = None;
+    let first = rest.split_whitespace().next().unwrap_or_default();
+    if let Some(name) = AGENTS.iter().find(|a| a.eq_ignore_ascii_case(first)) {
+        word(&mut rest);
+        agent = name.to_string();
+    }
+    if matches!(rest.split_whitespace().next(), Some("-w" | "--worktree")) {
+        word(&mut rest);
+        worktree = Some(word(&mut rest)).filter(|w| !w.is_empty());
+    }
+    Some(NewAgent { agent, worktree, task: rest.trim().to_owned() })
 }
 
 /// Per agent's pane: its draft.
@@ -287,7 +308,8 @@ impl WindowView {
     /// `/new`: start an agent, in the chosen one's folder (on its machine),
     /// with the task; the chosen one's thread follows it (`back`: and gets
     /// its answer).
-    fn start_agent(&mut self, (agent, task): (String, String), back: bool, cx: &mut Context<Self>) {
+    fn start_agent(&mut self, new: NewAgent, back: bool, cx: &mut Context<Self>) {
+        let NewAgent { agent, worktree, task } = new;
         let Some(agents) = self.composing().and_then(|w| self.agents_in(w)) else { return };
         let chosen = agents.selected.and_then(|p| agents.agents.iter().find(|(a, _)| a.pane == p));
         let server = chosen.map_or(LOCAL, |(a, _)| ids::server_of(a.pane));
@@ -299,6 +321,7 @@ impl WindowView {
             split: None,
             target: None,
             workspace: None,
+            worktree,
             task: Some(task),
             thread: chosen.map(|(a, _)| ids::local_id(a.pane)),
             back: back && chosen.is_some(),
@@ -465,7 +488,7 @@ impl WindowView {
                     })
                     .child(if empty {
                         div().text_color(ui(0xffffff50)).child(format!(
-                            "{cursor}Message {title}… (/new claude TASK starts another agent here)"
+                            "{cursor}Message {title}… (/new claude [-w BRANCH] TASK starts another agent)"
                         ))
                     } else {
                         // The cursor as a bar; what an input method composes, before it.
@@ -523,10 +546,19 @@ mod tests {
 
     #[test]
     fn new_agents() {
-        let new = |t: &str| new_agent(t);
-        assert_eq!(new("/new codex fix it"), Some(("codex".into(), "fix it".into())));
-        assert_eq!(new("/new review the docs"), Some(("claude".into(), "review the docs".into())));
-        assert_eq!(new("/new"), Some(("claude".into(), String::new())));
+        let new = |t: &str| new_agent(t).map(|n| (n.agent, n.worktree, n.task));
+        let tree = |w: &str| Some(w.to_owned());
+        assert_eq!(new("/new codex fix it"), Some(("codex".into(), None, "fix it".into())));
+        assert_eq!(new("/new review it"), Some(("claude".into(), None, "review it".into())));
+        assert_eq!(
+            new("/new -w fix-login go"),
+            Some(("claude".into(), tree("fix-login"), "go".into()))
+        );
+        assert_eq!(
+            new("/new gemini --worktree docs/v2  tidy up"),
+            Some(("gemini".into(), tree("docs/v2"), "tidy up".into()))
+        );
+        assert_eq!(new("/new"), Some(("claude".into(), None, String::new())));
         assert_eq!(new("/newer x"), None);
         assert_eq!(new("hi /new x"), None);
     }

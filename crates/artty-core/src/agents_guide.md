@@ -33,7 +33,9 @@ can ask one of them something and get its answer. Your own pane's id is in
   new agent in its own tab with that task (codex, gemini too); it prints
   the new pane's id, and the task's ask id on stderr, for
   `artty ask --result ID`. You're its starter: your thread shows how its
-  task goes.
+  task goes. With `--worktree BRANCH` it works in a git worktree of its own
+  (`REPO.worktrees/BRANCH`, on that branch), for changes that shouldn't
+  meet yours until merged; it should commit what it wants kept.
 
 ## How to ask
 

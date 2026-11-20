@@ -386,9 +386,23 @@ opens a tab running the agent and gives it the task as its first message
 answer). Run from an agent's pane, that agent is the new one's starter:
 its thread gets the task's card, and the new agent's thread shows who
 started it. Agents started by agents go two deep at most. In the Agents
-view (or the thread panel), `/new [claude|codex|gemini] TASK` starts one in
-the chosen agent's folder, its task's card in the chosen agent's thread (⌘⏎:
-and its answer brought back there).
+view (or the thread panel), `/new [claude|codex|gemini] [-w BRANCH] TASK`
+starts one in the chosen agent's folder, its task's card in the chosen
+agent's thread (⌘⏎: and its answer brought back there).
+
+For agents working on the same repository side by side, `--worktree BRANCH`
+(`-w BRANCH` in `/new`) starts one in a git worktree of its own: a checkout
+beside the repository, in `REPO.worktrees/BRANCH`, on branch BRANCH (made
+from HEAD, or the branch as it is if there's one; an existing worktree of
+that name is used as it is). The tab is named after the branch, so `@BRANCH`
+reaches it, and it makes the worktree itself: what git says shows there.
+When the tab closes, the worktree is removed if git will without forcing it
+(nothing uncommitted, nothing untracked); the branch stays, with what was
+committed on it. Without it, agents share the folder they're started in.
+
+```sh
+artty new --agent claude --worktree fix-login --task "Fix the login redirect"
+```
 
 ### Files agents change
 
