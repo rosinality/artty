@@ -2108,6 +2108,17 @@ impl WindowView {
     }
 
     fn copy(&mut self, _: &Copy, _window: &mut Window, cx: &mut Context<Self>) {
+        // Text selected in an agent's thread, first; in Agents or Activity,
+        // only that (the terminal isn't what's shown).
+        if let Some(text) =
+            self.selected_text().filter(|_| self.showing_agents() || self.panel_shown())
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            return;
+        }
+        if self.showing_view() {
+            return;
+        }
         let Some(pane) = self.focused_id() else { return };
         let answer = app_state::query(Query::SelectionText { pane }, cx);
         cx.spawn(async move |_, cx| {

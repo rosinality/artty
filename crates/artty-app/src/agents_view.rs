@@ -29,6 +29,21 @@ pub(super) enum Shown {
     Panel,
 }
 
+/// Text selected in a message (offsets in its text as drawn), while
+/// dragging or after.
+pub(super) struct TextSel {
+    pub message: String,
+    pub anchor: usize,
+    pub head: usize,
+    pub dragging: bool,
+}
+
+impl TextSel {
+    fn range(&self) -> std::ops::Range<usize> {
+        self.anchor.min(self.head)..self.anchor.max(self.head)
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Agents {
     /// Every connected server's agents, pane ids tagged (see `ids`), with
@@ -43,6 +58,10 @@ pub(super) struct Agents {
     pub(super) thread_of: Option<PaneId>,
     /// Edited files opened to show their changes: (entry's seq, file).
     expanded: HashSet<(u64, usize)>,
+    /// Each message's pieces of text, as last drawn (by its id), to find
+    /// what's under the pointer; and what's selected in one, if anything.
+    pub(super) pieces: std::cell::RefCell<HashMap<String, crate::markdown::Pieces>>,
+    pub(super) text_sel: Option<TextSel>,
     /// Messages as markdown, parsed once (by their text's hash).
     parsed: std::cell::RefCell<HashMap<u64, std::rc::Rc<Vec<crate::markdown::Block>>>>,
     /// The chosen agent's terminal shown, live (else folded away, and not
@@ -181,8 +200,53 @@ impl WindowView {
             )
     }
 
-    /// A message, drawn as markdown (`id`: unique in the thread).
-    fn markdown(&self, agents: &Agents, text: &str, id: &str) -> gpui::Div {
+    /// What's selected in a message shown (Agents, or the panel), as it
+    /// reads.
+    pub(super) fn selected_text(&self) -> Option<String> {
+        [Shown::View, Shown::Panel].into_iter().find_map(|which| {
+            let agents = self.agents_in(which)?;
+            let sel = agents.text_sel.as_ref().filter(|s| s.anchor != s.head)?;
+            let pieces = agents.pieces.borrow().get(&sel.message)?.clone();
+            Some(pieces.text(sel.range())).filter(|t| !t.is_empty())
+        })
+    }
+
+    /// The pointer pressed in a message: a selection starts there (a
+    /// double click: its word; a triple: all of it).
+    fn press_text(
+        &mut self,
+        which: Shown,
+        message: &str,
+        pieces: &crate::markdown::Pieces,
+        event: &MouseDownEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(at) = pieces.offset_at(event.position) else { return };
+        let (anchor, head) = match event.click_count {
+            1 => (at, at),
+            2 => {
+                let text = pieces.text(0..pieces.len());
+                word_at(&text, at)
+            },
+            _ => (0, pieces.len()),
+        };
+        if let Some(agents) = self.agents_in_mut(which) {
+            let message = message.to_owned();
+            agents.text_sel = Some(TextSel { message, anchor, head, dragging: true });
+        }
+        cx.notify();
+    }
+
+    /// A message, drawn as markdown (`id`: unique in the thread), its text
+    /// selectable.
+    fn markdown(
+        &self,
+        agents: &Agents,
+        text: &str,
+        id: &str,
+        which: Shown,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
@@ -206,8 +270,79 @@ impl WindowView {
             rule: ui(0xffffff22).into(),
             font: ".SystemUIFont".into(),
             mono: self.metrics.font.family.clone(),
+            selection: ui(0x5c8ae6aa).into(),
         };
-        crate::markdown::view(&blocks, &look, &format!("md-{id}"))
+        let pieces = agents.pieces.borrow_mut().entry(id.to_owned()).or_default().clone();
+        let selected = agents
+            .text_sel
+            .as_ref()
+            .filter(|s| s.message == id && s.anchor != s.head)
+            .map(TextSel::range);
+        let view = crate::markdown::view(&blocks, &look, &format!("md-{id}"), &pieces, selected);
+        let message = id.to_owned();
+        let dragging = agents.text_sel.as_ref().is_some_and(|s| s.dragging && s.message == message);
+        let down = pieces.clone();
+        let here = message.clone();
+        let entity = cx.entity();
+        div()
+            .id(SharedString::from(format!("msg-{id}")))
+            .cursor_text()
+            .child(view)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.press_text(which, &here, &down, event, cx);
+                    cx.stop_propagation();
+                }),
+            )
+            // While dragging in it: the pointer anywhere in the window moves
+            // the selection's end, and letting go ends it.
+            .when(dragging, |d| {
+                d.child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_, _, window, _| {
+                            let (moved, up) = (entity.clone(), entity);
+                            let pieces = pieces.clone();
+                            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                                if !phase.bubble() {
+                                    return;
+                                }
+                                moved.update(cx, |this, cx| {
+                                    let Some(sel) = this
+                                        .agents_in_mut(which)
+                                        .and_then(|a| a.text_sel.as_mut())
+                                        .filter(|s| s.dragging)
+                                    else {
+                                        return;
+                                    };
+                                    if let Some(at) = pieces.offset_at(event.position)
+                                        && sel.head != at
+                                    {
+                                        sel.head = at;
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                                if !phase.bubble() {
+                                    return;
+                                }
+                                up.update(cx, |this, cx| {
+                                    if let Some(sel) =
+                                        this.agents_in_mut(which).and_then(|a| a.text_sel.as_mut())
+                                    {
+                                        sel.dragging = false;
+                                        cx.notify();
+                                    }
+                                });
+                            });
+                        },
+                    )
+                    .absolute()
+                    .size_0(),
+                )
+            })
     }
 
     /// Show (or fold away) the chosen agent's terminal.
@@ -432,6 +567,8 @@ impl WindowView {
         let Some(agents) = self.agents.as_mut() else { return };
         if agents.selected != Some(pane) {
             agents.selected = Some(pane);
+            agents.pieces.borrow_mut().clear();
+            agents.text_sel = None;
             agents.thread.clear();
             agents.thread_of = None;
             self.refresh_in(Shown::View, cx);
@@ -698,6 +835,8 @@ impl WindowView {
                                 agents,
                                 text,
                                 &seq.to_string(),
+                                which,
+                                cx,
                             ))),
                     )
                     .into_any_element(),
@@ -707,7 +846,7 @@ impl WindowView {
                     .flex_col()
                     .gap(px(3.))
                     .child(self.copyable(format!("{} · {time}", agent.agent), text, seq, cx))
-                    .child(bubble(false).child(self.markdown(agents, text, &seq.to_string())))
+                    .child(bubble(false).child(self.markdown(agents, text, &seq.to_string(), which, cx)))
                     .into_any_element(),
                 ThreadItem::Permission { id, summary, state, .. } => {
                     let pending = *state == ApprovalState::Pending;
@@ -825,7 +964,7 @@ impl WindowView {
                             seq,
                             cx,
                         ))
-                        .child(self.markdown(agents, text, &seq.to_string()))
+                        .child(self.markdown(agents, text, &seq.to_string(), which, cx))
                         .child(
                             div()
                                 .text_size(px(11.))
@@ -839,7 +978,7 @@ impl WindowView {
                                 .rounded(px(7.))
                                 .bg(ui(0xffffff0c))
                                 .text_color(ui(0xffffffd8))
-                                .child(self.markdown(agents, reply, &format!("{seq}-reply")))
+                                .child(self.markdown(agents, reply, &format!("{seq}-reply"), which, cx))
                         }))
                         .children(error.as_ref().map(|error| {
                             div().text_size(px(11.)).text_color(ui(DENY)).child(error.clone())
@@ -1060,6 +1199,17 @@ impl WindowView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&agents.scroll)
+                    // A press outside a message: what was selected isn't.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            if let Some(agents) = this.agents_in_mut(which)
+                                && agents.text_sel.take().is_some()
+                            {
+                                cx.notify();
+                            }
+                        }),
+                    )
                     // The entries are its own children: one can be scrolled to.
                     .flex()
                     .flex_col()
@@ -1225,6 +1375,46 @@ fn short_home(path: &std::path::Path) -> String {
     }
 }
 
+/// The word around `at` in `text` (letters, digits, `_`), as offsets; at a
+/// space or mark, the one character.
+fn word_at(text: &str, at: usize) -> (usize, usize) {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut at = at.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    let start =
+        text[..at].char_indices().rev().take_while(|(_, c)| word(*c)).last().map_or(at, |(i, _)| i);
+    let end =
+        text[at..].char_indices().find(|(_, c)| !word(*c)).map_or(text.len(), |(i, _)| at + i);
+    if start == end {
+        let next = text[at..].chars().next().map_or(at, |c| at + c.len_utf8());
+        return (at, next);
+    }
+    (start, end)
+}
+
 fn relative_width(fraction: f32) -> gpui::DefiniteLength {
     gpui::relative(fraction)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::word_at;
+
+    #[test]
+    fn words() {
+        let text = "fix next_url() now, 한글 ok";
+        let word = |at: usize| {
+            let (a, b) = word_at(text, at);
+            &text[a..b]
+        };
+        assert_eq!(word(5), "next_url");
+        assert_eq!(word(0), "fix");
+        // Just after a word: that word; at a mark: the mark.
+        assert_eq!(word(12), "next_url");
+        assert_eq!(word(13), ")");
+        assert_eq!(word(text.find('한').unwrap() + 1), "한글");
+        assert_eq!(word(text.len()), "ok");
+    }
 }

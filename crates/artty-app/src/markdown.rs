@@ -280,19 +280,136 @@ pub struct Look {
     pub rule: Hsla,
     pub font: SharedString,
     pub mono: SharedString,
+    /// What's selected, behind it.
+    pub selection: Hsla,
+}
+
+/// A piece of a message's text as drawn (a paragraph, a heading, a code
+/// block's line, a table's cell): where it starts in the message's text
+/// (the pieces' texts, a line each), what it says, and its layout, to find
+/// the character under the pointer.
+pub struct Piece {
+    pub offset: usize,
+    pub text: String,
+    pub layout: gpui::TextLayout,
+}
+
+/// A message's pieces, as last drawn (shared with its pointer's handlers).
+#[derive(Clone, Default)]
+pub struct Pieces(std::rc::Rc<std::cell::RefCell<Vec<Piece>>>);
+
+impl Pieces {
+    /// The character (as an offset in the message's text) nearest `point`,
+    /// once drawn.
+    pub fn offset_at(&self, point: gpui::Point<gpui::Pixels>) -> Option<usize> {
+        let pieces = self.0.borrow();
+        let bounds: Vec<gpui::Bounds<gpui::Pixels>> =
+            pieces.iter().map(|p| p.layout.bounds()).collect();
+        // The first line not above the point; of those side by side (a
+        // table's row), the one it's over, or nearest.
+        let row = bounds.iter().position(|b| point.y <= b.bottom())?;
+        let top = bounds[row].top();
+        let mut best = row;
+        for (i, b) in bounds.iter().enumerate().skip(row) {
+            if b.top() > top + px(1.) {
+                break;
+            }
+            if b.left() <= point.x {
+                best = i;
+            }
+        }
+        let piece = &pieces[best];
+        if point.y < bounds[best].top() {
+            return Some(piece.offset);
+        }
+        let index = match piece.layout.index_for_position(point) {
+            Ok(index) | Err(index) => index.min(piece.text.len()),
+        };
+        Some(piece.offset + index)
+    }
+
+    /// The pieces' text in `range` (the message's offsets), pieces a line each.
+    pub fn text(&self, range: Range<usize>) -> String {
+        let mut out = String::new();
+        for piece in self.0.borrow().iter() {
+            let end = piece.offset + piece.text.len();
+            if end < range.start || piece.offset > range.end {
+                continue;
+            }
+            let from = range.start.saturating_sub(piece.offset).min(piece.text.len());
+            let to = (range.end - piece.offset.min(range.end)).min(piece.text.len());
+            let (from, to) = (floor_char(&piece.text, from), floor_char(&piece.text, to));
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(&piece.text[from..to.max(from)]);
+        }
+        out
+    }
+
+    /// The end of the last piece: the whole message's text.
+    pub fn len(&self) -> usize {
+        self.0.borrow().last().map_or(0, |p| p.offset + p.text.len())
+    }
+}
+
+fn floor_char(text: &str, mut at: usize) -> usize {
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// What drawing a message needs: its look, where its pieces go, what's
+/// selected (offsets in its text), and the next piece's offset.
+struct Draw<'a> {
+    look: &'a Look,
+    pieces: Pieces,
+    selected: Option<Range<usize>>,
+    next: std::cell::Cell<usize>,
+}
+
+impl Draw<'_> {
+    /// A piece of `len` bytes is drawn: its offset (the next starts a line
+    /// on), and what of it is selected.
+    fn piece(&self, text: &str, layout: gpui::TextLayout) -> Option<Range<usize>> {
+        let offset = self.next.get();
+        self.next.set(offset + text.len() + 1);
+        self.pieces.0.borrow_mut().push(Piece { offset, text: text.to_owned(), layout });
+        let selected = self.selected.clone()?;
+        let start = selected.start.max(offset);
+        let end = selected.end.min(offset + text.len());
+        // (A line break selected through: its piece's end shows it.)
+        (start < end || (start == end && selected.start < offset && selected.end > end))
+            .then(|| start - offset..end - offset)
+    }
 }
 
 /// `blocks` drawn, a column of them; `id`: unique among what's drawn (for
-/// links' clicks).
-pub fn view(blocks: &[Block], look: &Look, id: &str) -> gpui::Div {
+/// links' clicks). The pieces drawn go to `pieces`; `selected`: what's
+/// selected, as offsets in the message's text.
+pub fn view(
+    blocks: &[Block],
+    look: &Look,
+    id: &str,
+    pieces: &Pieces,
+    selected: Option<Range<usize>>,
+) -> gpui::Div {
+    pieces.0.borrow_mut().clear();
+    let draw = Draw { look, pieces: pieces.clone(), selected, next: std::cell::Cell::new(0) };
+    blocks_view(blocks, &draw, id)
+}
+
+fn blocks_view(blocks: &[Block], draw: &Draw, id: &str) -> gpui::Div {
     div().flex().flex_col().gap(px(6.)).children(
-        blocks.iter().enumerate().map(|(i, block)| block_view(block, look, &format!("{id}-{i}"))),
+        blocks.iter().enumerate().map(|(i, block)| block_view(block, draw, &format!("{id}-{i}"))),
     )
 }
 
-fn block_view(block: &Block, look: &Look, id: &str) -> AnyElement {
+fn block_view(block: &Block, draw: &Draw, id: &str) -> AnyElement {
+    let look = draw.look;
     match block {
-        Block::Paragraph(spans) => text_view(spans, look, id).into_any_element(),
+        Block::Paragraph(spans) => text_view(spans, draw, id, false),
         Block::Heading(level, spans) => {
             let size = match level {
                 1 => 16.,
@@ -303,7 +420,7 @@ fn block_view(block: &Block, look: &Look, id: &str) -> AnyElement {
             div()
                 .pt(px(2.))
                 .text_size(px(size))
-                .child(text_view(&bold, look, id))
+                .child(text_view(&bold, draw, id, false))
                 .into_any_element()
         },
         Block::Code(code) => {
@@ -318,11 +435,11 @@ fn block_view(block: &Block, look: &Look, id: &str) -> AnyElement {
                 .py(px(6.))
                 .rounded(px(6.))
                 .bg(look.code_bg)
-                .font_family(look.mono.clone())
                 .text_size(px(12.))
-                .children(code.lines().map(|line| {
+                .children(code.lines().enumerate().map(|(n, line)| {
+                    let span = Span { text: line.to_owned(), code: true, ..Span::default() };
                     // (An empty line keeps its height.)
-                    div().min_h(px(16.)).child(line.to_owned())
+                    div().min_h(px(16.)).child(text_view(&[span], draw, &format!("{id}-{n}"), true))
                 }))
                 // On hover: Copy, the code alone.
                 .child(
@@ -333,7 +450,6 @@ fn block_view(block: &Block, look: &Look, id: &str) -> AnyElement {
                         .right(px(4.))
                         .px(px(6.))
                         .rounded(px(4.))
-                        .font_family(look.font.clone())
                         .text_size(px(11.))
                         .text_color(look.dim)
                         .bg(look.code_bg)
@@ -341,6 +457,7 @@ fn block_view(block: &Block, look: &Look, id: &str) -> AnyElement {
                         .group_hover(group, |s| s.opacity(1.))
                         .hover(|d| d.text_color(look.text))
                         .child("Copy")
+                        .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(move |_, _, cx| {
                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(copied.clone()))
                         }),
@@ -362,15 +479,14 @@ fn block_view(block: &Block, look: &Look, id: &str) -> AnyElement {
                     .flex()
                     .gap(px(6.))
                     .child(div().flex_none().min_w(px(12.)).text_color(look.dim).child(marker))
-                    .child(view(&item.blocks, look, &format!("{id}-{n}")).flex_1().min_w_0())
+                    .child(blocks_view(&item.blocks, draw, &format!("{id}-{n}")).flex_1().min_w_0())
             }))
             .into_any_element(),
         Block::Quote(blocks) => div()
             .pl(px(10.))
             .border_l_2()
             .border_color(look.rule)
-            .text_color(look.dim)
-            .child(view(blocks, look, id))
+            .child(blocks_view(blocks, draw, id))
             .into_any_element(),
         Block::Rule => div().h(px(1.)).my(px(4.)).bg(look.rule).into_any_element(),
         Block::Table { head, rows } => {
@@ -383,8 +499,9 @@ fn block_view(block: &Block, look: &Look, id: &str) -> AnyElement {
                         };
                         div().flex_1().min_w_0().px(px(6.)).py(px(3.)).child(text_view(
                             &cell,
-                            look,
+                            draw,
                             &format!("{id}-{r}-{c}"),
+                            false,
                         ))
                     }),
                 )
@@ -411,8 +528,34 @@ trait WhenNotEmpty: Sized {
 
 impl WhenNotEmpty for gpui::Div {}
 
+/// `runs` with `selected` (bytes) marked: split where it starts and ends.
+fn with_selection(runs: Vec<TextRun>, selected: Range<usize>, color: Hsla) -> Vec<TextRun> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for run in runs {
+        let (start, end) = (at, at + run.len);
+        at = end;
+        let cuts = [start, selected.start.clamp(start, end), selected.end.clamp(start, end), end];
+        for pair in cuts.windows(2) {
+            let (from, to) = (pair[0], pair[1]);
+            if from == to {
+                continue;
+            }
+            let inside = from >= selected.start && to <= selected.end;
+            out.push(TextRun {
+                len: to - from,
+                background_color: if inside { Some(color) } else { run.background_color },
+                ..run.clone()
+            });
+        }
+    }
+    out
+}
+
 /// Spans as one piece of text, each set as it is; links open with a click.
-fn text_view(spans: &[Span], look: &Look, id: &str) -> AnyElement {
+/// `block_code`: a code block's line (its block has the background).
+fn text_view(spans: &[Span], draw: &Draw, id: &str, block_code: bool) -> AnyElement {
+    let look = draw.look;
     let mut text = String::new();
     let mut runs = Vec::new();
     let mut links: Vec<(Range<usize>, String)> = Vec::new();
@@ -434,7 +577,7 @@ fn text_view(spans: &[Span], look: &Look, id: &str) -> AnyElement {
             len: span.text.len(),
             font: Font { ..font },
             color,
-            background_color: span.code.then_some(look.code_bg),
+            background_color: (span.code && !block_code).then_some(look.code_bg),
             underline: span.link.as_ref().map(|_| UnderlineStyle {
                 thickness: px(1.),
                 color: Some(look.link),
@@ -448,7 +591,15 @@ fn text_view(spans: &[Span], look: &Look, id: &str) -> AnyElement {
             links.push((start..text.len(), url.clone()));
         }
     }
-    let styled = StyledText::new(text).with_runs(runs);
+    let probe = StyledText::new(text.clone());
+    let layout = probe.layout().clone();
+    let selected = draw.piece(&text, layout.clone());
+    let runs = match selected {
+        Some(range) if !text.is_empty() => with_selection(runs, range, look.selection),
+        _ => runs,
+    };
+    // (Its layout stays the one recorded.)
+    let styled = probe.with_runs(runs);
     if links.is_empty() {
         return styled.into_any_element();
     }
@@ -505,6 +656,22 @@ mod tests {
         assert_eq!(head.iter().map(|c| plain(c)).collect::<Vec<_>>(), ["a", "b"]);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].iter().map(|c| plain(c)).collect::<Vec<_>>(), ["1", "2"]);
+    }
+
+    #[test]
+    fn selected_text_across_pieces() {
+        let pieces = Pieces::default();
+        for (offset, text) in [(0, "Fixed the bug."), (15, "cargo test"), (26, "한글 too")] {
+            let layout = gpui::TextLayout::default();
+            pieces.0.borrow_mut().push(Piece { offset, text: text.into(), layout });
+        }
+        assert_eq!(pieces.len(), 26 + "한글 too".len());
+        assert_eq!(pieces.text(6..9), "the");
+        // Over a piece's end: its line ends, the next goes on.
+        assert_eq!(pieces.text(10..20), "bug.\ncargo");
+        assert_eq!(pieces.text(0..pieces.len()), "Fixed the bug.\ncargo test\n한글 too");
+        // (Inside a character: from its start.)
+        assert_eq!(pieces.text(27..32), "한글");
     }
 
     #[test]

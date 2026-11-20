@@ -113,6 +113,8 @@ impl WindowView {
             panel.agents.thread.clear();
             panel.agents.asks.clear();
             panel.agents.thread_of = None;
+            panel.agents.pieces.borrow_mut().clear();
+            panel.agents.text_sel = None;
             panel.typing = false;
         }
         if self.panel_shown() {
