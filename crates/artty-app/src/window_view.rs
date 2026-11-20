@@ -44,6 +44,8 @@ pub mod login_sheet;
 mod palette;
 #[path = "pane_actions.rs"]
 mod pane_actions;
+#[path = "queue_view.rs"]
+mod queue_view;
 #[path = "search_view.rs"]
 mod search_view;
 
@@ -417,6 +419,10 @@ pub struct WindowView {
     copy_mode: Option<PaneId>,
     /// A short message over the terminal, and when it appeared.
     toast: Option<(SharedString, Instant)>,
+    /// "Needs you": every card shown (else the first few), and the
+    /// permission request whose "always" options are open.
+    queue_all: bool,
+    queue_always: Option<(ServerId, artty_core::protocol::QueueKind, u64)>,
     /// Questions ssh asks while logging in, the first shown.
     asks: Vec<ask_sheet::AskSheet>,
     /// A machine's login needing you, or why it couldn't connect.
@@ -561,6 +567,8 @@ impl WindowView {
             activity: None,
             copy_mode: None,
             toast: None,
+            queue_all: false,
+            queue_always: None,
             asks: Vec::new(),
             login: None,
             files: None,
@@ -3405,6 +3413,7 @@ impl WindowView {
                     .child(div().text_xs().text_color(ui(0xffffff66)).child("⇧⌘A"))
                     .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))),
             )
+            .when_some(self.needs_you(cx), |d, section| d.child(section))
             .when(!app_state::several_servers(cx), |d| d.child(self.sidebar_heading(cx)))
             .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(1.)).overflow_y_scroll().children(rows))
             .when_some(self.status_row(cx), |d, row| d.child(row))

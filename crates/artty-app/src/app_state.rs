@@ -202,6 +202,9 @@ pub struct Shared {
     pub panes: HashMap<PaneId, PaneState>,
     /// Windows' status lines (`[status]`), those not empty.
     pub statuses: HashMap<WindowId, artty_core::protocol::StatusLine>,
+    /// What needs the user, each server's as it last sent it (pane ids
+    /// tagged; see [`queue`]).
+    queues: HashMap<ServerId, Vec<artty_core::protocol::QueueItem>>,
     /// Visual bells: when each pane last rang.
     pub flashes: HashMap<PaneId, Instant>,
     /// Typing shown before its echo comes back, per pane (see `echo`).
@@ -319,6 +322,7 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         screens: HashMap::new(),
         panes: HashMap::new(),
         statuses: HashMap::new(),
+        queues: HashMap::new(),
         flashes: HashMap::new(),
         echoes: HashMap::new(),
         windows: HashMap::new(),
@@ -705,8 +709,10 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                     view.update(cx, |_, cx| cx.notify());
                 }
             },
-            // Shown once the sidebar has a queue.
-            Some(ServerExtension::Queue(_)) => {},
+            Some(ServerExtension::Queue(update)) => {
+                cx.global_mut::<Shared>().queues.insert(server, update.items);
+                cx.refresh_windows();
+            },
             None => {},
         },
         // What the server sends and reads: every kind the app shows, so far.
@@ -946,6 +952,32 @@ pub fn control_on(server: ServerId, request: Request, cx: &mut App) -> oneshot::
     cx.global_mut::<Shared>().controls.insert(id, waiter);
     send_to(server, ClientMessage::Control { id, request: encode_request(&request) }, cx);
     answer
+}
+
+/// What needs the user, from every server connected now: permission
+/// requests (oldest first), agents waiting, then replies (newest first).
+pub fn queue(cx: &App) -> Vec<artty_core::protocol::QueueItem> {
+    use artty_core::protocol::QueueKind;
+    let shared = cx.global::<Shared>();
+    let connected = |server: &ServerId| {
+        shared.connections.get(*server as usize).is_some_and(|c| c.status == Status::Connected)
+    };
+    let mut items: Vec<_> = shared
+        .queues
+        .iter()
+        .filter(|(server, _)| connected(server))
+        .flat_map(|(_, items)| items.iter().cloned())
+        .collect();
+    let rank = |kind: QueueKind| match kind {
+        QueueKind::Approval => 0,
+        QueueKind::Waiting => 1,
+        QueueKind::Reply => 2,
+    };
+    items.sort_by_key(|item| {
+        let since = item.since_ms as i64;
+        (rank(item.kind), if item.kind == QueueKind::Reply { -since } else { since })
+    });
+    items
 }
 
 /// Bring the view of the server's `window` forward.
