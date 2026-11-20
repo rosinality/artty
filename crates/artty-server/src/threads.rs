@@ -127,6 +127,35 @@ impl Threads {
         newer.into_iter().skip(skip).cloned().collect()
     }
 
+    /// Entries matching `text` (case ignored unless it has capitals), in
+    /// every thread or `pane`'s, newest first, `most` at most: each with
+    /// what it is and the text around the match.
+    pub fn search(
+        &self,
+        text: &str,
+        pane: Option<PaneId>,
+        most: usize,
+    ) -> Vec<(PaneId, &ThreadEntry, &'static str, String)> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Vec::new();
+        }
+        let mut found: Vec<(PaneId, &ThreadEntry, &'static str, String)> = self
+            .panes
+            .iter()
+            .filter(|(p, _)| pane.is_none_or(|pane| **p == pane))
+            .flat_map(|(&p, thread)| thread.iter().map(move |e| (p, e)))
+            .filter_map(|(p, entry)| {
+                let (kind, said) = searchable(&entry.item)?;
+                let snippet = snippet(&said, text)?;
+                Some((p, entry, kind, snippet))
+            })
+            .collect();
+        found.sort_by_key(|(_, e, _, _)| std::cmp::Reverse(e.seq));
+        found.truncate(most);
+        found
+    }
+
     /// The newest entry's `seq` (0: none yet).
     pub fn newest(&self) -> u64 {
         self.newest
@@ -227,6 +256,57 @@ impl Threads {
     pub fn last_ms(&self, pane: PaneId) -> Option<u64> {
         self.panes.get(&pane)?.back().map(|e| e.at_ms)
     }
+}
+
+/// What an entry says that a search looks in, and what it is.
+fn searchable(item: &ThreadItem) -> Option<(&'static str, String)> {
+    Some(match item {
+        ThreadItem::Prompt { text, .. } => ("asked", text.clone()),
+        ThreadItem::Reply { text } => ("answered", text.clone()),
+        ThreadItem::Handoff { text, reply, .. } => {
+            ("handed off", format!("{text}\n{}", reply.as_deref().unwrap_or_default()))
+        },
+        ThreadItem::Permission { summary, .. } => ("permission", summary.clone()),
+        ThreadItem::Waiting { message } => ("waiting", message.clone()),
+        ThreadItem::Edited { files } => {
+            ("edited", files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>().join("\n"))
+        },
+        ThreadItem::Overlap { file, .. } => ("overlap", file.clone()),
+        ThreadItem::Interrupted { reason } => ("stopped", reason.clone()),
+        ThreadItem::Session { .. } => return None,
+    })
+}
+
+/// The line of `said` where `text` is (case ignored unless it has
+/// capitals), spaces run together, shortened around it; none if it isn't.
+pub fn snippet(said: &str, text: &str) -> Option<String> {
+    const AROUND: usize = 60;
+    let exact = text.chars().any(char::is_uppercase);
+    let fold = |s: &str| if exact { s.to_owned() } else { s.to_lowercase() };
+    let needle = fold(text);
+    let line = said.lines().find(|line| fold(line).contains(&needle))?;
+    let line: String = line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let folded: Vec<char> = fold(&line).chars().collect();
+    let chars: Vec<char> = line.chars().collect();
+    // (Folding that changes lengths: from the start.)
+    let at = (folded.len() == chars.len())
+        .then(|| {
+            let hay: String = folded.iter().collect();
+            hay.find(&needle).map(|byte| hay[..byte].chars().count())
+        })
+        .flatten()
+        .unwrap_or(0);
+    let start = at.saturating_sub(AROUND);
+    let end = (at + needle.chars().count() + AROUND).min(chars.len());
+    let mut out = String::new();
+    if start > 0 {
+        out.push('…');
+    }
+    out.extend(&chars[start..end]);
+    if end < chars.len() {
+        out.push('…');
+    }
+    Some(out)
 }
 
 /// What a hook event adds to a thread, if anything. Permission prompts come
@@ -335,6 +415,35 @@ mod tests {
         assert_eq!(texts(threads.entries(2, Some(seqs[2]), None)), ["3", "4"]);
         assert_eq!(texts(threads.entries(2, None, Some(2))), ["3", "4"]);
         assert!(threads.entries(3, None, None).is_empty());
+    }
+
+    #[test]
+    fn searched() {
+        let mut threads = Threads::default();
+        threads.add(
+            1,
+            ThreadItem::Prompt { text: "Fix the Login\nredirect".into(), ask: None, from: None },
+        );
+        threads.add(2, ThreadItem::Reply { text: "Done: the login page redirects home.".into() });
+        threads.add(2, ThreadItem::Session { event: "login".into() });
+        let found: Vec<(PaneId, &str, String)> = threads
+            .search("login", None, 10)
+            .into_iter()
+            .map(|(p, _, kind, snippet)| (p, kind, snippet))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (2, "answered", "Done: the login page redirects home.".to_owned()),
+                (1, "asked", "Fix the Login".to_owned()),
+            ]
+        );
+        assert_eq!(threads.search("Login", None, 10).len(), 1, "capitals: exact");
+        assert_eq!(threads.search("login", Some(1), 10).len(), 1);
+        assert!(threads.search("  ", None, 10).is_empty());
+        let long = format!("{} needle {}", "a".repeat(100), "b".repeat(100));
+        let shown = snippet(&long, "needle").unwrap();
+        assert!(shown.starts_with('…') && shown.ends_with('…') && shown.contains("needle"));
     }
 
     #[test]

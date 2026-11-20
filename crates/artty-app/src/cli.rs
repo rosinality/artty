@@ -126,6 +126,9 @@ artty, your own pane is found automatically:
                                          its permission requests and sessions,
                                          oldest first (the last N; or after an
                                          entry's SEQ, from --json)
+  artty thread --search TEXT [--tab N] [--json]
+                                         every agent's thread (or pane N's)
+                                         searched: newest matches first
   artty approve --hook --agent NAME      (an agent's PermissionRequest hook)
   artty new [--split right|down] [--tab N] [--cwd DIR] [--title T]
             [--workspace NAME] [--background] [-- COMMAND...]
@@ -307,6 +310,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--bring-back" => _ = flags.insert("bring-back", args.value("--bring-back")?),
             "--task" => _ = flags.insert("task", args.value("--task")?),
             "--worktree" => _ = flags.insert("worktree", args.value("--worktree")?),
+            "--search" => _ = flags.insert("search", args.value("--search")?),
             "--always" => _ = flags.insert("always", args.value("--always")?),
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
             "--after" => _ = flags.insert("after", args.value("--after")?),
@@ -652,6 +656,13 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                     .map(|v| v.parse().map_err(|_| format!("--{name}: not a number")))
                     .transpose()
             };
+            if let Some(text) = flags.get("search") {
+                // Every agent's thread, unless one's named.
+                return print_response(
+                    send(&Request::ThreadSearch { text: text.clone(), tab }, None)?,
+                    switches.contains("json"),
+                );
+            }
             Request::Thread {
                 tab: tab.or_else(own_tab).ok_or("thread: which pane? (--tab N)")?,
                 after: number("after")?,
@@ -797,6 +808,23 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         Response::Tab { id } => {
             println!("{id}");
             Ok(0)
+        },
+        Response::ThreadHits { hits } if json => {
+            println!("{}", serde_json::to_string_pretty(&hits).unwrap_or_default());
+            Ok(0)
+        },
+        Response::ThreadHits { hits } => {
+            for hit in &hits {
+                println!(
+                    "{}  pane {:>3}  {} · {}: {}",
+                    clock(hit.at_ms),
+                    hit.pane,
+                    hit.title,
+                    hit.kind,
+                    hit.snippet
+                );
+            }
+            Ok(if hits.is_empty() { 1 } else { 0 })
         },
         Response::Events { events, .. } => {
             for event in &events {

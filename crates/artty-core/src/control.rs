@@ -405,6 +405,13 @@ pub enum Request {
         #[serde(default)]
         limit: Option<usize>,
     },
+    /// Every pane's thread (or `tab`'s) searched for `text` (case ignored
+    /// unless it has capitals): the newest matches first.
+    ThreadSearch {
+        text: String,
+        #[serde(default)]
+        tab: Option<SessionId>,
+    },
     /// Wait for the first of these asks to be over (`all`: every one), at
     /// most `timeout_secs`; how they all are then.
     AskWait {
@@ -425,6 +432,22 @@ pub enum Request {
         #[serde(default)]
         timeout_secs: Option<u64>,
     },
+}
+
+/// A thread entry that matched a search: where, and the text around it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThreadHit {
+    pub pane: SessionId,
+    /// Its tab's title, and its agent (if one runs there now).
+    pub title: String,
+    #[serde(default)]
+    pub agent: Option<String>,
+    pub seq: u64,
+    pub at_ms: u64,
+    /// What the entry is: asked, answered, handed off, permission, ...
+    pub kind: String,
+    /// The matching text's line, shortened around the match.
+    pub snippet: String,
 }
 
 /// A thread entry, and whose thread it's in.
@@ -789,6 +812,9 @@ pub enum Response {
     },
     Agents {
         agents: Vec<AgentInfo>,
+    },
+    ThreadHits {
+        hits: Vec<ThreadHit>,
     },
     /// Thread entries, oldest first; `last`: where they're up to (the next
     /// `Events` goes on from there).

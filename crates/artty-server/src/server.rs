@@ -3236,6 +3236,30 @@ impl Server {
                 agents.sort_by_key(|a| a.pane);
                 Response::Agents { agents }
             },
+            Request::ThreadSearch { text, tab } => {
+                let hits = self
+                    .threads
+                    .search(&text, tab, 50)
+                    .into_iter()
+                    .map(|(pane, entry, kind, snippet)| {
+                        let shown = self.panes.get(&pane);
+                        let agent = shown.and_then(|p| match &p.status {
+                            Status::Agent { name, .. } => Some(name.clone()),
+                            _ => p.agent_name(),
+                        });
+                        artty_core::control::ThreadHit {
+                            pane,
+                            title: shown.map(|p| p.title()).unwrap_or_default(),
+                            agent,
+                            seq: entry.seq,
+                            at_ms: entry.at_ms,
+                            kind: kind.to_owned(),
+                            snippet,
+                        }
+                    })
+                    .collect();
+                Response::ThreadHits { hits }
+            },
             Request::Thread { tab, after, limit } => {
                 let pane = self.panes.get(&tab).ok_or(format!("no pane {tab}"))?;
                 let agent = match &pane.status {

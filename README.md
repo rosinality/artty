@@ -353,7 +353,12 @@ window's right edge with the files drawer: opening one closes the other.
 ```sh
 artty agents                          # pane, agent, state, workspace · tab
 artty thread --tab 4 --lines 20       # its last 20 entries
+artty thread --search "login"         # every agent's thread, newest matches first
 ```
+
+Search Everything (⇧⌘F) searches agents' threads too, first: what they
+were asked and answered, handoffs, permission requests, files changed. A
+match chosen opens its agent in the Agents view, at that entry.
 
 ### Agents asking agents
 

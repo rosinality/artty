@@ -36,7 +36,8 @@ own pane's id is in `$ARTTY_SESSION_ID`.
   those after one, and exits.
 - `artty thread --tab N --lines 20` shows agent N's last 20 thread entries:
   what it was asked (and by whom), what it answered, its permission
-  requests, the files it changed.
+  requests, the files it changed. `artty thread --search TEXT` searches
+  every agent's thread (newest matches first; `--tab N` for one).
 - `artty new --background --agent claude --cwd DIR --task "..."` starts an
   agent (codex, gemini too) in a new tab with that task; it prints the new
   pane's id, and the task's ask id on stderr. With `--worktree BRANCH`, it

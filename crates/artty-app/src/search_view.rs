@@ -4,6 +4,7 @@
 //! A line found goes to its pane, selected; a conversation found carries on
 //! in a new tab, in its directory.
 
+use artty_core::control::ThreadHit;
 use artty_core::protocol::{OutputHit, SessionHit};
 
 use super::*;
@@ -16,12 +17,15 @@ pub(super) struct SearchAll {
     /// Which search the results are of (searches overtaken are dropped).
     generation: u64,
     searching: usize,
+    /// Agents' threads' entries (pane ids tagged), newest first.
+    threads: Vec<ThreadHit>,
     lines: Vec<OutputHit>,
     sessions: Vec<(ServerId, SessionHit)>,
     selected: usize,
 }
 
 enum Found<'a> {
+    Thread(&'a ThreadHit),
     Line(&'a OutputHit),
     Session(ServerId, &'a SessionHit),
 }
@@ -32,9 +36,10 @@ impl SearchAll {
     }
 
     fn rows(&self) -> Vec<Found<'_>> {
-        self.lines
+        self.threads
             .iter()
-            .map(Found::Line)
+            .map(Found::Thread)
+            .chain(self.lines.iter().map(Found::Line))
             .chain(self.sessions.iter().map(|(server, hit)| Found::Session(*server, hit)))
             .collect()
     }
@@ -107,6 +112,7 @@ impl WindowView {
                 query: String::new(),
                 generation: 0,
                 searching: 0,
+                threads: Vec::new(),
                 lines: Vec::new(),
                 sessions: Vec::new(),
                 selected: 0,
@@ -141,6 +147,7 @@ impl WindowView {
     fn run_search_all(&mut self, cx: &mut Context<Self>) {
         let Some(search) = self.search_all.as_mut() else { return };
         let text = search.query.trim().to_owned();
+        search.threads.clear();
         search.lines.clear();
         search.sessions.clear();
         search.selected = 0;
@@ -154,8 +161,31 @@ impl WindowView {
             .filter(|(_, _, status)| *status == app_state::Status::Connected)
             .map(|(server, _, _)| server)
             .collect();
-        search.searching = servers.len() * 2;
+        search.searching = servers.len() * 3;
         for server in servers {
+            let request = Request::ThreadSearch { text: text.clone(), tab: None };
+            let threads = app_state::control_on(server, request, cx);
+            cx.spawn(async move |this, cx| {
+                let found = threads.await;
+                let _ = this.update(cx, |this, cx| {
+                    let Some(search) =
+                        this.search_all.as_mut().filter(|s| s.generation == generation)
+                    else {
+                        return;
+                    };
+                    search.searching -= 1;
+                    // (A server from before thread search: none.)
+                    if let Ok(Response::ThreadHits { hits }) = found {
+                        search.threads.extend(hits.into_iter().map(|mut hit| {
+                            hit.pane = ids::tag(server, hit.pane);
+                            hit
+                        }));
+                        search.threads.sort_by_key(|hit| std::cmp::Reverse(hit.at_ms));
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
             let lines = app_state::query_on(server, Query::SearchOutput { text: text.clone() }, cx);
             let sessions =
                 app_state::query_on(server, Query::SearchSessions { text: text.clone() }, cx);
@@ -225,6 +255,11 @@ impl WindowView {
     fn choose_found(&mut self, cx: &mut Context<Self>) {
         let Some(search) = self.search_all.as_ref() else { return };
         match search.rows().get(search.selected) {
+            Some(Found::Thread(hit)) => {
+                let (pane, seq) = (hit.pane, hit.seq);
+                self.search_all = None;
+                self.reveal_in_thread(pane, seq, cx);
+            },
             Some(Found::Line(hit)) => {
                 let (pane, line, column, length) = (hit.pane, hit.line, hit.column, hit.length);
                 // Out of sight: its server brings it into view first.
@@ -297,11 +332,33 @@ impl WindowView {
                 }))
         };
         let mut items: Vec<gpui::AnyElement> = Vec::new();
+        if !search.threads.is_empty() {
+            items.push(
+                section(format!("IN AGENT THREADS · {}", search.threads.len())).into_any_element(),
+            );
+        }
+        for (i, hit) in search.threads.iter().enumerate() {
+            let mut place: Vec<String> = Vec::new();
+            if several {
+                place.extend(names.get(&ids::server_of(hit.pane)).cloned());
+            }
+            place.push(hit.title.clone());
+            place.push(hit.kind.clone());
+            place.push(ago(hit.at_ms / 1000));
+            let mark = agent_mark(hit.agent.as_deref().unwrap_or_default());
+            let lines = vec![
+                marked_line(hit.snippet.clone(), occurrences(&hit.snippet, &search.query))
+                    .text_color(ui(0xffffffe0)),
+                Self::one_line(place.join(" · ")).text_size(px(11.)).text_color(ui(0xffffff70)),
+            ];
+            items.push(row(i, mark, lines).into_any_element());
+        }
         if !search.lines.is_empty() {
             items
                 .push(section(format!("IN TERMINALS · {}", search.lines.len())).into_any_element());
         }
-        for (i, hit) in search.lines.iter().enumerate() {
+        for (j, hit) in search.lines.iter().enumerate() {
+            let i = search.threads.len() + j;
             let state = self.pane_state(hit.pane, cx);
             let mut place: Vec<String> = Vec::new();
             if several {
@@ -341,7 +398,7 @@ impl WindowView {
             );
         }
         for (j, (server, hit)) in search.sessions.iter().enumerate() {
-            let i = search.lines.len() + j;
+            let i = search.threads.len() + search.lines.len() + j;
             let mut place = vec![hit.agent.clone()];
             if several {
                 place.extend(names.get(server).cloned());
@@ -361,7 +418,9 @@ impl WindowView {
             items.push(row(i, agent_mark(&hit.agent), lines).into_any_element());
         }
         let status = match (search.searching, items.is_empty(), search.query.trim().is_empty()) {
-            (_, _, true) => Some("What every pane printed, and agents' conversations"),
+            (_, _, true) => {
+                Some("Agents' threads, what every pane printed, and agents' conversations")
+            },
             (n, _, _) if n > 0 => Some("Searching…"),
             (_, true, _) => Some("Nothing found"),
             _ => None,
@@ -399,7 +458,7 @@ impl WindowView {
                         ui(0xffffffee)
                     })
                     .child(if search.query.is_empty() && marked.is_empty() {
-                        "Search all terminals and agent sessions…".to_owned()
+                        "Search agents' threads, terminals and sessions…".to_owned()
                     } else {
                         format!("{}{marked}▏", search.query)
                     }),

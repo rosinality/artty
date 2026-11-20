@@ -93,3 +93,40 @@ fn turns_asks_and_permissions_in_order() {
     assert_eq!(text.lines().count(), 2, "{text}");
     assert!(text.contains("⚑ permission") && text.contains("✕ interrupted"), "{text}");
 }
+
+#[test]
+fn searched_across_agents() {
+    let scratch = Scratch::new();
+    let (api, web) = (scratch.agent("0.3"), scratch.agent("0.3"));
+    let out = scratch.ask(&["--tab", &api, "--timeout", "20", "fix the Login redirect"]);
+    assert_eq!(stdout(&out), "echo: fix the Login redirect", "{}", stderr(&out));
+    let out = scratch.ask(&["--tab", &web, "--timeout", "20", "the login form's colors"]);
+    assert_eq!(stdout(&out), "echo: the login form's colors", "{}", stderr(&out));
+
+    let out = scratch.artty(&["thread", "--search", "login", "--json"]);
+    let hits: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let found: Vec<(String, String)> = hits
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| (h["pane"].to_string(), h["kind"].as_str().unwrap().to_owned()))
+        .collect();
+    // Newest first: web's reply and prompt, then api's.
+    assert_eq!(
+        found,
+        [
+            (web.clone(), "answered".to_owned()),
+            (web.clone(), "asked".to_owned()),
+            (api.clone(), "answered".to_owned()),
+            (api.clone(), "asked".to_owned()),
+        ]
+    );
+    // Capitals: exact; one agent's; none.
+    let out = scratch.artty(&["thread", "--search", "Login", "--json"]);
+    let hits: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    assert_eq!(hits.as_array().unwrap().len(), 2, "{hits}");
+    let out = scratch.artty(&["thread", "--search", "login", "--tab", &api]);
+    assert_eq!(stdout(&out).lines().count(), 2, "{}", stdout(&out));
+    let out = scratch.artty(&["thread", "--search", "nowhere"]);
+    assert_eq!(out.status.code(), Some(1));
+}

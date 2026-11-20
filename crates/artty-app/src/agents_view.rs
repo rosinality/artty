@@ -15,6 +15,8 @@ const THREAD: usize = 400;
 const LONG: usize = 6000;
 
 const WAITING: u32 = 0xe0af68ff;
+/// How long an entry searched for stands out.
+const FLASH_FOUND: Duration = Duration::from_secs(3);
 const DONE: u32 = 0x9ece6aff;
 const BUSY: u32 = 0x8fb4ffff;
 const DENY: u32 = 0xf7768eff;
@@ -41,6 +43,10 @@ pub(super) struct Agents {
     pub(super) thread_of: Option<PaneId>,
     /// Edited files opened to show their changes: (entry's seq, file).
     expanded: HashSet<(u64, usize)>,
+    /// An entry to scroll to once the thread's in (one searched for), and
+    /// the one shown standing out, since when.
+    reveal: Option<u64>,
+    flash: Option<(u64, Instant)>,
     scroll: gpui::ScrollHandle,
     loading: bool,
     pub(super) loaded: bool,
@@ -268,7 +274,25 @@ impl WindowView {
                     agents.thread_of = Some(pane);
                     agents.thread = entries;
                     agents.asks = asks;
-                    if grew {
+                    // To the entry searched for, else (anything new) the end.
+                    // (Once: one older than the entries shown isn't there.)
+                    let wanted = agents.reveal.take();
+                    let found = wanted.and_then(|seq| {
+                        let index = agents.thread.iter().position(|e| e.seq == seq);
+                        Some(seq).zip(index)
+                    });
+                    if let Some((seq, index)) = found {
+                        // Once laid out as it is now (else the entries'
+                        // places are those of what was shown before).
+                        let scroll = agents.scroll.clone();
+                        cx.spawn(async move |this, cx| {
+                            cx.background_executor().timer(Duration::from_millis(50)).await;
+                            scroll.scroll_to_top_of_item(index);
+                            let _ = this.update(cx, |_, cx| cx.notify());
+                        })
+                        .detach();
+                        agents.flash = Some((seq, Instant::now()));
+                    } else if grew {
                         agents.scroll.scroll_to_bottom();
                     }
                 }
@@ -288,6 +312,20 @@ impl WindowView {
             });
         })
         .detach();
+    }
+
+    /// Show Agents with `pane`'s agent chosen, scrolled to its entry `seq`.
+    pub(super) fn reveal_in_thread(&mut self, pane: PaneId, seq: u64, cx: &mut Context<Self>) {
+        if !self.showing_agents() {
+            self.toggle_agents(cx);
+        }
+        self.select_agent(pane, cx);
+        if let Some(agents) = self.agents.as_mut() {
+            agents.reveal = Some(seq);
+            // Already in: the next refresh scrolls there.
+            agents.thread_of = None;
+        }
+        self.refresh_in(Shown::View, cx);
     }
 
     fn select_agent(&mut self, pane: PaneId, cx: &mut Context<Self>) {
@@ -838,7 +876,13 @@ impl WindowView {
                     note(format!("stopped · {reason}"), DENY).into_any_element()
                 },
             };
-            element
+            // An entry just searched for stands out a moment.
+            let found = agents.flash.is_some_and(|(s, at)| s == seq && at.elapsed() < FLASH_FOUND);
+            div()
+                .flex_none()
+                .rounded(px(8.))
+                .when(found, |d| d.bg(ui(0xe0af6826)).border_1().border_color(ui(0xe0af6888)))
+                .child(element)
         });
         let (label, color) = state_label(agent.state);
         let pane = agent.pane;
@@ -894,22 +938,20 @@ impl WindowView {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&agents.scroll)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(12.))
-                            .px(px(16.))
-                            .py(px(14.))
-                            .text_size(px(13.))
-                            .when(agents.thread.is_empty(), |d| {
-                                d.child(div().text_color(ui(0xffffff60)).child(
-                                    "Nothing yet: what it's given and says from now on shows here.",
-                                ))
-                            })
-                            .children(entries)
-                            .child(self.queued_asks(&agents.asks)),
-                    ),
+                    // The entries are its own children: one can be scrolled to.
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .px(px(16.))
+                    .py(px(14.))
+                    .text_size(px(13.))
+                    .children(entries)
+                    .when(agents.thread.is_empty(), |d| {
+                        d.child(div().text_color(ui(0xffffff60)).child(
+                            "Nothing yet: what it's given and says from now on shows here.",
+                        ))
+                    })
+                    .child(self.queued_asks(&agents.asks)),
             )
             .child(self.compose_box(&agent.title, which, cx))
     }
