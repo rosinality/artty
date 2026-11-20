@@ -490,6 +490,7 @@ impl Pane {
             agent,
             scrollback: self.session.styled_scrollback(scrollback_lines),
             pane: None,
+            thread: None,
         }
     }
 

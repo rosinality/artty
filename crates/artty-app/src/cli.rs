@@ -4,7 +4,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use artty_core::SessionId;
 use artty_core::control::{
@@ -633,8 +633,11 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             return print_response(response, switches.contains("json"));
         }
         eprintln!("artty: ask {} (artty ask --result {} if this is cut short)", ask.id, ask.id);
-        let wait = Request::AskResult { id: ask.id, wait: true, timeout_secs: *timeout_secs };
-        let response = send(&wait, timeout)?;
+        let response = wait_for_ask(ask.id, *timeout_secs)?;
+        return print_response(response, switches.contains("json"));
+    }
+    if let Request::AskResult { id, wait: true, timeout_secs } = &request {
+        let response = wait_for_ask(*id, *timeout_secs)?;
         return print_response(response, switches.contains("json"));
     }
     let response = send(&request, timeout)?;
@@ -1209,6 +1212,34 @@ fn socket() -> Result<PathBuf, String> {
     live_sockets().into_iter().next().ok_or_else(|| "artty is not running".to_owned())
 }
 
+/// Wait for an ask's reply, for at most `timeout_secs`. The server keeps
+/// asks across a hand-over to a new build (which drops connections) and a
+/// restart: ask again, by id, once it's back.
+fn wait_for_ask(id: u64, timeout_secs: Option<u64>) -> Result<Response, String> {
+    let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+    loop {
+        let left = deadline.map(|d| d.saturating_duration_since(Instant::now()).as_secs());
+        let wait = Request::AskResult { id, wait: true, timeout_secs: left };
+        match send(&wait, left.map(|s| Duration::from_secs(s + 5))) {
+            Err(err) if err.starts_with(CLOSED) => {},
+            other => return other,
+        }
+        // Back within a few seconds, or not coming back.
+        let back = Instant::now() + Duration::from_secs(15);
+        loop {
+            std::thread::sleep(Duration::from_millis(200));
+            if send(&Request::ServerStatus, Some(Duration::from_secs(2))).is_ok() {
+                break;
+            }
+            if Instant::now() > back || deadline.is_some_and(|d| Instant::now() > d) {
+                return Err(format!("{CLOSED}; artty ask --result {id} waits for its reply"));
+            }
+        }
+    }
+}
+
+const CLOSED: &str = "the server closed the connection";
+
 fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String> {
     let path = socket()?;
     let mut stream =
@@ -1223,7 +1254,7 @@ fn send(request: &Request, timeout: Option<Duration>) -> Result<Response, String
         _ => err.to_string(),
     })?;
     if reply.is_empty() {
-        return Err("the server closed the connection (stopped, or restarted)".into());
+        return Err(format!("{CLOSED} (stopped, or restarted)"));
     }
     serde_json::from_str(&reply).map_err(|err| format!("bad reply: {err}"))
 }

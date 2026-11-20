@@ -1,30 +1,97 @@
 //! Each agent's thread: what it was given and what it said, its permission
 //! requests and how they went, its sessions starting and ending — in order,
 //! from its hooks' events and artty's own records (asks, permission
-//! requests). Kept per pane, in memory, for as long as the server runs.
+//! requests). Kept per pane, and on disk (see `store`) under the thread's
+//! own key, which a pane reopened after a restart takes back.
 
 use std::collections::{HashMap, VecDeque};
 
 use artty_core::control::{ApprovalState, HookEvent, ThreadEntry, ThreadItem};
 use artty_core::layout::PaneId;
 
+use crate::store::Store;
+
 /// Entries kept per pane, at most (the oldest go first).
 const MOST: usize = 1000;
 
-#[derive(Default)]
 pub struct Threads {
     panes: HashMap<PaneId, VecDeque<ThreadEntry>>,
+    /// Each pane's thread's key, on disk.
+    keys: HashMap<PaneId, u64>,
+    store: Store,
+}
+
+impl Default for Threads {
+    fn default() -> Self {
+        Threads::new(Store::none())
+    }
 }
 
 impl Threads {
+    pub fn new(store: Store) -> Self {
+        crate::queue::seen_id(store.last_seq());
+        Threads { panes: HashMap::new(), keys: HashMap::new(), store }
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// `pane`'s thread's key, given it if it has none yet.
+    pub fn key(&mut self, pane: PaneId) -> u64 {
+        *self.keys.entry(pane).or_insert_with(crate::queue::next_id)
+    }
+
+    /// `pane`'s thread's key, if it has one.
+    pub fn key_of(&self, pane: PaneId) -> Option<u64> {
+        self.keys.get(&pane).copied()
+    }
+
+    /// The pane whose thread is `key`'s.
+    pub fn pane_of(&self, key: u64) -> Option<PaneId> {
+        self.keys.iter().find(|&(_, &k)| k == key).map(|(&pane, _)| pane)
+    }
+
+    /// `pane` (reopened, or handed over) takes back the thread kept as
+    /// `key`. Its permission requests still pending when it was kept are
+    /// over: their requests went with that server.
+    pub fn adopt(&mut self, pane: PaneId, key: u64) {
+        if self.pane_of(key).is_some() {
+            return;
+        }
+        let mut entries = self.store.entries(key, MOST);
+        for entry in &mut entries {
+            if let ThreadItem::Permission { state: state @ ApprovalState::Pending, .. } =
+                &mut entry.item
+            {
+                *state = ApprovalState::Ended;
+                self.store.put_entry(key, entry);
+            }
+        }
+        self.keys.insert(pane, key);
+        if !entries.is_empty() {
+            self.panes.insert(pane, entries.into());
+        }
+    }
+
+    /// Forget kept threads no pane took back.
+    pub fn forget_others(&self) {
+        let keep: Vec<u64> = self.keys.values().copied().collect();
+        self.store.keep_threads(&keep);
+    }
+
     /// Add `item` to `pane`'s thread; its `seq`.
     pub fn add(&mut self, pane: PaneId, item: ThreadItem) -> u64 {
         let seq = crate::queue::next_id();
         let entry = ThreadEntry { seq, at_ms: crate::queue::now_ms(), item };
+        let key = self.key(pane);
+        self.store.put_entry(key, &entry);
         let thread = self.panes.entry(pane).or_default();
         thread.push_back(entry);
-        if thread.len() > MOST {
-            thread.pop_front();
+        if thread.len() > MOST
+            && let Some(old) = thread.pop_front()
+        {
+            self.store.trim(key, old.seq);
         }
         seq
     }
@@ -57,12 +124,14 @@ impl Threads {
         newer.into_iter().skip(skip).cloned().collect()
     }
 
-    /// Permission requests in `pane`'s thread, by id, to bring up to date.
-    pub fn permission_ids(&self, pane: PaneId) -> Vec<u64> {
-        let thread = self.panes.get(&pane).into_iter().flatten();
-        thread
+    /// Permission requests pending in any thread, by id, to bring up to
+    /// date.
+    pub fn pending_permissions(&self) -> Vec<u64> {
+        self.panes
+            .values()
+            .flatten()
             .filter_map(|e| match e.item {
-                ThreadItem::Permission { id, .. } => Some(id),
+                ThreadItem::Permission { id, state: ApprovalState::Pending, .. } => Some(id),
                 _ => None,
             })
             .collect()
@@ -70,17 +139,28 @@ impl Threads {
 
     /// A permission request's state, as it is now.
     pub fn permission(&mut self, id: u64, now: ApprovalState) {
-        for entry in self.panes.values_mut().flatten() {
-            if let ThreadItem::Permission { id: this, state, .. } = &mut entry.item
-                && *this == id
-            {
-                *state = now;
+        for (pane, thread) in &mut self.panes {
+            for entry in thread {
+                if let ThreadItem::Permission { id: this, state, .. } = &mut entry.item
+                    && *this == id
+                    && *state != now
+                {
+                    *state = now;
+                    if let Some(&key) = self.keys.get(pane) {
+                        self.store.put_entry(key, entry);
+                    }
+                }
             }
         }
     }
 
+    /// The pane closed: its thread is over. (It stays on disk until the
+    /// next start, which forgets those no saved tab names: tabs saved a
+    /// moment before may yet reopen with theirs, as when the shells end
+    /// just before a reboot ends the server.)
     pub fn pane_closed(&mut self, pane: PaneId) {
         self.panes.remove(&pane);
+        self.keys.remove(&pane);
     }
 
     /// When `pane`'s thread last had something.

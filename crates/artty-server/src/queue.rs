@@ -8,6 +8,8 @@
 //! read once its pane is seen while someone is at an app, or dismissed.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use artty_core::layout::PaneId;
 
@@ -17,11 +19,20 @@ const MOST: usize = 200;
 /// Ids for asks, permission requests and replies: one sequence, so an id
 /// names one thing, from when the server started (in milliseconds), so none
 /// names one an earlier server gave.
+/// (Ids kept on disk from an earlier server are passed over too: see
+/// [`seen_id`].)
 pub fn next_id() -> u64 {
-    use std::sync::OnceLock;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    last_id().fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// `id` was given before (by an earlier server): later ones go past it.
+pub fn seen_id(id: u64) {
+    last_id().fetch_max(id, Ordering::Relaxed);
+}
+
+fn last_id() -> &'static AtomicU64 {
     static LAST: OnceLock<AtomicU64> = OnceLock::new();
-    LAST.get_or_init(|| AtomicU64::new(now_ms())).fetch_add(1, Ordering::Relaxed) + 1
+    LAST.get_or_init(|| AtomicU64::new(now_ms()))
 }
 
 pub fn now_ms() -> u64 {

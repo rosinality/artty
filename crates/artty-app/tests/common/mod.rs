@@ -20,34 +20,85 @@ pub struct Scratch {
 
 impl Scratch {
     pub fn new() -> Scratch {
+        Scratch::with_config("")
+    }
+
+    /// One whose config file says `config`.
+    pub fn with_config(config: &str) -> Scratch {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Short: the socket's in it.
         let dir = std::env::temp_dir().join(format!("artty-t-{}-{n}", std::process::id()));
         std::fs::create_dir_all(dir.join("t")).unwrap();
         std::fs::create_dir_all(dir.join("config/artty")).unwrap();
-        let mut command = Command::new(ARTTY);
-        command.arg("server").envs(env(&dir));
-        for name in OUTSIDE {
-            command.env_remove(name);
-        }
-        let server = command.spawn().unwrap();
+        std::fs::write(dir.join("config/artty/config.toml"), config).unwrap();
+        let server = spawn_server(&dir);
         let scratch = Scratch { dir, server };
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !scratch.artty(&["server", "status"]).status.success() {
-            assert!(Instant::now() < deadline, "the scratch server didn't start");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        scratch.wait_for_server();
         scratch
     }
 
+    fn wait_for_server(&self) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.artty(&["server", "status"]).status.success() {
+            assert!(Instant::now() < deadline, "the scratch server didn't start");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Restart the server as the app's Restart Server does: it stops
+    /// (everything it runs with it), and a new one reopens its tabs.
+    pub fn restart(&mut self) {
+        self.control(r#"{"cmd":"restart-server"}"#);
+        let _ = self.server.wait();
+        self.server = spawn_server(&self.dir);
+        self.wait_for_server();
+    }
+
+    /// Kill the server (as a crash would: nothing saved on the way out),
+    /// and start a new one, which reopens the tabs it last saved.
+    pub fn crash(&mut self) {
+        let _ = self.server.kill();
+        let _ = self.server.wait();
+        self.server = spawn_server(&self.dir);
+        self.wait_for_server();
+    }
+
+    /// Hand the server over to (this same) build: everything keeps running.
+    pub fn hand_over(&self) {
+        let out = self.artty(&["server", "restart"]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(stdout(&out).contains("now runs this build"), "{}", stdout(&out));
+    }
+
+    /// Send a control request (JSON) as is; the reply.
+    pub fn control(&self, request: &str) -> String {
+        use std::io::{BufRead, Write};
+        let socket = if cfg!(target_os = "macos") {
+            self.dir.join("t/artty-server.sock")
+        } else {
+            // SAFETY: getuid can't fail.
+            self.dir.join(format!("t/artty-{}/server.sock", unsafe { libc_getuid() }))
+        };
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        stream.write_all(format!("{request}\n").as_bytes()).unwrap();
+        let mut reply = String::new();
+        std::io::BufReader::new(stream).read_line(&mut reply).unwrap();
+        reply
+    }
+
     pub fn artty(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    /// `artty ARGS`, to run.
+    pub fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(ARTTY);
         command.args(args).envs(env(&self.dir));
         for name in OUTSIDE {
             command.env_remove(name);
         }
-        command.output().unwrap()
+        command
     }
 
     /// A pane running the stand-in agent; a turn takes `delay` seconds.
@@ -79,6 +130,20 @@ impl Drop for Scratch {
         let _ = self.server.wait();
         let _ = std::fs::remove_dir_all(&self.dir);
     }
+}
+
+unsafe extern "C" {
+    #[link_name = "getuid"]
+    fn libc_getuid() -> u32;
+}
+
+fn spawn_server(dir: &std::path::Path) -> Child {
+    let mut command = Command::new(ARTTY);
+    command.arg("server").envs(env(dir));
+    for name in OUTSIDE {
+        command.env_remove(name);
+    }
+    command.spawn().unwrap()
 }
 
 pub fn env(dir: &std::path::Path) -> Vec<(String, String)> {

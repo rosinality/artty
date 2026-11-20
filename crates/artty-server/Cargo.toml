@@ -15,3 +15,6 @@ notify = { version = "8", default-features = false, features = ["macos_kqueue"] 
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
+# Agents' threads and asks, kept across restarts (SQLite built in: the
+# Linux builds are cross-compiled).
+rusqlite = { version = "0.32", features = ["bundled"] }

@@ -3,7 +3,8 @@
 //!
 //! An ask is a record of its own, kept after whoever asked has gone (an
 //! agent's shell tool gives up long before a long turn ends): it can be
-//! asked about again by id. Its life:
+//! asked about again by id, after a hand-over or a restart too (asks are
+//! kept on disk: see [`Asks::restore`]). Its life:
 //!
 //! - **queued** until its pane's agent is between turns, nobody has typed
 //!   there for a moment, and it takes pastes whole;
@@ -32,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use artty_core::control::{AgentState, AskInfo, AskState, HookEvent};
 use artty_core::layout::PaneId;
+use serde::{Deserialize, Serialize};
 
 /// Between the paste and the Enter.
 const ENTER_DELAY: Duration = Duration::from_millis(150);
@@ -109,15 +111,47 @@ struct Ask {
 
 #[derive(Default)]
 pub struct Asks {
-    /// The last id given. Ids start from when the server started, in
-    /// milliseconds: asks don't outlive a server (nor a hand-over), and an
-    /// id from an earlier one mustn't name another's ask.
+    /// The last id given (see `queue::next_id`: ids go past those of asks
+    /// kept from an earlier server).
     next: u64,
     asks: BTreeMap<u64, Ask>,
     /// Where each pane's agent is, as its hooks said, and since when.
     turns: HashMap<PaneId, (Turn, Instant)>,
     /// When someone last typed in each pane.
     typed: HashMap<PaneId, Instant>,
+}
+
+/// An ask as kept on disk, across a restart or a hand-over (see
+/// [`Asks::saved`]). Times are wall-clock, in milliseconds.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedAsk {
+    pub id: u64,
+    /// Its pane's thread's key (the pane's id may change).
+    pub thread: u64,
+    /// Its pane's id when kept, for an ask whose pane didn't come back.
+    pub pane: PaneId,
+    pub text: String,
+    pub state: AskState,
+    #[serde(default)]
+    pub warning: Option<String>,
+    #[serde(default)]
+    pub prompt_id: Option<String>,
+    #[serde(default)]
+    pub reply: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub finished_ms: Option<u64>,
+}
+
+/// How a kept ask's pane came back, if it did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Back {
+    /// Handed over: the same agent, still running.
+    Running(PaneId),
+    /// Reopened after a restart: whatever ran there was stopped (its agent
+    /// may be resumed).
+    Reopened(PaneId),
 }
 
 /// A prompt as Claude Code reports a long paste in it: wrapped in
@@ -172,6 +206,88 @@ impl Asks {
         };
         self.asks.insert(id, ask);
         id
+    }
+
+    /// Every ask, to keep on disk (`key`: a pane's thread's key, given
+    /// whether the ask is over).
+    pub fn saved(&self, now: Instant, mut key: impl FnMut(PaneId, bool) -> u64) -> Vec<SavedAsk> {
+        let now_ms = crate::queue::now_ms();
+        let wall = |at: Instant| now_ms.saturating_sub(now.duration_since(at).as_millis() as u64);
+        self.asks
+            .iter()
+            .map(|(&id, ask)| SavedAsk {
+                id,
+                thread: key(ask.pane, ask.state.finished()),
+                pane: ask.pane,
+                text: ask.text.clone(),
+                state: ask.state,
+                warning: ask.warning.clone(),
+                prompt_id: ask.prompt_id.clone(),
+                reply: ask.reply.clone(),
+                error: ask.error.clone(),
+                finished_ms: ask.finished.map(wall),
+            })
+            .collect()
+    }
+
+    /// Take back asks kept by an earlier server (`back`: how each thread's
+    /// pane came back). Queued ones wait for their agent again; one being
+    /// typed in fails (what got typed can't be told, and nothing is typed
+    /// twice); one its agent is at work on carries on only if that agent
+    /// still runs (handed over).
+    pub fn restore(
+        &mut self,
+        saved: Vec<SavedAsk>,
+        now: Instant,
+        back: impl Fn(u64) -> Option<Back>,
+    ) {
+        let now_ms = crate::queue::now_ms();
+        for saved in saved {
+            crate::queue::seen_id(saved.id);
+            let finished = match saved.finished_ms {
+                Some(at) => {
+                    let ago = Duration::from_millis(now_ms.saturating_sub(at));
+                    if ago >= KEEP {
+                        continue;
+                    }
+                    Some(now.checked_sub(ago).unwrap_or(now))
+                },
+                None => None,
+            };
+            let back = back(saved.thread);
+            let pane = match back {
+                Some(Back::Running(pane) | Back::Reopened(pane)) => pane,
+                None => saved.pane,
+            };
+            let mut ask = Ask {
+                pane,
+                text: saved.text,
+                added: now,
+                state: saved.state,
+                warning: saved.warning,
+                due: None,
+                entered: saved.state == AskState::Running,
+                prompt_id: saved.prompt_id,
+                reply: saved.reply,
+                error: saved.error,
+                finished,
+            };
+            match (saved.state, back) {
+                (state, _) if state.finished() => {},
+                (_, None) => ask.fail("its pane didn't come back after the server restarted", now),
+                (AskState::Queued, _) | (AskState::Running, Some(Back::Running(_))) => {},
+                (AskState::Delivering, _) => ask.fail(
+                    "the server restarted while it was being typed in (check the pane before \
+                     asking again)",
+                    now,
+                ),
+                _ => ask.fail(
+                    "the server restarted during the agent's turn (its agent was stopped)",
+                    now,
+                ),
+            }
+            self.asks.insert(saved.id, ask);
+        }
     }
 
     pub fn info(&self, id: u64) -> Option<AskInfo> {

@@ -296,6 +296,8 @@ pub(crate) struct Server {
     /// When the socket was last marked as used ([`touch`]).
     last_touch: Option<Instant>,
     last_saved: Option<String>,
+    /// The asks as last kept on disk (see `keep`).
+    last_kept: Option<String>,
     /// Previous CPU samples (pid → time used, when), for CPU percentages.
     cpu_samples: HashMap<i32, (u64, Instant)>,
     /// Every pane's processes as of the last sample, with history.
@@ -312,6 +314,8 @@ pub(crate) struct Server {
     listener_fd: i32,
     /// Asked to hand over to this build, after answering.
     handover_to: Option<PathBuf>,
+    /// Panes taken over from a previous build, until `restored`.
+    adopted: Vec<PaneId>,
     /// Panes a previous build handed over, until their layout places them.
     handed: HashMap<PaneId, (HandedPane, Option<artty_core::vt::term::TermSnapshot>)>,
     /// Tabs closed lately, newest last, for reopening.
@@ -564,7 +568,7 @@ impl Server {
             approval_waiters: HashMap::new(),
             replies: crate::queue::Replies::new(),
             waiting_since: HashMap::new(),
-            threads: crate::threads::Threads::default(),
+            threads: crate::threads::Threads::new(crate::store::Store::open()),
             next_pane: 1,
             next_window: 1,
             sizes: HashMap::new(),
@@ -577,6 +581,7 @@ impl Server {
             last_save: now,
             last_touch: None,
             last_saved: None,
+            last_kept: None,
             cpu_samples: HashMap::new(),
             usage: Vec::new(),
             history: HashMap::new(),
@@ -587,6 +592,7 @@ impl Server {
             listener_fd,
             handover_to: None,
             handed: HashMap::new(),
+            adopted: Vec::new(),
             closed: Vec::new(),
             status,
         }
@@ -689,9 +695,18 @@ impl Server {
     fn restore_layout(&mut self, layout: SavedLayout, defaults: &Defaults) -> Option<Node> {
         match layout {
             SavedLayout::Pane(saved) => {
+                let thread = saved.thread;
+                let take_thread = |server: &mut Self, id: PaneId| {
+                    if let Some(key) = thread {
+                        server.threads.adopt(id, key);
+                    }
+                    id
+                };
                 if let Some((handed, snapshot)) = saved.pane.and_then(|id| self.handed.remove(&id))
                 {
-                    return self.adopt_pane(handed, snapshot, saved).map(Node::Pane);
+                    let id = self.adopt_pane(handed, snapshot, saved)?;
+                    self.adopted.push(id);
+                    return Some(Node::Pane(take_thread(self, id)));
                 }
                 let initial_output = (!saved.scrollback.is_empty())
                     .then(|| format!("{}{RESTORED_BANNER}", saved.scrollback).into_bytes());
@@ -706,7 +721,7 @@ impl Server {
                 if let (Some(resume), Some(pane)) = (resume, self.panes.get_mut(&id)) {
                     pane.type_when_ready(resume);
                 }
-                Some(Node::Pane(id))
+                Some(Node::Pane(take_thread(self, id)))
             },
             SavedLayout::Split { vertical, ratio, first, second } => {
                 match (
@@ -2313,7 +2328,10 @@ impl Server {
         if !matches!(pane.status, Status::Agent { .. }) && !starting {
             return Err(format!("no agent is running in pane {tab}"));
         }
-        Ok(self.asks.add(tab, text, Instant::now()))
+        let now = Instant::now();
+        let id = self.asks.add(tab, text, now);
+        self.keep(now);
+        Ok(id)
     }
 
     /// Type asks into panes ready for them; tell whoever waits for asks now
@@ -2339,7 +2357,13 @@ impl Server {
                 bracketed: pane.session.mode().contains(TermMode::BRACKETED_PASTE),
             })
         };
-        for write in self.asks.pump(now, view) {
+        let writes = self.asks.pump(now, view);
+        // On disk before anything's typed: after a crash, an ask being typed
+        // in fails rather than going in again.
+        if !writes.is_empty() {
+            self.keep(now);
+        }
+        for write in writes {
             if let Some(pane) = self.panes.get(&write.pane) {
                 pane.session.write(write.bytes);
             }
@@ -2809,12 +2833,7 @@ impl Server {
                     _ => pane.agent_name(),
                 };
                 // Permission requests as they are now (answered since, say).
-                let now = Instant::now();
-                for id in self.threads.permission_ids(tab) {
-                    if let Some(info) = self.approvals.info(id, now) {
-                        self.threads.permission(id, info.state);
-                    }
-                }
+                self.sync_permissions(Instant::now());
                 Response::Thread {
                     pane: tab,
                     agent,
@@ -2879,6 +2898,7 @@ impl Server {
                     for release in self.approvals.hook(id, hook, now) {
                         self.release_approval(release);
                     }
+                    self.keep(now);
                     match (hook.turn(), hook.event.as_str()) {
                         (Some(true), _) => self.replies.prompted(id, hook.prompt.as_deref()),
                         (Some(false), "Stop" | "AfterAgent") => {
@@ -3232,6 +3252,7 @@ impl Server {
         self.push_updates(now);
         if now.duration_since(self.last_save) >= SAVE_INTERVAL {
             self.last_save = now;
+            self.keep(now);
             self.save();
         }
         if !self.panes.is_empty() || !self.clients.is_empty() {
@@ -3615,10 +3636,16 @@ impl Server {
                 self.panes
                     .get(id)
                     .map(|p| match handover {
-                        true => {
-                            SavedPane { pane: Some(*id), command: p.command.clone(), ..p.saved(0) }
+                        true => SavedPane {
+                            pane: Some(*id),
+                            command: p.command.clone(),
+                            thread: self.threads.key_of(*id),
+                            ..p.saved(0)
                         },
-                        false => p.saved(self.config.restore_scrollback),
+                        false => SavedPane {
+                            thread: self.threads.key_of(*id),
+                            ..p.saved(self.config.restore_scrollback)
+                        },
                     })
                     .unwrap_or_default(),
             ),
@@ -3629,6 +3656,58 @@ impl Server {
                 second: Box::new(self.saved_layout(second, handover)),
             },
         }
+    }
+
+    /// Keep the asks on disk (threads are kept as they change), for after a
+    /// restart or a hand-over.
+    fn keep(&mut self, now: Instant) {
+        self.sync_permissions(now);
+        let saved = self.asks.saved(now, |pane, finished| match finished {
+            // (Not given a key: its pane may be gone.)
+            true => self.threads.key_of(pane).unwrap_or(0),
+            false => self.threads.key(pane),
+        });
+        let Ok(json) = serde_json::to_string(&saved) else { return };
+        if self.last_kept.as_ref() != Some(&json) {
+            self.threads.store().set_record("asks", &json);
+            self.last_kept = Some(json);
+        }
+    }
+
+    /// Threads' permission requests brought up to date (answered since).
+    fn sync_permissions(&mut self, now: Instant) {
+        for id in self.threads.pending_permissions() {
+            if let Some(info) = self.approvals.info(id, now) {
+                self.threads.permission(id, info.state);
+            }
+        }
+    }
+
+    /// Started (from saved windows, or a hand-over): take back the asks kept
+    /// on disk, and forget the threads of panes that didn't come back.
+    pub(crate) fn restored(&mut self) {
+        let now = Instant::now();
+        let saved: Vec<crate::asks::SavedAsk> = self
+            .threads
+            .store()
+            .record("asks")
+            .and_then(|json| {
+                serde_json::from_str(&json)
+                    .inspect_err(|err| log::warn!("kept asks unreadable: {err}"))
+                    .ok()
+            })
+            .unwrap_or_default();
+        let back = |key: u64| {
+            let pane = self.threads.pane_of(key)?;
+            Some(match self.adopted.contains(&pane) {
+                true => crate::asks::Back::Running(pane),
+                false => crate::asks::Back::Reopened(pane),
+            })
+        };
+        self.asks.restore(saved, now, back);
+        self.adopted.clear();
+        self.threads.forget_others();
+        self.keep(now);
     }
 
     /// Save every window for the next start (after a reboot or crash).
@@ -3741,6 +3820,7 @@ impl Server {
                 snapshots.push((id, snapshot));
             }
         }
+        self.keep(Instant::now());
         let header = handover::Header {
             version: 0,
             listener_fd: self.listener_fd,
@@ -3845,6 +3925,7 @@ impl Server {
             self.windows.clear();
             self.workspaces.clear();
         }
+        self.keep(Instant::now());
         self.save();
         // Dropping sessions hangs up their shells.
         self.panes.clear();

@@ -13,6 +13,7 @@ mod queue;
 mod server;
 mod sessions;
 mod status;
+mod store;
 mod threads;
 mod watch;
 
@@ -124,6 +125,7 @@ fn serve_on(listener: UnixListener, path: PathBuf, handover: Option<Handover>) -
         Some((header, snapshots)) => server.adopt(header, snapshots),
         None => server.start(),
     }
+    server.restored();
     loop {
         inbox.wait(server.next_deadline().max(Instant::now() + Duration::from_millis(1)));
         // Handle what's waiting before doing per-batch work, so a burst of

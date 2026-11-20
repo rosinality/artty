@@ -285,7 +285,12 @@ rather than being typed again; one queued behind a turn waits for it
 (`--cancel ID` takes it back). An agent just started is waited for, up to
 30 seconds, until its hooks report (Claude Code runs none while it asks
 whether to trust a folder). It needs the agent's hooks (`artty hooks
-install`). Asks under way don't survive a server restart.
+install`). Asks are kept across a hand-over to a new build (Restart Server
+with this build, `artty server restart`), and an `artty ask` waiting for a
+reply gets it. A server that stops and starts again (a reboot, a crash,
+the app's Restart Server from an older build) keeps its queued asks for the
+reopened tab's resumed agent; an agent stopped mid-turn can't answer, and
+its ask fails (it isn't sent again). Finished asks are kept for an hour.
 
 ### Permission requests
 
@@ -307,14 +312,17 @@ session), passed back as it is: never more than its own prompt would.
 
 ### Agents and their threads
 
-The server keeps each agent's thread while it runs: what it was given (by
+The server keeps each agent's thread: what it was given (by
 `artty ask`, or typed in its terminal), what it said at the end of each
 turn, its permission requests and how they went, and its sessions starting,
 resuming, compacting and ending. The Agents view (⇧⌘K, or Agents in the
 sidebar) lists every agent on every connected server with what it's doing,
 shows the chosen one's thread (a pending permission request is answered
-there too), and what's known about it. Threads last as long as the server
-and the pane do.
+there too), and what's known about it. Threads are kept on disk (an
+`agents.db` beside the saved tabs, readable by you only; the last 1000
+entries of each): a tab reopened after a restart takes its thread back. A
+thread goes when its pane is closed. Unread replies (the queue's) don't
+outlast a restart yet.
 
 Below the thread, write to the agent: ⏎ sends it as an `artty ask` (given
 to the agent once its turn ends; until then it shows as queued), ⇧⏎ starts
