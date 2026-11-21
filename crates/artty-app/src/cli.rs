@@ -15,6 +15,7 @@ use artty_core::protocol::QueueKind;
 use serde_json::{Value, json};
 
 pub const COMMANDS: &[&str] = &[
+    "--build",
     "attach",
     "acp",
     "list",
@@ -1990,14 +1991,40 @@ pub fn askpass(socket: &std::path::Path, request: &artty_core::remote::AskpassRe
 /// This app's build of artty for Linux on `cpu`: in its bundle, or (run
 /// from the source tree) cargo-zigbuild's output beside it.
 pub fn linux_build(cpu: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
     let exe = std::env::current_exe().ok()?;
+    let exe = exe.canonicalize().unwrap_or(exe);
     let dir = exe.parent()?;
-    let bundled = dir.parent()?.join("Resources/linux").join(format!("artty-{cpu}"));
-    if bundled.is_file() {
+    let in_bundle = |contents: &Path| {
+        let bundled = contents.join("Resources/linux").join(format!("artty-{cpu}"));
+        bundled.is_file().then_some(bundled)
+    };
+    if let Some(bundled) = in_bundle(dir.parent()?) {
         return Some(bundled);
+    }
+    // Not run from the app (a tab's `artty` is the server's copy of it):
+    // the app installed, if it's this very build.
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    for app in [PathBuf::from("/Applications/artty.app"), home.join("Applications/artty.app")] {
+        let Ok(app) = app.canonicalize() else { continue };
+        let contents = app.join("Contents");
+        if same_file_contents(&contents.join("MacOS/artty"), &exe)
+            && let Some(bundled) = in_bundle(&contents)
+        {
+            return Some(bundled);
+        }
     }
     let built = dir.parent()?.join(format!("{cpu}-unknown-linux-gnu/release/artty"));
     built.is_file().then_some(built)
+}
+
+/// Whether two files hold the same bytes.
+fn same_file_contents(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let same_size = match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(sa), Ok(sb)) => sa.len() == sb.len(),
+        _ => false,
+    };
+    same_size && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 fn hooks(args: &[String]) -> Result<i32, String> {
