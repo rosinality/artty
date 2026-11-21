@@ -105,6 +105,7 @@ fn screens_of_a_pane_peeked_at() {
         task: None,
         thread: None,
         back: false,
+        fork: None,
     };
     let Ok(Response::Tab { id: hidden }) = client.control(&open) else { panic!("no tab") };
     assert_ne!(hidden, shown);

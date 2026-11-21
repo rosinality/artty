@@ -156,6 +156,10 @@ artty, your own pane is found automatically:
                                          repository (here, or --cwd), beside it
                                          in REPO.worktrees/BRANCH on BRANCH;
                                          removed with the tab if unchanged
+                                         --fork SESSION (claude): on a copy of
+                                         that conversation (in its folder unless
+                                         --cwd), without its terminal UI; the
+                                         conversation itself isn't changed
   artty focus N | artty close N
   artty rename [--tab N] TITLE           name the tab holding pane N (empty
                                          title: back to automatic)
@@ -320,6 +324,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--bring-back" => _ = flags.insert("bring-back", args.value("--bring-back")?),
             "--task" => _ = flags.insert("task", args.value("--task")?),
             "--worktree" => _ = flags.insert("worktree", args.value("--worktree")?),
+            "--fork" => _ = flags.insert("fork", args.value("--fork")?),
             "--search" => _ = flags.insert("search", args.value("--search")?),
             "--always" => _ = flags.insert("always", args.value("--always")?),
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
@@ -543,6 +548,9 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 },
                 task => task.map(str::to_owned),
             };
+            if flags.contains_key("fork") && command.is_empty() {
+                return Err("new: --fork needs the agent it's a conversation of (--agent claude)".into());
+            }
             if task.is_some() && command.is_empty() {
                 return Err("new: --task needs an agent to give it to (--agent NAME)".into());
             }
@@ -565,6 +573,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 task,
                 thread: None,
                 back: false,
+                fork: flags.get("fork").cloned(),
             }
         },
         "focus" | "close" => {

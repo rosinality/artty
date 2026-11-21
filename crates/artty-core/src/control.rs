@@ -260,6 +260,11 @@ pub enum Request {
         thread: Option<SessionId>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         back: bool,
+        /// Start the agent (Claude Code) on a copy of this conversation of
+        /// its: everything said so far, under a new id; the conversation
+        /// itself is left as it is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fork: Option<String>,
     },
     Focus {
         tab: SessionId,
@@ -487,6 +492,13 @@ pub struct AgentInfo {
     /// The ask it's at work on.
     #[serde(default)]
     pub ask: Option<u64>,
+    /// Its conversation's id (for `artty new --fork`), as its hooks said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// The pane of the agent that started it (or whose conversation it's a
+    /// copy of), while that's open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionId>,
 }
 
 /// The agent an ask came from: run in one of artty's panes. As it was when

@@ -344,6 +344,7 @@ pub(crate) struct Server {
     /// The asks, and the unread replies, as last kept on disk (see `keep`).
     last_kept: Option<String>,
     last_kept_replies: Option<String>,
+    last_kept_parents: Option<String>,
     /// Previous CPU samples (pid → time used, when), for CPU percentages.
     cpu_samples: HashMap<i32, (u64, Instant)>,
     /// Every pane's processes as of the last sample, with history.
@@ -634,6 +635,7 @@ impl Server {
             last_saved: None,
             last_kept: None,
             last_kept_replies: None,
+            last_kept_parents: None,
             cpu_samples: HashMap::new(),
             usage: Vec::new(),
             history: HashMap::new(),
@@ -2214,7 +2216,10 @@ impl Server {
     /// once what it waits for happens. `peer`: from the `artty` command
     /// (else from an app).
     fn control(&mut self, request: Request, waiter: Waiter, peer: Option<Peer>) {
-        let request = self.acp_agents(request);
+        let request = match self.acp_agents(request) {
+            Ok(request) => request,
+            Err(message) => return Self::answer(&self.clients, waiter, Response::error(message)),
+        };
         let deadline = |secs: Option<u64>| secs.map(|s| Instant::now() + Duration::from_secs(s));
         match request {
             Request::Approve { tab, agent, tool_name, tool_input, suggestions } => {
@@ -2264,7 +2269,7 @@ impl Server {
                 },
                 Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
             },
-            request @ Request::New { task: Some(_), .. } => {
+            request @ (Request::New { task: Some(_), .. } | Request::New { fork: Some(_), .. }) => {
                 let response = self.start_with_task(request, peer).unwrap_or_else(Response::error);
                 Self::answer(&self.clients, waiter, response);
                 self.pump_asks(Instant::now());
@@ -2397,7 +2402,32 @@ impl Server {
     /// An agent named `AGENT-acp` (`artty new --agent claude-acp`, `/new
     /// claude-acp`) is run by `artty acp AGENT`, if it has an adapter; so is
     /// one started with a task (`headless-tasks`).
-    fn acp_agents(&self, mut request: Request) -> Request {
+    fn acp_agents(&self, mut request: Request) -> Result<Request, String> {
+        let exe = || {
+            std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "artty".to_owned())
+        };
+        if let Request::New { command, fork: Some(source), cwd, .. } = &mut request {
+            let agent = match command.as_slice() {
+                [name] => name.strip_suffix("-acp").unwrap_or(name),
+                _ => return Err("--fork: a copy of an agent's conversation (--agent claude)".into()),
+            };
+            if agent != "claude" || !self.config.acp.contains_key(agent) {
+                return Err(format!(
+                    "--fork: only Claude Code's conversations are copied (through its Agent \
+                     Client Protocol adapter), not {agent}'s"
+                ));
+            }
+            if source.is_empty() || !source.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(format!("--fork: {source} isn't a conversation's id"));
+            }
+            if cwd.is_none() {
+                *cwd = crate::sessions::claude_cwd(source).filter(|dir| dir.is_dir());
+            }
+            *command = vec![exe(), "acp".into(), agent.to_owned(), "--fork".into(), source.clone()];
+            return Ok(request);
+        }
         if let Request::New { command, task, .. } = &mut request
             && let [name] = command.as_slice()
             && let Some(agent) = name
@@ -2405,12 +2435,9 @@ impl Server {
                 .or(Some(name.as_str()).filter(|_| task.is_some() && self.config.headless_tasks))
             && self.config.acp.contains_key(agent)
         {
-            let exe = std::env::current_exe()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|_| "artty".to_owned());
-            *command = vec![exe, "acp".to_owned(), agent.to_owned()];
+            *command = vec![exe(), "acp".to_owned(), agent.to_owned()];
         }
-        request
+        Ok(request)
     }
 
     /// Open a tab with its first message: the tab as asked, then the task
@@ -2430,21 +2457,24 @@ impl Server {
             target,
             workspace,
             worktree,
-            task: Some(task),
+            task,
             thread,
             back,
+            fork,
         } = request
         else {
-            unreachable!("only with a task")
+            unreachable!("only a tab")
         };
-        if task.trim().is_empty() || crate::asks::commandlike(&task) {
+        if let Some(task) = &task
+            && (task.trim().is_empty() || crate::asks::commandlike(task))
+        {
             return Err("--task: a message for the agent (not a /, ! or # command)".into());
         }
-        let parent = self.pane_of_peer(peer);
+        let asker = self.pane_of_peer(peer);
         let most = self.config.max_agent_depth;
-        if let Some(parent) = parent
+        if let Some(asker) = asker
             && most > 0
-            && self.depth(parent) >= most
+            && self.depth(asker) >= most
         {
             return Err(format!(
                 "agents started by agents go {most} deep at most (the user's max-agent-depth \
@@ -2463,17 +2493,27 @@ impl Server {
             task: None,
             thread: None,
             back: false,
+            fork: None,
         };
         let Response::Tab { id } = self.respond(open)? else {
             return Err("the tab didn't open".into());
         };
-        if let Some(parent) = parent {
+        // Under the agent that started it, else (a copy) under the one whose
+        // conversation it's a copy of, if that's running here.
+        let source = fork.as_deref().and_then(|session| {
+            self.panes
+                .iter()
+                .find(|&(&p, pane)| p != id && pane.agent_session() == Some(session))
+                .map(|(&p, _)| p)
+        });
+        if let Some(parent) = asker.or(source) {
             self.parents.insert(id, parent);
         }
-        let ask = self.add_ask(id, task, false, parent)?;
-        let here = parent.or(thread).filter(|&p| p != id && self.panes.contains_key(&p));
+        let Some(task) = task else { return Ok(Response::Tab { id }) };
+        let ask = self.add_ask(id, task, false, asker)?;
+        let here = asker.or(thread).filter(|&p| p != id && self.panes.contains_key(&p));
         if let Some(here) = here {
-            self.start_handoff(ask, here, parent.is_some(), back && parent.is_none());
+            self.start_handoff(ask, here, asker.is_some(), back && asker.is_none());
         }
         Ok(Response::Started { id, ask })
     }
@@ -3278,6 +3318,12 @@ impl Server {
                             pending: self.approvals.pending_count(id),
                             unread: self.replies.unread_in(id),
                             ask: self.asks.running_in(id),
+                            session: pane.agent_session().map(str::to_owned),
+                            parent: self
+                                .parents
+                                .get(&id)
+                                .copied()
+                                .filter(|p| self.panes.contains_key(p)),
                         })
                     })
                     .collect();
@@ -4302,6 +4348,26 @@ impl Server {
             self.threads.store().set_record("replies", &json);
             self.last_kept_replies = Some(json);
         }
+        // Which agent started which, by their threads' keys (panes' ids
+        // change in a restart).
+        let mut parents: Vec<(PaneId, PaneId)> = self
+            .parents
+            .iter()
+            .filter(|(child, parent)| {
+                self.panes.contains_key(child) && self.panes.contains_key(parent)
+            })
+            .map(|(&child, &parent)| (child, parent))
+            .collect();
+        parents.sort();
+        let parents: Vec<(u64, u64)> = parents
+            .into_iter()
+            .map(|(child, parent)| (self.threads.key(child), self.threads.key(parent)))
+            .collect();
+        let Ok(json) = serde_json::to_string(&parents) else { return };
+        if self.last_kept_parents.as_ref() != Some(&json) {
+            self.threads.store().set_record("parents", &json);
+            self.last_kept_parents = Some(json);
+        }
     }
 
     /// Threads' permission requests brought up to date (answered since).
@@ -4342,6 +4408,19 @@ impl Server {
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
         self.replies.restore(replies, |key| self.threads.pane_of(key));
+        let parents: Vec<(u64, u64)> = self
+            .threads
+            .store()
+            .record("parents")
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        for (child, parent) in parents {
+            if let (Some(child), Some(parent)) =
+                (self.threads.pane_of(child), self.threads.pane_of(parent))
+            {
+                self.parents.insert(child, parent);
+            }
+        }
         self.adopted.clear();
         self.threads.forget_others();
         self.keep(now);

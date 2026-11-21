@@ -325,6 +325,7 @@ impl WindowView {
             task: Some(task),
             thread: chosen.map(|(a, _)| ids::local_id(a.pane)),
             back: back && chosen.is_some(),
+            fork: None,
         };
         if let Some(draft) = self.draft_mut() {
             *draft = Draft::default();

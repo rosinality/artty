@@ -1,4 +1,4 @@
-//! `artty acp AGENT [--resume ID]`: an agent run without its terminal UI,
+//! `artty acp AGENT [--resume ID | --fork ID]`: an agent run without its terminal UI,
 //! through its Agent Client Protocol adapter (JSON-RPC over the adapter's
 //! stdin and stdout), in a tab of its own. What the agent does comes as
 //! data: its messages, its tools' use, its permission requests, a turn's
@@ -245,6 +245,8 @@ struct Host {
     started: u64,
     session: Option<String>,
     resume: Option<String>,
+    /// A conversation to start on a copy of (the copy is this one's).
+    fork: Option<String>,
     model: Option<String>,
     /// Its permission mode (`default`, `acceptEdits`, `plan`, ...), else
     /// the agent's own setting.
@@ -278,6 +280,7 @@ struct Host {
 pub fn run(args: &[String]) -> Result<i32, String> {
     let mut agent = "claude".to_owned();
     let mut resume = None;
+    let mut fork = None;
     let mut model = None;
     let mut mode = None;
     let mut rest = args.iter();
@@ -286,12 +289,14 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             "--resume" => {
                 resume = Some(rest.next().ok_or("--resume: which conversation?")?.clone())
             },
+            "--fork" => fork = Some(rest.next().ok_or("--fork: which conversation?")?.clone()),
             "--model" => model = Some(rest.next().ok_or("--model: which?")?.clone()),
             "--mode" => mode = Some(rest.next().ok_or("--mode: which?")?.clone()),
             "-h" | "--help" => {
                 println!(
-                    "artty acp [AGENT] [--resume ID] [--model M] [--mode MODE]\n  runs AGENT (claude) through \
-                     its Agent Client Protocol adapter, in this tab:\n  Enter sends, Esc \
+                    "artty acp [AGENT] [--resume ID | --fork ID] [--model M] [--mode MODE]\n  runs AGENT \
+                     (claude) through its Agent Client Protocol adapter, in this tab (--fork: on \
+                     a copy of conversation ID):\n  Enter sends, Esc \
                      interrupts, ^T opens the conversation in its terminal UI, ^D quits.\n  The \
                      adapter's command is the `acp` setting (acp.AGENT)."
                 );
@@ -300,6 +305,9 @@ pub fn run(args: &[String]) -> Result<i32, String> {
             name if !name.starts_with('-') => agent = name.to_owned(),
             other => return Err(format!("acp: unknown option {other}")),
         }
+    }
+    if resume.is_some() && fork.is_some() {
+        return Err("acp: --resume or --fork, not both".into());
     }
     let (config, _) = artty_core::Config::load();
     let command = config
@@ -319,6 +327,7 @@ pub fn run(args: &[String]) -> Result<i32, String> {
         started: 0,
         session: None,
         resume,
+        fork,
         model,
         mode,
         phase: Phase::Starting,
@@ -587,6 +596,16 @@ impl Host {
         match asked {
             Asked::Initialize => {
                 let Some(adapter) = &mut self.adapter else { return };
+                if let Some(source) = self.fork.take() {
+                    // A copy: the adapter's to make (it copies the
+                    // transcript); it starts as a new conversation.
+                    adapter.request(
+                        "session/fork",
+                        json!({ "sessionId": source, "cwd": cwd, "mcpServers": [] }),
+                        Asked::NewSession,
+                    );
+                    return;
+                }
                 match self.resume.clone().or(self.session.clone()) {
                     Some(session) => {
                         self.phase = Phase::Loading;

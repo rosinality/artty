@@ -270,3 +270,77 @@ fn a_thread_cleared() {
     let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "again"]);
     assert_eq!(stdout(&out), "echo: again", "{}", stderr(&out));
 }
+
+#[test]
+fn a_copy_of_a_conversation() {
+    let (scratch, pane) = started();
+    let out = scratch.ask(&["--tab", &pane, "--timeout", "20", "which"]);
+    assert_eq!(stdout(&out), "session: fake-acp-session", "{}", stderr(&out));
+    let before = thread(&scratch, &pane);
+
+    let out = scratch.artty(&[
+        "new", "--background", "--agent", "claude", "--fork", "fake-acp-session", "--task", "which",
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let copy = stdout(&out);
+    wait_for("the copy's answer", || {
+        thread(&scratch, &copy)
+            .iter()
+            .any(|(k, v)| k == "Reply" && v["text"] == "session: fork-of-fake-acp-session")
+    });
+    // The conversation copied isn't given anything.
+    assert_eq!(thread(&scratch, &pane), before);
+    // The copy is listed under the agent it's a copy of, with its own id.
+    let agents: Value =
+        serde_json::from_str(&stdout(&scratch.artty(&["agents", "--json"]))).unwrap();
+    let listed = agents.as_array().unwrap();
+    let find = |p: &str| listed.iter().find(|a| a["pane"] == p.parse::<u64>().unwrap()).unwrap().clone();
+    assert_eq!(find(&copy)["session"], "fork-of-fake-acp-session", "{listed:?}");
+    assert_eq!(find(&copy)["parent"].to_string(), pane, "{listed:?}");
+    assert_eq!(find(&pane)["session"], "fake-acp-session");
+
+    // Not another agent's, nor anything but an id.
+    let out = scratch.artty(&["new", "--background", "--agent", "codex", "--fork", "x"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("only Claude Code"), "{}", stderr(&out));
+    let out = scratch.artty(&["new", "--background", "--agent", "claude", "--fork", "a b;c"]);
+    assert!(!out.status.success());
+}
+
+#[test]
+fn who_started_whom_kept_in_a_restart() {
+    let (mut scratch, pane) = started();
+    let out = scratch.artty(&["new", "--background", "--agent", "claude", "--fork", "fake-acp-session"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let copy = stdout(&out);
+    let parent_of = |scratch: &Scratch| {
+        let agents: Value =
+            serde_json::from_str(&stdout(&scratch.artty(&["agents", "--json"]))).unwrap();
+        agents
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["session"] == "fork-of-fake-acp-session")
+            .map(|a| (a["pane"].to_string(), a["parent"].to_string()))
+    };
+    wait_for("the copy to start", || parent_of(&scratch).is_some());
+    assert_eq!(parent_of(&scratch), Some((copy, pane)));
+
+    scratch.restart();
+    wait_for("both to resume", || {
+        let agents = stdout(&scratch.artty(&["agents", "--json"]));
+        agents.contains("\"fake-acp-session\"") && agents.contains("fork-of-fake-acp-session")
+    });
+    let (copy, parent) = parent_of(&scratch).unwrap();
+    let agents: Value =
+        serde_json::from_str(&stdout(&scratch.artty(&["agents", "--json"]))).unwrap();
+    let source = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["session"] == "fake-acp-session")
+        .map(|a| a["pane"].to_string())
+        .unwrap();
+    assert_ne!(copy, source);
+    assert_eq!(parent, source);
+}

@@ -11,8 +11,10 @@ What a prompt does, by its text:
   busy       runs a tool ("cargo test --workspace") until cancelled
   hook       runs the agent's hooks as Claude Code would (artty status
              --hook: under artty acp, they keep quiet), answers "echo: hook"
+  which      answers "session: ID", the conversation it was given
   else       answers "echo: TEXT"
-A loaded conversation is replayed first, as the real ones do.
+A loaded conversation is replayed first, as the real ones do; a forked one
+(session/fork) isn't: it's a new conversation, "fork-of-ID".
 """
 
 import json
@@ -108,6 +110,8 @@ def prompt(rid, session, text):
         subprocess.run([os.environ["ARTTY_BIN"], "status", "done", "--hook", "--agent", "claude"],
                        input=event, text=True)
         say(session, "echo: hook", "m-hook")
+    elif text == "which":
+        say(session, "session: " + session, "m-which")
     elif text == "bg":
         say(session, "started", "m-bg")
 
@@ -140,6 +144,8 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "method": "auth/status_update", "params": {"state": "authenticated"}})
     elif method == "session/new":
         send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": SESSION}})
+    elif method == "session/fork":
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fork-of-" + params["sessionId"]}})
     elif method == "session/load":
         session = params["sessionId"]
         update(session, {"sessionUpdate": "user_message_chunk", "content": {"type": "text", "text": "an old message"}})

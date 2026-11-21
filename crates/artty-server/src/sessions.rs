@@ -52,6 +52,22 @@ pub fn claude_title(session: &str) -> Option<String> {
     claude_title_in(&claude, session)
 }
 
+/// Where a Claude Code conversation was had: the folder its transcript's
+/// first entries name.
+pub fn claude_cwd(session: &str) -> Option<PathBuf> {
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| Some(home()?.join(".claude")))?;
+    let file = std::fs::File::open(claude_transcript(&claude, session)?).ok()?;
+    BufReader::new(file).lines().map_while(Result::ok).take(200).find_map(|line| {
+        if !line.contains("\"cwd\"") {
+            return None;
+        }
+        let value: Value = serde_json::from_str(&line).ok()?;
+        Some(PathBuf::from(value.get("cwd")?.as_str()?))
+    })
+}
+
 /// A Claude Code conversation's transcript, by its id.
 fn claude_transcript(claude: &Path, session: &str) -> Option<PathBuf> {
     // (A session id names a file: nothing else in it.)
