@@ -216,6 +216,11 @@ artty, your own pane is found automatically:
                                          ssh, into ~/.local/bin; Linux with
                                          glibc 2.28+), moving a running server
                                          onto it
+  artty remote update NAME [--check]     bring artty there up to this build if
+                                         it's older (the app does on connecting,
+                                         unless its auto-update = false); its
+                                         server moves on with programs running.
+                                         --check: say what's there, do nothing
   artty server --stdio                   carry an app's connection to this
                                          machine's server over stdin and stdout
                                          (what a remote artty app runs over ssh)
@@ -281,6 +286,12 @@ fn run(args: Vec<String>) -> Result<i32, String> {
     // A server build taking over from another (see `artty_server::upgrade`):
     // before the usual option parsing, which doesn't know these.
     match (args.first().map(String::as_str), args.get(1).map(String::as_str), args.get(2)) {
+        // This build's stamp (see `scripts/bundle.sh`; none from a plain
+        // cargo build): what an app updating it compares.
+        (Some("--build"), _, _) => {
+            println!("{}", crate::BUILD.unwrap_or_default());
+            return Ok(0);
+        },
         (Some("server"), Some("--resume"), Some(header)) => {
             return artty_server::resume(std::path::Path::new(header))
                 .map(|()| 0)
@@ -338,9 +349,11 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--always" => _ = flags.insert("always", args.value("--always")?),
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
             "--after" => _ = flags.insert("after", args.value("--after")?),
-            "--raw" | "--no-wait" | "--list" | "--abandon" | "--all" | "--follow" | "--text" => {
+            "--raw" | "--no-wait" | "--list" | "--abandon" | "--all" | "--follow" | "--text"
+            | "--keep-running" => {
                 switches.insert(match arg.as_str() {
                     "--raw" => "raw",
+                    "--keep-running" => "keep-running",
                     "--list" => "list",
                     "--abandon" => "abandon",
                     "--all" => "all",
@@ -741,7 +754,8 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             Some("stop") => Request::StopServer,
             Some("restart") => {
                 let exe = std::env::current_exe().map_err(|err| err.to_string())?;
-                return match artty_server::upgrade(&exe)
+                let keep = switches.contains("keep-running");
+                return match artty_server::upgrade(&exe, keep)
                     .map_err(|err| format!("server restart: {err}"))?
                 {
                     artty_server::Upgrade::HandedOver => {
@@ -1859,6 +1873,32 @@ fn remote(args: &[String]) -> Result<i32, String> {
         },
         Some("test") => {
             remote_test(&find(args.get(1))?)?;
+            Ok(0)
+        },
+        Some("update") => {
+            let server = find(args.get(1))?;
+            let ours = crate::BUILD.and_then(|b| b.trim().parse::<u64>().ok());
+            if args.iter().any(|a| a == "--check") {
+                let (found, plan) = artty_core::remote::check(&server, ours)?;
+                println!("{}: {found:#?}", server.name);
+                println!("this build: {}", crate::BUILD.unwrap_or("(no stamp)"));
+                println!("would: {plan:?}");
+                return Ok(0);
+            }
+            let build = |cpu: &str| {
+                let path = linux_build(cpu)?;
+                let out = std::process::Command::new("/usr/bin/shasum")
+                    .args(["-a", "256"])
+                    .arg(&path)
+                    .output()
+                    .ok()?;
+                let hash = String::from_utf8_lossy(&out.stdout).get(..64)?.to_owned();
+                Some((path, hash))
+            };
+            let updated =
+                artty_core::remote::update(&server, ours, build, &artty_server::handover_check())
+                    .map_err(|err| format!("couldn't update {}: {err}", server.name))?;
+            println!("{}: {updated:?}", server.name);
             Ok(0)
         },
         Some("install") => {

@@ -410,6 +410,212 @@ pub mod installing {
     }
 }
 
+/// Keeping artty on another machine up to date with this app's build, only
+/// ever forward (by build stamps, `artty --build`): what's there and what
+/// it runs is read ([`updating::script`]), then [`updating::plan`] says
+/// what to do. A new build goes in beside the old (checked: its contents,
+/// that it can take a hand-over) and replaces it; the server moves to it
+/// only by a hand-over, its programs running on (never a restart).
+pub mod updating {
+    /// What's found there.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Found {
+        /// Its CPU (`x86_64`, `aarch64`), or why it can't take a build.
+        pub cpu: Option<Result<&'static str, String>>,
+        pub home: String,
+        /// The artty a connection runs (links followed), if any.
+        pub path: Option<String>,
+        /// A regular file, of the user's.
+        pub owned: bool,
+        /// Its build stamp (none: from before stamps, or a plain build).
+        pub build: Option<u64>,
+        /// A server's running there, and its build's stamp.
+        pub server: bool,
+        pub server_build: Option<u64>,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Plan {
+        UpToDate,
+        /// A later build goes in (and the server, if one runs, moves to it).
+        Install {
+            cpu: &'static str,
+        },
+        /// The file's current; the server runs an older build: move it.
+        Restart,
+        /// Left alone, and why.
+        Skip(String),
+    }
+
+    /// The script that reads what's there (run by `sh`, through the login
+    /// shell, for its PATH), for `artty` named `artty` (a setting's path).
+    pub fn script(artty: &str) -> String {
+        format!(
+            r#"uname -sm
+ldd --version 2>&1 | head -n 1
+echo "home=$HOME"
+P=$(command -v {artty} 2>/dev/null) || P=
+[ -n "$P" ] || exit 0
+R=$(readlink -f "$P" 2>/dev/null || echo "$P")
+echo "path=$R"
+if [ -f "$R" ] && [ -O "$R" ]; then echo "owned=1"; fi
+echo "build=$("$R" --build 2>/dev/null | head -n 1)"
+S=$("$R" server status 2>/dev/null | head -n 1)
+PID=$(echo "$S" | sed -n "s/.*(pid \([0-9]*\)).*/\1/p")
+if [ -n "$PID" ]; then
+  echo "server=1"
+  echo "server_build=$("/proc/$PID/exe" --build 2>/dev/null | head -n 1)"
+fi
+"#
+        )
+    }
+
+    /// Checks the build uploaded to `new` (its SHA-256 `hash`; that it can
+    /// take over, saying `handover`), then puts it at `path`.
+    pub fn move_in(new: &str, hash: &str, handover: &str, path: &str) -> String {
+        format!(
+            "sh -c 'set -e; h=$( (sha256sum {new} || shasum -a 256 {new}) 2>/dev/null | cut -c1-64); \
+             if [ \"$h\" != {hash} ]; then rm -f {new}; echo \"the build arrived changed\" >&2; exit 1; fi; \
+             chmod 755 {new}; \
+             if [ \"$({new} server --handover-check)\" != \"{handover}\" ]; then rm -f {new}; \
+             echo \"the new build cannot take over from this one\" >&2; exit 1; fi; \
+             mv -f {new} {path}'"
+        )
+    }
+
+    /// What [`script`] printed.
+    pub fn found(said: &str) -> Found {
+        let mut lines = said.lines();
+        let system = lines.next().unwrap_or_default();
+        let libc = lines.next().unwrap_or_default();
+        let mut found = Found {
+            cpu: Some(super::installing::linux_cpu(&format!("{system}\n{libc}"))),
+            ..Found::default()
+        };
+        let stamp = |v: &str| v.trim().parse::<u64>().ok();
+        for line in lines {
+            let Some((key, value)) = line.split_once('=') else { continue };
+            match key {
+                "home" => found.home = value.trim().to_owned(),
+                "path" => found.path = Some(value.trim().to_owned()).filter(|p| !p.is_empty()),
+                "owned" => found.owned = value.trim() == "1",
+                "build" => found.build = stamp(value),
+                "server" => found.server = value.trim() == "1",
+                "server_build" => found.server_build = stamp(value),
+                _ => {},
+            }
+        }
+        found
+    }
+
+    /// What to do there, this app's build being `ours`.
+    pub fn plan(ours: Option<u64>, found: &Found) -> Plan {
+        let Some(ours) = ours else {
+            return Plan::Skip("this app has no build stamp (not from bundle.sh)".into());
+        };
+        let cpu = match &found.cpu {
+            Some(Ok(cpu)) => *cpu,
+            Some(Err(why)) => return Plan::Skip(why.clone()),
+            None => return Plan::Skip("what it runs is unknown".into()),
+        };
+        let Some(path) = &found.path else {
+            return Plan::Skip("artty isn't found there".into());
+        };
+        // Only a file of the user's under their home (not a shim, nor what
+        // a package manager put there), at a path that needs no quoting.
+        let plain = path.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-+".contains(&b));
+        let mine = !found.home.is_empty()
+            && path.starts_with(&format!("{}/", found.home.trim_end_matches('/')))
+            && !path.contains("/shims/");
+        if !(found.owned && plain && mine) {
+            return Plan::Skip(format!("{path} isn't a file of yours under your home"));
+        }
+        let older = |build: Option<u64>| build.is_none_or(|b| b < ours);
+        if older(found.build) {
+            Plan::Install { cpu }
+        } else if found.server && older(found.server_build) {
+            Plan::Restart
+        } else {
+            Plan::UpToDate
+        }
+    }
+}
+
+/// What updating artty there did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Updated {
+    UpToDate,
+    /// The later build went in; the server (if one ran) moved to it.
+    Installed {
+        server_moved: bool,
+    },
+    /// The server moved to the build already there.
+    Restarted,
+    Skipped(String),
+}
+
+/// Update artty on the machine `config` reaches by ssh to this app's build
+/// (`ours`, its stamp), if that's later (see [`updating`]): `build` gives
+/// the build for a CPU and its SHA-256; `handover` is what a build that
+/// can take over says (`artty server --handover-check`).
+/// What's there, and what updating it to `ours` would do (nothing done).
+pub fn check(
+    config: &ServerConfig,
+    ours: Option<u64>,
+) -> Result<(updating::Found, updating::Plan), String> {
+    let artty = config.artty.as_deref().unwrap_or("artty");
+    if !artty.bytes().all(|b| b.is_ascii_alphanumeric() || b"/._-+~".contains(&b)) {
+        let why = format!("its artty setting ({artty}) needs quoting");
+        return Ok((updating::Found::default(), updating::Plan::Skip(why)));
+    }
+    let script = std::env::temp_dir().join(format!("artty-update-{}.sh", std::process::id()));
+    std::fs::write(&script, updating::script(artty)).map_err(|err| err.to_string())?;
+    let said = std::fs::File::open(&script)
+        .map_err(|err| err.to_string())
+        .and_then(|file| run(config, "exec \"$SHELL\" -lc 'sh -s'", Some(file)));
+    let _ = std::fs::remove_file(&script);
+    let found = updating::found(&said?);
+    let plan = updating::plan(ours, &found);
+    Ok((found, plan))
+}
+
+pub fn update(
+    config: &ServerConfig,
+    ours: Option<u64>,
+    build: impl Fn(&str) -> Option<(std::path::PathBuf, String)>,
+    handover: &str,
+) -> Result<Updated, String> {
+    use updating::Plan;
+    let (found, plan) = check(config, ours)?;
+    let path = found.path.clone().unwrap_or_default();
+    let restart = || -> Result<(), String> {
+        run(config, &format!("{path} server restart --keep-running"), None).map(|_| ())
+    };
+    match plan {
+        Plan::UpToDate => Ok(Updated::UpToDate),
+        Plan::Skip(why) => Ok(Updated::Skipped(why)),
+        Plan::Restart => restart().map(|()| Updated::Restarted),
+        Plan::Install { cpu } => {
+            let (file, hash) =
+                build(cpu).ok_or_else(|| format!("this app has no build for Linux on {cpu}"))?;
+            let dir = path.rsplit_once('/').map_or(".", |(dir, _)| dir).to_owned();
+            // Its own name (another app may be at it too).
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos());
+            let new = format!("{dir}/.artty-new-{}-{nonce}", std::process::id());
+            let upload =
+                std::fs::File::open(&file).map_err(|err| format!("{}: {err}", file.display()))?;
+            run(config, &format!("sh -c 'umask 077; cat > {new}'"), Some(upload))?;
+            run(config, &updating::move_in(&new, &hash, handover, &path), None)?;
+            if found.server {
+                restart()?;
+            }
+            Ok(Updated::Installed { server_moved: found.server })
+        },
+    }
+}
+
 /// Install this build of artty on the machine `config` reaches by ssh: the
 /// build for its CPU (from `build`, given `x86_64` or `aarch64`), into
 /// `~/.local/bin` (see [`installing`]).
@@ -489,6 +695,115 @@ pub fn last_said(stderr: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moving_in_is_sh() {
+        let command =
+            updating::move_in("/h/.artty-new-1-2", "abc123", "artty-handover 1", "/h/artty");
+        let checked =
+            std::process::Command::new("sh").arg("-n").arg("-c").arg(&command).status().unwrap();
+        assert!(checked.success(), "{command}");
+        // And for real, here: a build that can't take over isn't moved in.
+        let dir = std::env::temp_dir().join(format!("artty-move-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let new = dir.join("new");
+        std::fs::write(&new, "#!/bin/sh\necho nope\n").unwrap();
+        let hash =
+            std::process::Command::new("shasum").args(["-a", "256"]).arg(&new).output().unwrap();
+        let hash = String::from_utf8_lossy(&hash.stdout)[..64].to_owned();
+        let path = dir.join("artty");
+        std::fs::write(&path, "old").unwrap();
+        let command = updating::move_in(
+            new.to_str().unwrap(),
+            &hash,
+            "artty-handover 1",
+            path.to_str().unwrap(),
+        );
+        let out = std::process::Command::new("sh").arg("-c").arg(&command).output().unwrap();
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("cannot take over"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
+        assert!(!new.exists());
+        // One that can: moved in.
+        std::fs::write(&new, "#!/bin/sh\necho 'artty-handover 1'\n").unwrap();
+        let hash =
+            std::process::Command::new("shasum").args(["-a", "256"]).arg(&new).output().unwrap();
+        let hash = String::from_utf8_lossy(&hash.stdout)[..64].to_owned();
+        let command = updating::move_in(
+            new.to_str().unwrap(),
+            &hash,
+            "artty-handover 1",
+            path.to_str().unwrap(),
+        );
+        let out = std::process::Command::new("sh").arg("-c").arg(&command).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(std::fs::read_to_string(&path).unwrap().contains("artty-handover"));
+        // Changed on the way: not.
+        std::fs::write(&new, "#!/bin/sh\necho 'artty-handover 1'\n").unwrap();
+        let command = updating::move_in(
+            new.to_str().unwrap(),
+            "0000",
+            "artty-handover 1",
+            path.to_str().unwrap(),
+        );
+        let out = std::process::Command::new("sh").arg("-c").arg(&command).output().unwrap();
+        assert!(String::from_utf8_lossy(&out.stderr).contains("arrived changed"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_probe_is_sh() {
+        let path = std::env::temp_dir().join(format!("artty-probe-{}.sh", std::process::id()));
+        std::fs::write(&path, updating::script("artty")).unwrap();
+        let checked = std::process::Command::new("sh").arg("-n").arg(&path).status().unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(checked.success());
+    }
+
+    #[test]
+    fn updates_only_forward_and_only_ones_own() {
+        use updating::{Plan, found, plan};
+        let there = |build: &str, server_build: &str| {
+            found(&format!(
+                "Linux x86_64\nldd (GNU libc) 2.35\nhome=/home/me\npath=/home/me/.local/bin/artty\n\
+                 owned=1\nbuild={build}\nserver=1\nserver_build={server_build}\n"
+            ))
+        };
+        // Older, or from before stamps (it said something else): a new one.
+        assert_eq!(plan(Some(200), &there("100", "100")), Plan::Install { cpu: "x86_64" });
+        let old = there("artty: the app runs on macOS", "");
+        assert_eq!(plan(Some(200), &old), Plan::Install { cpu: "x86_64" });
+        // The file's current, the server not: moved to it.
+        assert_eq!(plan(Some(200), &there("200", "100")), Plan::Restart);
+        // Current, or later (another Mac's newer app): left alone.
+        assert_eq!(plan(Some(200), &there("200", "200")), Plan::UpToDate);
+        assert_eq!(plan(Some(200), &there("300", "300")), Plan::UpToDate);
+        // An app without a stamp never updates anything.
+        assert!(matches!(plan(None, &there("100", "100")), Plan::Skip(_)));
+        // Not Linux, an old glibc: left alone.
+        let mac = found("Darwin arm64\n\nhome=/Users/me\npath=/Users/me/bin/artty\nowned=1\n");
+        assert!(matches!(plan(Some(200), &mac), Plan::Skip(_)));
+        let old_glibc =
+            found("Linux x86_64\nldd (GNU libc) 2.17\nhome=/h\npath=/h/artty\nowned=1\n");
+        assert!(matches!(plan(Some(200), &old_glibc), Plan::Skip(why) if why.contains("glibc")));
+        // Not the user's file, not under home, a shim: left alone.
+        let mut theirs = there("100", "");
+        theirs.owned = false;
+        assert!(matches!(plan(Some(200), &theirs), Plan::Skip(_)));
+        let mut system = there("100", "");
+        system.path = Some("/usr/local/bin/artty".into());
+        assert!(matches!(plan(Some(200), &system), Plan::Skip(_)));
+        let mut shim = there("100", "");
+        shim.path = Some("/home/me/.local/share/mise/shims/artty".into());
+        assert!(matches!(plan(Some(200), &shim), Plan::Skip(_)));
+        // No server running: the file only.
+        let quiet = found(
+            "Linux aarch64\nldd (GNU libc) 2.31\nhome=/home/me\npath=/home/me/.local/bin/artty\n\
+             owned=1\nbuild=100\n",
+        );
+        assert_eq!(plan(Some(200), &quiet), Plan::Install { cpu: "aarch64" });
+        assert!(!quiet.server);
+    }
 
     #[test]
     fn what_a_failed_command_said() {

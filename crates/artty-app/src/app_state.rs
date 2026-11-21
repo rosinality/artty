@@ -221,6 +221,10 @@ pub struct Shared {
     update_ready: bool,
     /// The server runs a different build; restarting it picks up this one.
     pub server_mismatch: Option<String>,
+    /// Other machines' artty, checked this run for an update (once each),
+    /// and what came of it, to show.
+    updates_checked: std::collections::HashSet<ServerId>,
+    update_notes: HashMap<ServerId, String>,
     /// This app's build, as of when it started.
     build: String,
     /// This Mac's server said it's ending every session: quit instead of
@@ -338,6 +342,8 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         update_ready: false,
         images: HashMap::new(),
         server_mismatch: None,
+        updates_checked: std::collections::HashSet::new(),
+        update_notes: HashMap::new(),
         build: std::env::current_exe()
             .map(|exe| artty_core::protocol::build_id(&exe))
             .unwrap_or_default(),
@@ -596,7 +602,7 @@ fn start_io(
 /// Ask the running server (from another build) to save its sessions and
 /// exit, over the JSON control channel every version has, and wait for it.
 fn restart_other_server() -> std::io::Result<artty_server::Upgrade> {
-    artty_server::upgrade(&std::env::current_exe()?)
+    artty_server::upgrade(&std::env::current_exe()?, false)
 }
 
 /// The server went away (it crashed, or restarted). Close our windows and
@@ -681,6 +687,8 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                 shared.server_mismatch = (version != artty_core::protocol::protocol_version()
                     || server_version != shared.build)
                     .then_some(server_version);
+            } else {
+                update_remote(server, cx);
             }
             cx.refresh_windows();
         },
@@ -1736,6 +1744,73 @@ pub fn install_remote(server: ServerId, cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// Bring artty on another machine up to this app's build, if it's older
+/// (and kept up to date: see `ServerConfig::updates`): once a run, in the
+/// background; what came of it shows on its line in the sidebar.
+fn update_remote(server: ServerId, cx: &mut App) {
+    let shared = cx.global_mut::<Shared>();
+    if !shared.updates_checked.insert(server) {
+        return;
+    }
+    let Some(config) = shared
+        .connections
+        .get(server as usize)
+        .and_then(|c| c.remote.clone())
+        .filter(|c| c.updates())
+    else {
+        return;
+    };
+    let ours = crate::BUILD.and_then(|b| b.trim().parse::<u64>().ok());
+    let handover = artty_server::handover_check();
+    let name = config.name.clone();
+    let updating = cx.background_spawn(async move {
+        let build = |cpu: &str| {
+            let path = crate::cli::linux_build(cpu)?;
+            let out = std::process::Command::new("/usr/bin/shasum")
+                .args(["-a", "256"])
+                .arg(&path)
+                .output()
+                .ok()?;
+            let hash = String::from_utf8_lossy(&out.stdout).get(..64)?.to_owned();
+            Some((path, hash))
+        };
+        artty_core::remote::update(&config, ours, build, &handover)
+    });
+    cx.spawn(async move |cx| {
+        use artty_core::remote::Updated;
+        let note = match updating.await {
+            Ok(Updated::UpToDate) => None,
+            Ok(Updated::Installed { server_moved: true }) => {
+                Some("updated artty there; its programs kept running".to_owned())
+            },
+            Ok(Updated::Installed { server_moved: false }) => {
+                Some("updated artty there".to_owned())
+            },
+            Ok(Updated::Restarted) => Some("its server moved to the newer build".to_owned()),
+            Ok(Updated::Skipped(why)) => {
+                log::info!("artty on {name} left as it is: {why}");
+                None
+            },
+            Err(err) => Some(format!("couldn't update artty there: {err}")),
+        };
+        if let Some(note) = &note {
+            log::info!("{name}: {note}");
+        }
+        let _ = cx.update(|cx| {
+            if let Some(note) = note {
+                cx.global_mut::<Shared>().update_notes.insert(server, note);
+            }
+            cx.refresh_windows();
+        });
+    })
+    .detach();
+}
+
+/// What updating artty on `server` came to, this run (if anything to say).
+pub fn update_note(server: ServerId, cx: &App) -> Option<String> {
+    cx.global::<Shared>().update_notes.get(&server).cloned()
 }
 
 /// Try `server` again after a while, longer after each failure in a row.

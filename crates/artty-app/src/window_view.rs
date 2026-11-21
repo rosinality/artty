@@ -2563,7 +2563,8 @@ impl WindowView {
         use app_state::Status;
         let group: SharedString = format!("server-{server}").into();
         let (dot, note): (u32, Option<String>) = match &status {
-            Status::Connected => (0x9ece6aff, None),
+            // (What updating artty there came to, if anything.)
+            Status::Connected => (0x9ece6aff, app_state::update_note(server, cx)),
             Status::Connecting => (0xe0af68ff, Some("connecting…".to_owned())),
             Status::Waiting { error, retry_at } => {
                 let seconds = retry_at.saturating_duration_since(Instant::now()).as_secs();

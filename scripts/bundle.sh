@@ -25,6 +25,11 @@ case "${1:-}" in
   *) echo "usage: $0 [--install]" >&2; exit 2 ;;
 esac
 
+# One stamp for this build, Mac and Linux alike (`artty --build`): the app
+# updates other machines' artty only to a later one.
+ARTTY_BUILD=$(date +%s)
+export ARTTY_BUILD
+
 cargo build --release -p artty
 
 # Linux builds (against glibc 2.28: any distribution from 2018 on).

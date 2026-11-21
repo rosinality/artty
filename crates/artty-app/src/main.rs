@@ -2,6 +2,10 @@
 //! other systems, where it runs the server other machines' apps reach).
 
 mod acp_host;
+
+/// This build's stamp, from `scripts/bundle.sh` (none from a plain cargo
+/// build): an app updates another machine's artty only to a later one.
+pub const BUILD: Option<&str> = option_env!("ARTTY_BUILD");
 #[cfg(target_os = "macos")]
 mod app;
 #[cfg(target_os = "macos")]

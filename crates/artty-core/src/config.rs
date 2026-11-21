@@ -171,9 +171,19 @@ pub struct ServerConfig {
     /// Instead of ssh: a command whose stdin and stdout reach the server
     /// (it runs `artty server --stdio` somewhere).
     pub command: Vec<String>,
+    /// Keep artty there up to date with this app's build (over ssh, only
+    /// ever to a later one; its server moves to it with its programs
+    /// running). On unless `false`.
+    pub auto_update: Option<bool>,
 }
 
 impl ServerConfig {
+    /// Whether artty there is kept up to date (reached by ssh, and not
+    /// turned off).
+    pub fn updates(&self) -> bool {
+        self.ssh.is_some() && self.command.is_empty() && self.auto_update != Some(false)
+    }
+
     /// The command that reaches the server.
     pub fn connect_command(&self) -> Option<Vec<String>> {
         if !self.command.is_empty() {

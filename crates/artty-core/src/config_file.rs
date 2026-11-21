@@ -164,6 +164,9 @@ impl ConfigFile {
         if !server.command.is_empty() {
             table["command"] = value(server.command.iter().collect::<Array>());
         }
+        if let Some(on) = server.auto_update {
+            table["auto-update"] = value(on);
+        }
         if !self.doc.get("servers").is_some_and(Item::is_array_of_tables) {
             self.doc["servers"] = Item::ArrayOfTables(ArrayOfTables::new());
         }

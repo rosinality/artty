@@ -370,7 +370,8 @@ pub enum Upgrade {
 
 /// Move the running server onto the build at `executable`, and wait until
 /// it answers.
-pub fn upgrade(executable: &Path) -> io::Result<Upgrade> {
+/// `keep_running`: hand over or fail, never restart (programs would).
+pub fn upgrade(executable: &Path, keep_running: bool) -> io::Result<Upgrade> {
     let before = uptime();
     let request = Request::HandOver { executable: executable.to_owned() };
     match control(&request, Duration::from_secs(5))? {
@@ -387,6 +388,11 @@ pub fn upgrade(executable: &Path) -> io::Result<Upgrade> {
                 }
             }
             Err(io::Error::new(io::ErrorKind::TimedOut, "the new server build didn't answer"))
+        },
+        Response::Error { message } if message.starts_with("bad request") && keep_running => {
+            Err(io::Error::other(
+                "that server is too old to hand over (restarting it would restart its programs)",
+            ))
         },
         Response::Error { message } if message.starts_with("bad request") => {
             // A server from before hand-overs: restart it.
