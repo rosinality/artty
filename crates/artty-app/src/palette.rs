@@ -24,6 +24,16 @@ pub(super) struct Palette {
     sending: Option<Sending>,
     /// Sending, the agent chosen: a note is typed for it.
     chosen: Chosen,
+    /// A pane's command, once it ends, handed to an agent (`artty when`):
+    /// which, and whether only if it fails; a new agent chosen for it.
+    watching: Option<Watching>,
+    new_chosen: bool,
+}
+
+pub(super) struct Watching {
+    pane: PaneId,
+    failed: bool,
+    title: String,
 }
 
 /// A message from an agent's thread, to send on.
@@ -71,6 +81,8 @@ enum Row<'a> {
     Copy,
     /// The agent chosen: send to it (with the note typed).
     Note,
+    /// A new agent, to hand a command's end to.
+    NewAgent,
 }
 
 /// "artty::ToggleFiles" as "Toggle Files".
@@ -93,7 +105,7 @@ impl Palette {
 
     /// The rows matching the query, best first.
     fn rows(&self) -> Vec<Row<'_>> {
-        if self.chosen.is_some() {
+        if self.chosen.is_some() || self.new_chosen {
             return vec![Row::Note];
         }
         if self.commanding() {
@@ -124,6 +136,9 @@ impl Palette {
             scored.into_iter().take(SHOWN).map(|(_, p)| Row::Place(p)).collect();
         if self.sending.as_ref().is_some_and(|s| s.session.is_some()) {
             rows.push(Row::Copy);
+        }
+        if self.watching.is_some() {
+            rows.push(Row::NewAgent);
         }
         rows
     }
@@ -195,6 +210,8 @@ impl WindowView {
             selected: 0,
             sending: None,
             chosen: None,
+            watching: None,
+            new_chosen: false,
         });
         cx.notify();
     }
@@ -225,7 +242,90 @@ impl WindowView {
             selected: 0,
             sending: Some(sending),
             chosen: None,
+            watching: None,
+            new_chosen: false,
         });
+        cx.notify();
+    }
+
+    /// "When This Finishes…": the palette, listing the agents the command
+    /// in `pane` can go to once it ends (`failed`: only if it fails), on its
+    /// machine, and a new one.
+    pub(super) fn open_when(&mut self, pane: PaneId, failed: bool, cx: &mut Context<Self>) {
+        if self.renaming.is_some() {
+            self.finish_rename(true, cx);
+        }
+        self.picker = None;
+        let server = ids::server_of(pane);
+        let places: Vec<Place> = self
+            .palette_places(cx)
+            .into_iter()
+            .filter(|p| p.agent && p.pane != pane && ids::server_of(p.pane) == server)
+            .collect();
+        let title = self.pane_state(pane, cx).map(|s| s.info.title.clone()).unwrap_or_default();
+        self.marked_text = None;
+        self.palette = Some(Palette {
+            query: String::new(),
+            places,
+            commands: Vec::new(),
+            selected: 0,
+            sending: None,
+            chosen: None,
+            watching: Some(Watching { pane, failed, title }),
+            new_chosen: false,
+        });
+        cx.notify();
+    }
+
+    /// The agent chosen for a command's end (or, chosen, the note typed:
+    /// set).
+    fn choose_when(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_mut() else { return };
+        match palette.rows().get(palette.selected) {
+            Some(Row::Place(place)) => {
+                palette.chosen = Some((place.pane, place.title.clone()));
+            },
+            Some(Row::NewAgent) => palette.new_chosen = true,
+            Some(Row::Note) => return self.set_when(cx),
+            _ => return,
+        }
+        palette.query.clear();
+        palette.selected = 0;
+        cx.notify();
+    }
+
+    fn set_when(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.take() else { return };
+        let Some(watching) = palette.watching else { return };
+        let to = match &palette.chosen {
+            Some((_, title)) => title.clone(),
+            None => "a new agent".to_owned(),
+        };
+        let note = palette.query.trim().to_owned();
+        let request = Request::When {
+            tab: ids::local_id(watching.pane),
+            failed: watching.failed,
+            every: false,
+            ask: palette.chosen.as_ref().map(|(p, _)| ids::local_id(*p)),
+            agent: palette.new_chosen.then(|| "claude".to_owned()),
+            note: Some(note).filter(|n| !n.is_empty()),
+        };
+        let answer = app_state::control_on(ids::server_of(watching.pane), request, cx);
+        let on = if watching.failed { "If it fails" } else { "When it finishes" };
+        cx.spawn(async move |this, cx| {
+            let result = answer.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Response::Error { message }) => {
+                        this.show_toast(format!("Not set: {message}"), cx)
+                    },
+                    Err(_) => this.show_toast("Not set: no answer from its server", cx),
+                    Ok(_) => this.show_toast(format!("{on}, {to} gets it"), cx),
+                }
+                this.refresh_known(cx);
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -293,8 +393,11 @@ impl WindowView {
             "up" => palette.selected = palette.selected.saturating_sub(1),
             "down" => palette.selected = (palette.selected + 1).min(count.saturating_sub(1)),
             // (A note empty: back to choosing the agent.)
-            "backspace" if palette.chosen.is_some() && palette.query.is_empty() => {
+            "backspace"
+                if (palette.chosen.is_some() || palette.new_chosen) && palette.query.is_empty() =>
+            {
                 palette.chosen = None;
+                palette.new_chosen = false;
                 palette.selected = 0;
             },
             "backspace" => {
@@ -320,6 +423,9 @@ impl WindowView {
         if self.palette.as_ref().is_some_and(|p| p.sending.is_some()) {
             return self.choose_send(cx);
         }
+        if self.palette.as_ref().is_some_and(|p| p.watching.is_some()) {
+            return self.choose_when(cx);
+        }
         let Some(palette) = self.palette.take() else { return };
         cx.notify();
         match palette.rows().get(palette.selected) {
@@ -337,7 +443,7 @@ impl WindowView {
                 // (Sent now; no need of the answer.)
                 drop(app_state::control_on(server, request, cx));
             },
-            Some(Row::Copy | Row::Note) | None => {},
+            Some(Row::Copy | Row::Note | Row::NewAgent) | None => {},
         }
     }
 
@@ -431,13 +537,24 @@ impl WindowView {
                     Row::Place(p) => (p.icon.as_str(), p.title.clone(), p.detail.clone(), p.here),
                     Row::Command(c) => ("", c.name.clone(), c.keys.clone(), true),
                     Row::Note => {
-                        let to = palette.chosen.as_ref().map_or("", |(_, t)| t.as_str());
+                        let to = match &palette.chosen {
+                            Some((_, title)) => title.clone(),
+                            None => "a new agent".to_owned(),
+                        };
                         let detail = match palette.query.trim() {
                             "" => "no note".to_owned(),
                             note => format!("with: {note}"),
                         };
-                        ("", format!("Send to {to}"), detail, true)
+                        let what =
+                            if palette.watching.is_some() { "Hand it to" } else { "Send to" };
+                        ("", format!("{what} {to}"), detail, true)
                     },
+                    Row::NewAgent => (
+                        "",
+                        "A new agent".to_owned(),
+                        "Claude Code, started with it, in that tab's folder".to_owned(),
+                        true,
+                    ),
                     Row::Copy => {
                         let from = palette.sending.as_ref().map_or("", |s| s.title.as_str());
                         let detail = match palette.query.trim() {
@@ -483,9 +600,19 @@ impl WindowView {
             })
             .collect();
         let empty = items.is_empty();
-        let note_for = palette.chosen.as_ref().map(|(_, title)| {
-            format!("A note for {title}, if you like (↩ sends · ⌫ back to the agents)")
+        let watched = palette.watching.as_ref().map(|w| {
+            let on = if w.failed { "fails" } else { "finishes" };
+            format!("When “{}” {on}, hand it to… (an agent, or a new one)", w.title)
         });
+        let note_for = match (&palette.chosen, palette.new_chosen, &palette.watching) {
+            (_, _, Some(_)) if palette.chosen.is_some() || palette.new_chosen => Some(
+                "A note to go with it, if you like (↩ sets it · ⌫ back to the agents)".to_owned(),
+            ),
+            (Some((_, title)), _, None) => {
+                Some(format!("A note for {title}, if you like (↩ sends · ⌫ back to the agents)"))
+            },
+            _ => watched,
+        };
         let hint = if let Some(hint) = note_for.as_deref() {
             hint
         } else if palette.sending.as_ref().is_some_and(|s| s.text.trim().is_empty()) {

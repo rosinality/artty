@@ -392,3 +392,86 @@ fn past_conversations_listed() {
     assert!(!out.status.success());
     let _ = pane;
 }
+
+/// A pane whose "shell" says a command ran (shell integration's marks):
+/// "hello", "world", then exit 3; and stays.
+fn a_command_that_fails(scratch: &Scratch) -> String {
+    let script = r#"sleep 2; printf '\033]133;A\007$ \033]133;B\007'; printf '\033]133;C\007'; echo hello; echo world; printf '\033]133;D;3\007'; sleep 60"#;
+    let out = scratch.artty(&["new", "--background", "--", "sh", "-c", script]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    stdout(&out)
+}
+
+#[test]
+fn a_command_finishing_handed_to_an_agent() {
+    let (scratch, agent) = started();
+    let watched = a_command_that_fails(&scratch);
+    let out =
+        scratch.artty(&["when", "--tab", &watched, "--failed", "--ask", &agent, "Look at why."]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let listed = stdout(&scratch.artty(&["when", "--list"]));
+    assert!(listed.contains(&format!("if it fails → ask pane {agent}: Look at why.")), "{listed}");
+    // The agent is asked: what ran, how it ended, its last lines, the note.
+    wait_for("the agent asked", || {
+        thread(&scratch, &agent).iter().any(|(k, v)| {
+            k == "Reply" && v["text"].as_str().is_some_and(|t| t.contains("failed (exit 3)"))
+        })
+    });
+    let entries = thread(&scratch, &agent);
+    let prompt = entries
+        .iter()
+        .find_map(|(k, v)| {
+            (k == "Prompt").then(|| v["text"].as_str().unwrap_or_default().to_owned())
+        })
+        .filter(|t| t.contains("exit 3"))
+        .expect("asked");
+    assert!(prompt.contains("hello\nworld"), "{prompt}");
+    assert!(prompt.ends_with("Look at why."), "{prompt}");
+    // Once: gone.
+    assert_eq!(stdout(&scratch.artty(&["when", "--list"])), "");
+}
+
+#[test]
+fn a_command_finishing_handed_to_a_new_agent() {
+    let scratch = Scratch::with_config(&format!(
+        "[acp]\nclaude = \"ARTTY_BIN='{ARTTY}' python3 '{ADAPTER}'\"\n"
+    ));
+    let watched = a_command_that_fails(&scratch);
+    let out = scratch.artty(&["when", "--tab", &watched, "--new"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    wait_for("a new agent with it", || {
+        let agents: Value = serde_json::from_str(&stdout(&scratch.artty(&["agents", "--json"])))
+            .unwrap_or(Value::Null);
+        agents.as_array().is_some_and(|list| {
+            list.iter().any(|a| {
+                let pane = a["pane"].to_string();
+                thread(&scratch, &pane).iter().any(|(k, v)| {
+                    k == "Reply" && v["text"].as_str().is_some_and(|t| t.contains("in tab"))
+                })
+            })
+        })
+    });
+    // Asking nobody, from outside a pane: refused, saying so.
+    let out = scratch.artty(&["when", "--tab", &watched]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("who handles it"), "{}", stderr(&out));
+}
+
+#[test]
+fn a_when_kept_in_a_restart() {
+    let (mut scratch, agent) = started();
+    let out = scratch.artty(&["new", "--background", "--", "sleep", "600"]);
+    let watched = stdout(&out);
+    let out = scratch.artty(&["when", "--tab", &watched, "--every", "--ask", &agent, "Check it."]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    scratch.restart();
+    wait_for("it back", || {
+        stdout(&scratch.artty(&["when", "--list"])).contains("every time it finishes")
+    });
+    assert!(stdout(&scratch.artty(&["when", "--list"])).ends_with("Check it."));
+    // And cancelled.
+    let id =
+        stdout(&scratch.artty(&["when", "--list"])).split_whitespace().next().unwrap().to_owned();
+    assert!(scratch.artty(&["when", "--cancel", &id]).status.success());
+    assert_eq!(stdout(&scratch.artty(&["when", "--list"])), "");
+}

@@ -54,6 +54,14 @@ own pane's id is in `$ARTTY_SESSION_ID`.
   far), in its folder: the conversation itself isn't changed, and its agent
   isn't interrupted. The copy is a tab of its own (`artty close N` once
   you're done with it).
+- `artty when --tab N [--failed] [--every] "note"` hands the command
+  running in pane N to you once it finishes (`--failed`: only if it fails;
+  `--every` time, not once): you're asked, as `artty ask` does, with what
+  ran, how it ended, how long it took, its last lines, and the note. Start
+  something long in another tab (a training run, a build), set this, and
+  get on with other work. `--ask TAB` hands it to another agent, `--new
+  [--agent NAME]` to a new one; `artty when --list`, `--cancel ID`. It
+  needs that tab's shell integration (which says a command ended).
 - `artty sessions` lists agents' past conversations on this machine (not
   those going on in panes): id, agent, when, folder, title;
   `--search TEXT` finds those mentioning TEXT. `artty sessions ID` shows

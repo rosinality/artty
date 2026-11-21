@@ -17,6 +17,7 @@ mod status;
 mod store;
 mod threads;
 mod watch;
+mod when;
 mod worktrees;
 
 use std::io::{self, BufRead, BufReader, Write};

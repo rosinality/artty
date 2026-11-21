@@ -19,6 +19,8 @@ pub(super) struct Known {
     loading: bool,
     /// Machines away (reconnecting): their agents as last heard, dimmed.
     away: HashSet<String>,
+    /// Commands' finishing handed to agents (`artty when`), panes tagged.
+    pub(super) whens: Vec<artty_core::control::WhenInfo>,
 }
 
 /// The sidebar, grouped by agent: what's folded in it.
@@ -104,12 +106,21 @@ impl WindowView {
             .into_iter()
             .filter(|(_, _, status)| *status == app_state::Status::Connected)
             .map(|(server, name, _)| {
-                (server, name, app_state::control_on(server, Request::Agents, cx))
+                let whens = app_state::control_on(server, Request::Whens { tab: None }, cx);
+                (server, name, app_state::control_on(server, Request::Agents, cx), whens)
             })
             .collect();
         cx.spawn(async move |this, cx| {
             let mut found = kept;
-            for (server, name, answer) in asks {
+            let mut whens = Vec::new();
+            for (server, name, answer, set) in asks {
+                if let Ok(Response::Whens { whens: theirs }) = set.await {
+                    whens.extend(theirs.into_iter().map(|mut when| {
+                        when.tab = ids::tag(server, when.tab);
+                        when.ask = when.ask.map(|p| ids::tag(server, p));
+                        when
+                    }));
+                }
                 if let Ok(Response::Agents { agents }) = answer.await {
                     found.extend(agents.into_iter().map(|mut agent| {
                         agent.pane = ids::tag(server, agent.pane);
@@ -123,9 +134,10 @@ impl WindowView {
                 let found = agents_view::nested(found);
                 let known = &mut this.known;
                 known.loading = false;
-                if known.agents != found || known.away != away {
+                if known.agents != found || known.away != away || known.whens != whens {
                     known.agents = found;
                     known.away = away;
+                    known.whens = whens;
                     cx.notify();
                 }
             });
@@ -532,6 +544,64 @@ impl WindowView {
             );
         }
         rows
+    }
+
+    /// A tab's whens (`artty when` on one of its panes), as chips: what
+    /// sets it off, who gets it; × takes it back.
+    pub(super) fn whens_row(&self, tab: &TabLayout, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let panes = tab.root.panes();
+        let whens: Vec<&artty_core::control::WhenInfo> =
+            self.known.whens.iter().filter(|w| panes.contains(&w.tab)).collect();
+        if whens.is_empty() {
+            return None;
+        }
+        let chips = whens.into_iter().map(|when| {
+            let on = if when.failed { "if it fails" } else { "when it finishes" };
+            let to = match (when.ask, &when.agent) {
+                (Some(pane), _) => self
+                    .known_agent(pane)
+                    .map_or(format!("pane {}", ids::local_id(pane)), |a| a.title),
+                (None, Some(agent)) => format!("a new {agent}"),
+                (None, None) => "?".to_owned(),
+            };
+            let every = if when.every { " (every time)" } else { "" };
+            let (server, id) = (ids::server_of(when.tab), when.id);
+            div()
+                .id(SharedString::from(format!("when-{server}-{id}")))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .px(px(5.))
+                .rounded(px(4.))
+                .text_size(px(10.5))
+                .bg(ui(0xffffff0d))
+                .text_color(ui(0xffffff90))
+                .child(Self::one_line(format!("◷ {on}{every} → {to}")).min_w_0())
+                .child(
+                    div()
+                        .id(SharedString::from(format!("when-{server}-{id}-cancel")))
+                        .text_color(ui(0xffffff70))
+                        .hover(|d| d.text_color(ui(0xffffffee)))
+                        .child("×")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            drop(app_state::control_on(server, Request::WhenCancel { id }, cx));
+                            this.known
+                                .whens
+                                .retain(|w| !(ids::server_of(w.tab) == server && w.id == id));
+                            cx.notify();
+                        })),
+                )
+        });
+        Some(
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .pl(px(if self.config.sidebar_icons { 20. } else { 6. }))
+                .pb(px(2.))
+                .children(chips),
+        )
     }
 
     /// Open (or fold) a server's past conversations, kept as the setting.

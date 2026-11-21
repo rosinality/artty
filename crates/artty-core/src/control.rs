@@ -431,6 +431,30 @@ pub enum Request {
         #[serde(default)]
         timeout_secs: Option<u64>,
     },
+    /// When the command in `tab` finishes (`failed`: only if it fails; else
+    /// once, or `every` time): ask the agent in `ask`, or start a new one
+    /// (`agent`) with it — what ran, how it ended, its last lines, `note`.
+    When {
+        tab: SessionId,
+        #[serde(default)]
+        failed: bool,
+        #[serde(default)]
+        every: bool,
+        #[serde(default)]
+        ask: Option<SessionId>,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        note: Option<String>,
+    },
+    /// The whens set (all, or `tab`'s).
+    Whens {
+        #[serde(default)]
+        tab: Option<SessionId>,
+    },
+    WhenCancel {
+        id: u64,
+    },
     /// Agents' conversations on this machine, newest first: the latest
     /// (`limit` at most), or those mentioning `text`. Those going on in
     /// artty's panes aren't listed.
@@ -458,6 +482,22 @@ pub enum Request {
         #[serde(default)]
         timeout_secs: Option<u64>,
     },
+}
+
+/// A command's finishing handed to an agent (`artty when`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WhenInfo {
+    pub id: u64,
+    pub tab: SessionId,
+    pub failed: bool,
+    pub every: bool,
+    /// The agent asked, or the one started (`claude`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A past conversation, as `Sessions` lists it.
@@ -888,6 +928,9 @@ pub enum Response {
     },
     Sessions {
         sessions: Vec<PastSession>,
+    },
+    Whens {
+        whens: Vec<WhenInfo>,
     },
     Conversation {
         messages: Vec<Said>,

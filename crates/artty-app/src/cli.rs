@@ -25,6 +25,7 @@ pub const COMMANDS: &[&str] = &[
     "run",
     "ask",
     "sessions",
+    "when",
     "approve",
     "approvals",
     "approval",
@@ -134,6 +135,14 @@ artty, your own pane is found automatically:
   artty thread --search TEXT [--tab N] [--json]
                                          every agent's thread (or pane N's)
                                          searched: newest matches first
+  artty when --tab N [--failed] [--every] [--ask TAB | --new [--agent NAME]] [NOTE]
+                                         when the command running in pane N
+                                         finishes (--failed: only if it fails;
+                                         once, or --every time), ask agent TAB
+                                         (from an agent's pane, by default
+                                         itself), or start a new one, with what
+                                         ran, how it ended, its last lines, NOTE
+  artty when --list [--tab N] | --cancel ID
   artty sessions [--search TEXT] [--limit N] [--json]
                                          agents' past conversations on this
                                          machine (not those going on in panes),
@@ -331,6 +340,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--tab" => tab = Some(args.number("--tab")?),
             "--lines" => _ = flags.insert("lines", args.value("--lines")?),
             "--limit" => _ = flags.insert("limit", args.value("--limit")?),
+            "--ask" => _ = flags.insert("ask", args.value("--ask")?),
             "--timeout" => _ = flags.insert("timeout", args.value("--timeout")?),
             "--cwd" => _ = flags.insert("cwd", args.value("--cwd")?),
             "--title" => _ = flags.insert("title", args.value("--title")?),
@@ -351,10 +361,14 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             "--dismiss" => _ = flags.insert("dismiss", args.value("--dismiss")?),
             "--after" => _ = flags.insert("after", args.value("--after")?),
             "--raw" | "--no-wait" | "--list" | "--abandon" | "--all" | "--follow" | "--text"
-            | "--keep-running" => {
+            | "--keep-running" | "--new" | "--done" | "--failed" | "--every" => {
                 switches.insert(match arg.as_str() {
                     "--raw" => "raw",
                     "--keep-running" => "keep-running",
+                    "--new" => "new",
+                    "--done" => "done",
+                    "--failed" => "failed",
+                    "--every" => "every",
                     "--list" => "list",
                     "--abandon" => "abandon",
                     "--all" => "all",
@@ -723,6 +737,48 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 limit: number("lines")?.map(|n| n as usize),
             }
         },
+        "when" => {
+            if let Some(id) = flags.get("cancel") {
+                let id = id.parse().map_err(|_| "--cancel: not a number (a when's id)")?;
+                return print_response(send(&Request::WhenCancel { id }, None)?, false);
+            }
+            if switches.contains("list") {
+                return print_response(
+                    send(&Request::Whens { tab }, None)?,
+                    switches.contains("json"),
+                );
+            }
+            let tab = tab.ok_or("when: which tab's command? (--tab N)")?;
+            let ask = flags
+                .get("ask")
+                .map(|t| t.parse().map_err(|_| format!("--ask: not a pane id: {t}")))
+                .transpose()?;
+            let agent = switches
+                .contains("new")
+                .then(|| flags.get("agent").cloned().unwrap_or_else(|| "claude".into()));
+            // Neither: the agent setting it (its own pane), if one is.
+            let ask = match (ask, &agent) {
+                (None, None) => Some(own_tab().ok_or(
+                    "when: who handles it? --ask TAB (an agent), or --new [--agent NAME]",
+                )?),
+                (ask, _) => ask,
+            };
+            let note = if rest == ["-"] {
+                let mut text = String::new();
+                std::io::stdin().read_to_string(&mut text).map_err(|err| err.to_string())?;
+                Some(text)
+            } else {
+                Some(rest.join(" ")).filter(|n| !n.trim().is_empty())
+            };
+            Request::When {
+                tab,
+                failed: switches.contains("failed"),
+                every: switches.contains("every"),
+                ask,
+                agent,
+                note,
+            }
+        },
         "sessions" => {
             let limit = |name: &str| -> Result<Option<usize>, String> {
                 flags
@@ -878,6 +934,28 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         Response::Error { message } => Err(message),
         Response::Tab { id } => {
             println!("{id}");
+            Ok(0)
+        },
+        Response::Whens { whens } if json => {
+            println!("{}", serde_json::to_string_pretty(&whens).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Whens { whens } => {
+            for when in &whens {
+                let on = match (when.failed, when.every) {
+                    (true, true) => "every time it fails",
+                    (true, false) => "if it fails",
+                    (false, true) => "every time it finishes",
+                    (false, false) => "when it finishes",
+                };
+                let to = match (&when.ask, &when.agent) {
+                    (Some(pane), _) => format!("ask pane {pane}"),
+                    (None, Some(agent)) => format!("start {agent}"),
+                    (None, None) => "?".to_owned(),
+                };
+                let note = when.note.as_deref().map(|n| format!(": {n}")).unwrap_or_default();
+                println!("{:>4}  pane {:>3}  {on} → {to}{note}", when.id, when.tab);
+            }
             Ok(0)
         },
         Response::Sessions { sessions } if json => {

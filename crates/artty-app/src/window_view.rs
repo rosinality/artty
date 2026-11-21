@@ -183,6 +183,9 @@ enum MenuCommand {
     SendTo(PaneId),
     StartCopy(PaneId),
     ShowThread(PaneId),
+    /// The command in this pane, once it finishes (or fails), handed to an
+    /// agent (`artty when`).
+    When(PaneId, bool),
 }
 
 /// The pane a menu is for, if a pane's.
@@ -1480,6 +1483,7 @@ impl WindowView {
                 self.show_thread_of(agent, cx);
                 return cx.notify();
             },
+            MenuCommand::When(pane, failed) => return self.open_when(pane, failed, cx),
             _ => {},
         }
         let place = |index: usize| self.places.get(index).copied();
@@ -2463,6 +2467,7 @@ impl WindowView {
             .children(header)
             .children(pane_rows.into_iter().flatten())
             .children(self.ports_row(ids::server_of(tab.focused), ports, cx))
+            .children(self.whens_row(tab, cx))
     }
 
     /// The ports a tab's programs listen on, to open (forwarded from another
@@ -3708,6 +3713,18 @@ impl WindowView {
         items
     }
 
+    /// When the command in `pane` finishes, or fails: to an agent.
+    fn when_menu_items(
+        &self,
+        pane: PaneId,
+    ) -> Vec<Option<(SharedString, &'static str, bool, MenuCommand)>> {
+        vec![
+            Some(("When This Finishes…".into(), "", true, MenuCommand::When(pane, false))),
+            Some(("If This Fails…".into(), "", true, MenuCommand::When(pane, true))),
+            None,
+        ]
+    }
+
     fn context_menu_overlay(
         &self,
         viewport: gpui::Size<Pixels>,
@@ -3740,6 +3757,9 @@ impl WindowView {
                     true,
                     cx,
                 ));
+                if let Some(pane) = pane_of(&menu.target) {
+                    items.extend(self.when_menu_items(pane));
+                }
                 items.extend([
                     item("Split Right", "⌘D", true, MenuCommand::SplitRight),
                     item("Split Down", "⇧⌘D", true, MenuCommand::SplitDown),
@@ -3788,6 +3808,10 @@ impl WindowView {
                     t.root.panes().into_iter().find(|&p| self.known_agent(p).is_some())
                 });
                 let mut items = self.agent_menu_items(agent, false, false, cx);
+                // Its command, once it ends, to an agent.
+                if let Some(pane) = self.tabs.get(index).map(|t| t.focused) {
+                    items.extend(self.when_menu_items(pane));
+                }
                 items.extend([
                     item("Rename Tab…", "", true, MenuCommand::RenameTab),
                     item("Move to New Workspace", "", !alone, MenuCommand::TabToNewWorkspace),

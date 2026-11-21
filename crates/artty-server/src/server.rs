@@ -330,6 +330,10 @@ pub(crate) struct Server {
     /// a pane copies (listed under it; not started by it, so not counted
     /// in how deep agents start agents).
     copied_from: HashMap<PaneId, PaneId>,
+    /// Commands' finishing handed to agents (`artty when`), and the next's id.
+    whens: Vec<crate::when::When>,
+    next_when: u64,
+    last_kept_whens: Option<String>,
     /// The worktrees tabs were opened in (`artty new --worktree`), removed
     /// with them if they have no changes.
     worktrees: HashMap<PaneId, crate::worktrees::Worktree>,
@@ -625,6 +629,9 @@ impl Server {
             edits: crate::edits::Edits::default(),
             parents: HashMap::new(),
             copied_from: HashMap::new(),
+            whens: Vec::new(),
+            next_when: 1,
+            last_kept_whens: None,
             rewinds: Vec::new(),
             worktrees: HashMap::new(),
             next_pane: 1,
@@ -1505,6 +1512,9 @@ impl Server {
         self.edits.pane_closed(pane);
         self.parents.remove(&pane);
         self.copied_from.remove(&pane);
+        // (What watched it goes; one handled by its agent is kept: said
+        // when it fires.)
+        self.whens.retain(|w| w.pane != pane);
         if let Some(tree) = self.worktrees.remove(&pane) {
             crate::worktrees::remove(tree);
         }
@@ -1760,6 +1770,7 @@ impl Server {
                     }
                     self.notify_user(id, None, &message);
                 }
+                self.fire_whens(id, &record);
             },
             Notice::ClipboardStore(_, text) => {
                 // To the clipboard of the app showing it (this machine's
@@ -2582,6 +2593,68 @@ impl Server {
         Ok(Response::Started { id, ask })
     }
 
+    /// A command in `pane` finished: the whens it sets off, handed to their
+    /// agents (asked, or started with it); once-only ones gone.
+    fn fire_whens(&mut self, pane: PaneId, record: &artty_core::CommandRecord) {
+        use crate::when::{Finished, Handler, message};
+        let fired: Vec<crate::when::When> =
+            self.whens.iter().filter(|w| w.pane == pane && w.fires(record.exit)).cloned().collect();
+        if fired.is_empty() {
+            return;
+        }
+        self.whens.retain(|w| w.pane != pane || !w.fires(record.exit) || w.every);
+        let workspace = self
+            .place_of(pane)
+            .and_then(|(w, _)| self.workspaces.get(&w))
+            .map(|w| w.name.clone().unwrap_or_else(|| w.title.clone()));
+        let title = self.panes.get(&pane).map(|p| p.title()).unwrap_or_default();
+        let place = match &workspace {
+            Some(workspace) => format!("{workspace} · {title}"),
+            None => title,
+        };
+        let cwd = self.panes.get(&pane).and_then(|p| p.session.cwd());
+        let took = record.finished.map(|end| end.saturating_duration_since(record.started));
+        for when in fired {
+            let text = message(&Finished {
+                pane,
+                place: &place,
+                command: record.command.as_deref(),
+                exit: record.exit,
+                took,
+                output: &record.output,
+                note: when.note.as_deref(),
+            });
+            let handed = match &when.handler {
+                Handler::Ask(agent) => self.add_ask(*agent, text, false, None).map(|_| ()),
+                Handler::New(agent) => {
+                    let start = Request::New {
+                        cwd: cwd.clone(),
+                        command: vec![agent.clone()],
+                        title: None,
+                        focus: false,
+                        split: None,
+                        target: None,
+                        workspace: workspace.clone(),
+                        worktree: None,
+                        task: Some(text),
+                        thread: None,
+                        back: false,
+                        fork: None,
+                    };
+                    self.acp_agents(start)
+                        .and_then(|start| self.start_with_task(start, None))
+                        .map(|_| ())
+                },
+            };
+            if let Err(err) = handed {
+                log::warn!("when {} (pane {pane}): {err}", when.id);
+                self.notify_user(pane, Some("artty when"), &format!("Couldn't hand it on: {err}"));
+            }
+        }
+        self.pump_asks(Instant::now());
+        self.keep(Instant::now());
+    }
+
     /// The agent in `pane`, as an ask names it.
     fn ask_from(&self, pane: PaneId) -> Option<artty_core::control::AskFrom> {
         let p = self.panes.get(&pane)?;
@@ -3396,6 +3469,49 @@ impl Server {
                     .collect();
                 agents.sort_by_key(|a| a.pane);
                 Response::Agents { agents }
+            },
+            Request::When { tab, failed, every, ask, agent, note } => {
+                use crate::when::{Handler, When};
+                if !self.panes.contains_key(&tab) {
+                    return Err(format!("no pane {tab}"));
+                }
+                let handler = match (ask, agent) {
+                    (Some(ask), _) if !self.panes.contains_key(&ask) => {
+                        return Err(format!("no pane {ask} to ask"));
+                    },
+                    (Some(ask), _) => Handler::Ask(ask),
+                    (None, Some(agent)) => Handler::New(agent),
+                    (None, None) => {
+                        return Err("who handles it: an agent to ask (--ask TAB), or a new one \
+                                    (--new)"
+                            .into());
+                    },
+                };
+                let id = self.next_when;
+                self.next_when += 1;
+                let note = note.filter(|n| !n.trim().is_empty());
+                let when = When { id, pane: tab, failed, every, handler, note };
+                let info = when.info();
+                self.whens.push(when);
+                self.keep(Instant::now());
+                Response::Whens { whens: vec![info] }
+            },
+            Request::Whens { tab } => Response::Whens {
+                whens: self
+                    .whens
+                    .iter()
+                    .filter(|w| tab.is_none_or(|t| w.pane == t))
+                    .map(|w| w.info())
+                    .collect(),
+            },
+            Request::WhenCancel { id } => {
+                let before = self.whens.len();
+                self.whens.retain(|w| w.id != id);
+                if self.whens.len() == before {
+                    return Err(format!("no when {id}"));
+                }
+                self.keep(Instant::now());
+                Response::Ok
             },
             Request::ThreadSearch { text, tab } => {
                 let hits = self
@@ -4462,6 +4578,30 @@ impl Server {
             self.threads.store().set_record("parents", &json);
             self.last_kept_parents = Some(json);
         }
+        let whens: Vec<crate::when::Kept> = self
+            .whens
+            .clone()
+            .into_iter()
+            .map(|w| {
+                let (ask, agent) = match w.handler {
+                    crate::when::Handler::Ask(p) => (Some(self.threads.key(p)), None),
+                    crate::when::Handler::New(agent) => (None, Some(agent)),
+                };
+                crate::when::Kept {
+                    pane: self.threads.key(w.pane),
+                    failed: w.failed,
+                    every: w.every,
+                    ask,
+                    agent,
+                    note: w.note,
+                }
+            })
+            .collect();
+        let Ok(json) = serde_json::to_string(&whens) else { return };
+        if self.last_kept_whens.as_ref() != Some(&json) {
+            self.threads.store().set_record("whens", &json);
+            self.last_kept_whens = Some(json);
+        }
     }
 
     /// Threads' permission requests brought up to date (answered since).
@@ -4508,6 +4648,31 @@ impl Server {
             .record("parents")
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
+        let kept: Vec<crate::when::Kept> = self
+            .threads
+            .store()
+            .record("whens")
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        for kept in kept {
+            let handler = match (kept.ask, kept.agent) {
+                (Some(key), _) => self.threads.pane_of(key).map(crate::when::Handler::Ask),
+                (None, Some(agent)) => Some(crate::when::Handler::New(agent)),
+                (None, None) => None,
+            };
+            if let (Some(pane), Some(handler)) = (self.threads.pane_of(kept.pane), handler) {
+                let id = self.next_when;
+                self.next_when += 1;
+                self.whens.push(crate::when::When {
+                    id,
+                    pane,
+                    failed: kept.failed,
+                    every: kept.every,
+                    handler,
+                    note: kept.note,
+                });
+            }
+        }
         for (child, parent, copy) in parents {
             if let (Some(child), Some(parent)) =
                 (self.threads.pane_of(child), self.threads.pane_of(parent))
