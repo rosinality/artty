@@ -47,6 +47,10 @@ fn a_turn_cut_short_as_it_says() {
     assert_eq!(at_work["state"], "working", "{at_work}");
     // What it's doing: its own words.
     assert_eq!(at_work["message"], "Writing note.txt", "{at_work}");
+    // And its tab says so (the sidebar shows it under the tab's title).
+    let tabs: Value = serde_json::from_str(&stdout(&scratch.artty(&["list", "--json"]))).unwrap();
+    let tab = tabs.as_array().unwrap().iter().find(|t| t["id"].as_u64().is_some_and(|id| id.to_string() == pane)).unwrap();
+    assert_eq!(tab["detail"], "claude · Writing note.txt", "{tab}");
 
     // Idle, with no Stop: cut short (Esc).
     scratch.artty(&["send", "--tab", &pane, "go"]);

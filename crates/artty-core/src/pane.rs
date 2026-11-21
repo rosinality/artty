@@ -210,10 +210,14 @@ impl Pane {
             if status.state == ProgramState::Blocked {
                 self.attention = true;
             }
-            if matches!(status.state, ProgramState::Working | ProgramState::Blocked)
-                && status.msg.is_some()
-            {
-                self.message = status.msg;
+            // What it's doing, or waits for, is its message; at work with
+            // nothing said, it's doing something else now.
+            match status.state {
+                ProgramState::Working | ProgramState::Blocked if status.msg.is_some() => {
+                    self.message = status.msg
+                },
+                ProgramState::Working => self.message = None,
+                _ => {},
             }
         }
         self.refresh();
@@ -608,9 +612,10 @@ impl Pane {
                     AgentState::Done => "done",
                     AgentState::Idle => "ready",
                 };
+                // (At work: what it says it's doing, if it says.)
                 Some(match &self.message {
-                    Some(message) if *state != AgentState::Working => format!("{name} · {message}"),
-                    _ => format!("{name} · {what}"),
+                    Some(message) => format!("{name} · {message}"),
+                    None => format!("{name} · {what}"),
                 })
             },
             Status::Running { command, since, .. } => {

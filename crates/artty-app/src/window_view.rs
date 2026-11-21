@@ -2330,6 +2330,11 @@ impl WindowView {
         } else {
             focused.and_then(|state| state.short_detail(&self.tab_title(tab, cx)))
         };
+        // An agent at work: what it says it's doing, under its title.
+        let doing = focused
+            .filter(|s| !list && s.agent.is_some() && s.icon == "busy")
+            .and_then(|s| s.info.detail.as_deref()?.split_once(" · ").map(|(_, d)| d.to_owned()))
+            .filter(|d| d != "working");
 
         // One line: icon, title, then what it's doing on the right, and a
         // last column for the ⌘N label (while ⌘ is held) or, on hover, a close
@@ -2465,6 +2470,13 @@ impl WindowView {
             // Typing into every pane: an amber outline.
             .when(tab.broadcast, |d| d.border_1().border_color(ui(0xe0af6899)))
             .children(header)
+            .children(doing.map(|doing| {
+                Self::one_line(doing)
+                    .pl(px(if self.config.sidebar_icons { 20. } else { 6. }))
+                    .pb(px(2.))
+                    .text_size(px(11.))
+                    .text_color(ui(0xffffff70))
+            }))
             .children(pane_rows.into_iter().flatten())
             .children(self.ports_row(ids::server_of(tab.focused), ports, cx))
             .children(self.whens_row(tab, cx))
