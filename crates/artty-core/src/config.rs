@@ -55,6 +55,9 @@ pub struct Config {
     /// Tabs' status icons (working, needs you, done) in the sidebar; off,
     /// their titles start at the edge (a tab that needs you is still bold).
     pub sidebar_icons: bool,
+    /// The sidebar lists agents (each with those it started), then the
+    /// tabs with none, instead of tabs by workspace.
+    pub sidebar_by_agent: bool,
     /// Ask before pasting several lines into a program that would run them
     /// one by one (one that hasn't turned on bracketed paste).
     pub confirm_multiline_paste: bool,
@@ -392,6 +395,7 @@ impl Default for Config {
             sidebar_style: SidebarStyle::List,
             sidebar_width: 232,
             sidebar_icons: true,
+            sidebar_by_agent: false,
             confirm_multiline_paste: true,
             secure_keyboard_entry: false,
             local_echo: true,

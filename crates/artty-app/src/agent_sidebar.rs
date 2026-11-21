@@ -20,12 +20,18 @@ pub(super) struct Grouped {
 }
 
 impl WindowView {
-    /// Group the sidebar by agent, or back by workspace.
+    /// Group the sidebar by agent, or back by workspace: kept as the
+    /// setting (`sidebar-by-agent`), which every window follows.
     pub(super) fn toggle_grouping(&mut self, cx: &mut Context<Self>) {
-        self.grouped = match self.grouped.take() {
-            Some(_) => None,
-            None => Some(Grouped::default()),
-        };
+        let on = self.grouped.is_none();
+        self.grouped = on.then(Grouped::default);
+        let saved = artty_core::config_file::ConfigFile::open().and_then(|mut file| {
+            file.set_bool("sidebar-by-agent", on);
+            file.save()
+        });
+        if let Err(err) = saved {
+            self.show_toast(format!("Couldn't save the setting: {err}"), cx);
+        }
         self.refresh_grouped(cx);
         cx.notify();
     }

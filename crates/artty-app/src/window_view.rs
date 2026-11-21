@@ -539,6 +539,7 @@ impl WindowView {
         let font_size = config.font_size;
         let metrics = Metrics::measure(window, &config, font_size);
         let sidebar = (config.sidebar_width as f32).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+        let grouped = config.sidebar_by_agent.then(agent_sidebar::Grouped::default);
         Self {
             focus,
             theme: Arc::new(config.theme()),
@@ -592,7 +593,7 @@ impl WindowView {
             activity: None,
             agents: None,
             thread_panel: None,
-            grouped: None,
+            grouped,
             drafts: Default::default(),
             peeking: None,
             copy_mode: None,
@@ -1644,6 +1645,10 @@ impl WindowView {
         window.set_background_appearance(background_appearance(&config));
         self.config = Arc::new(config);
         self.sidebar_drag = None;
+        // The sidebar's grouping follows the setting.
+        if self.config.sidebar_by_agent != self.grouped.is_some() {
+            self.grouped = self.config.sidebar_by_agent.then(Default::default);
+        }
         // The active window follows the setting (inactive ones leave it be).
         if self.window_active {
             crate::secure_input::set(self.config.secure_keyboard_entry);

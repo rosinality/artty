@@ -54,6 +54,11 @@ sidebar-width = 232
 # leaves them out for a narrower line (a tab that needs you is still bold).
 sidebar-icons = true
 
+# The sidebar lists agents (each with those it started under it), then the
+# tabs with none, instead of tabs by workspace. ◆ on the sidebar's heading
+# switches it.
+sidebar-by-agent = false
+
 # Ask before pasting several lines into a program that would run them one by
 # one: one that hasn't turned on bracketed paste (shells and editors usually
 # have, so they get the paste whole).

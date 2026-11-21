@@ -934,6 +934,11 @@ impl Render for Settings {
                     self.sidebar_picker(cx),
                 ),
                 Self::row(
+                    "Group the sidebar by agent",
+                    Some("Agents (each with those it started), then the tabs with none"),
+                    self.toggle("sidebar-by-agent", c.sidebar_by_agent, "sidebar-by-agent", cx),
+                ),
+                Self::row(
                     "Status icons in the sidebar",
                     Some("Working, needs you, done; off for a narrower line"),
                     self.toggle("sidebar-icons", c.sidebar_icons, "sidebar-icons", cx),
