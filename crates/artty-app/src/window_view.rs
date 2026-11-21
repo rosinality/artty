@@ -1944,8 +1944,13 @@ impl WindowView {
         }
         let menu_click = event.button == MouseButton::Right
             || (event.button == MouseButton::Left && event.modifiers.control);
+        // An agent (Claude Code takes the mouse) has its right button for
+        // artty's menu: what can be done with it (send, a copy) is there.
+        let agent = self.pane_state(id, cx).is_some_and(|s| s.agent.is_some());
         if menu_click
-            && (self.mouse_reporting(id, &event.modifiers, cx).is_none() || event.modifiers.control)
+            && (self.mouse_reporting(id, &event.modifiers, cx).is_none()
+                || event.modifiers.control
+                || (agent && event.button == MouseButton::Right))
         {
             self.open_context_menu(id, event.position, cx);
             return;
