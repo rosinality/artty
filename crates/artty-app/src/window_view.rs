@@ -3429,38 +3429,6 @@ impl WindowView {
         }
     }
 
-    /// A row at the sidebar's top choosing what the window shows: Activity,
-    /// Terminals, Agents (one of them always chosen).
-    fn nav_row(
-        &self,
-        id: &'static str,
-        icon: &'static str,
-        color: u32,
-        label: &'static str,
-        keys: &'static str,
-        chosen: bool,
-    ) -> gpui::Stateful<gpui::Div> {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap(px(4.))
-            // A box as a tab row's.
-            .h(px(28.))
-            .mb(px(2.))
-            .px_1()
-            .rounded(px(7.))
-            .text_color(if chosen { ui(0xffffffee) } else { ui(0xffffffb0) })
-            .when(chosen, |d| d.bg(ui(0xffffff1c)))
-            .hover(|d| d.bg(ui(0xffffff10)))
-            .child(div().w(px(10.)).flex_none().flex().justify_center().text_color(ui(color)).child(icon))
-            .child(div().flex_1().child(label))
-            // (Esc only means something away from the terminals.)
-            .when(!(chosen && keys == "esc"), |d| {
-                d.child(div().text_xs().text_color(ui(0xffffff66)).child(keys))
-            })
-    }
-
     /// Back to the terminals, from Activity or Agents (at the tab of the
     /// agent you were looking at).
     fn show_terminals(&mut self, cx: &mut Context<Self>) {
@@ -3611,13 +3579,26 @@ impl WindowView {
                     .child("⇤")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
+            // Activity, in place of the terminal, and back (⇧⌘A).
+            .child(
+                div()
+                    .id("toggle-activity")
+                    .absolute()
+                    .top(px(7.))
+                    .right(px(30.))
+                    .px(px(5.))
+                    .rounded(px(4.))
+                    .text_size(px(11.5))
+                    .text_color(if self.showing_activity() { ui(0x8fb4ffff) } else { ui(0xffffff70) })
+                    .when(self.showing_activity(), |d| d.bg(ui(0xffffff14)))
+                    .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffee)))
+                    .child("◔")
+                    .tooltip(|_, cx| cx.new(|_| Tooltip("Activity  ⇧⌘A".into())).into())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_activity(cx))),
+            )
             .px(px(4.))
             .pb(px(6.))
             .text_size(px(12.5))
-            .child(self.nav_row("activity", "◔", 0x8fb4ffff, "Activity", "⇧⌘A", self.showing_activity())
-                .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))))
-            .child(self.nav_row("terminals", "❯", 0xc0caf5ff, "Terminals", "esc", !self.showing_view())
-                .on_click(cx.listener(|this, _, _, cx| this.show_terminals(cx))))
             .when_some(self.needs_you(cx), |d, section| d.child(section))
             // With Agents shown, the sidebar lists the agents instead of tabs.
             .when(self.showing_agents(), |d| d.child(self.agents_heading(cx)))
