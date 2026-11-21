@@ -204,6 +204,8 @@ impl WindowView {
             rows.push(
                 div()
                     .id("other-tabs")
+                    // (Never squeezed when what's below fills the sidebar.)
+                    .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(4.))
@@ -248,6 +250,8 @@ impl WindowView {
         let key = place.to_owned();
         div()
             .id(("place", i))
+            // (Never squeezed when what's below fills the sidebar.)
+            .flex_none()
             .flex()
             .items_center()
             .gap(px(4.))
@@ -348,6 +352,8 @@ impl WindowView {
         let mut rows = vec![
             div()
                 .id("past-heading")
+                // (Never squeezed when what's below fills the sidebar.)
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(4.))
@@ -464,6 +470,8 @@ impl WindowView {
         let mut rows = vec![
             div()
                 .id(("server-past", server as usize))
+                // (Never squeezed when what's below fills the sidebar.)
+                .flex_none()
                 .flex()
                 .items_center()
                 .gap(px(4.))
