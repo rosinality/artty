@@ -15,9 +15,47 @@ pub(super) struct Grouped {
     /// (each followed by those it started), with their server's name.
     agents: Vec<(AgentInfo, String)>,
     loading: bool,
-    /// The tabs with no agent, folded away; the past conversations too.
+    /// The tabs with no agent, folded away; the past conversations too;
+    /// and the places (machine · workspace) folded.
     others_folded: bool,
     past_folded: bool,
+    folded: HashSet<String>,
+    /// Machines away (reconnecting): their agents as last heard, dimmed.
+    away: HashSet<String>,
+}
+
+/// Where each agent is listed: before row `i`, the place (machine ·
+/// workspace) beginning there, if one does. Only when agents are in more
+/// than one place; one an agent started is under it, wherever it is.
+fn places(agents: &[(AgentInfo, String)], servers: usize) -> Vec<Option<String>> {
+    let listed: HashSet<PaneId> = agents.iter().map(|(a, _)| a.pane).collect();
+    let place = |(agent, server): &(AgentInfo, String)| match servers > 1 {
+        true => format!("{server} · {}", agent.workspace),
+        false => agent.workspace.clone(),
+    };
+    let roots: Vec<Option<String>> = agents
+        .iter()
+        .map(|entry| match entry.0.parent.filter(|p| listed.contains(p)) {
+            Some(_) => None,
+            None => Some(place(entry)),
+        })
+        .collect();
+    let distinct: HashSet<&String> = roots.iter().flatten().collect();
+    if distinct.len() < 2 {
+        return vec![None; agents.len()];
+    }
+    let mut last: Option<&String> = None;
+    roots
+        .iter()
+        .map(|root| {
+            let root = root.as_ref()?;
+            if last == Some(root) {
+                return None;
+            }
+            last = Some(root);
+            Some(root.clone())
+        })
+        .collect()
 }
 
 impl WindowView {
@@ -44,7 +82,16 @@ impl WindowView {
         }
         let Some(grouped) = self.grouped.as_mut().filter(|g| !g.loading) else { return };
         grouped.loading = true;
-        let asks: Vec<_> = app_state::servers(cx)
+        let servers = app_state::servers(cx);
+        // Those away: their agents stay, as last heard.
+        let away: HashSet<String> = servers
+            .iter()
+            .filter(|(_, _, status)| *status != app_state::Status::Connected)
+            .map(|(_, name, _)| name.clone())
+            .collect();
+        let kept: Vec<(AgentInfo, String)> =
+            grouped.agents.iter().filter(|(_, s)| away.contains(s)).cloned().collect();
+        let asks: Vec<_> = servers
             .into_iter()
             .filter(|(_, _, status)| *status == app_state::Status::Connected)
             .map(|(server, name, _)| {
@@ -52,7 +99,7 @@ impl WindowView {
             })
             .collect();
         cx.spawn(async move |this, cx| {
-            let mut found = Vec::new();
+            let mut found = kept;
             for (server, name, answer) in asks {
                 if let Ok(Response::Agents { agents }) = answer.await {
                     found.extend(agents.into_iter().map(|mut agent| {
@@ -67,8 +114,9 @@ impl WindowView {
                 let found = agents_view::nested(found);
                 let Some(grouped) = this.grouped.as_mut() else { return };
                 grouped.loading = false;
-                if grouped.agents != found {
+                if grouped.agents != found || grouped.away != away {
                     grouped.agents = found;
+                    grouped.away = away;
                     cx.notify();
                 }
             });
@@ -104,11 +152,20 @@ impl WindowView {
     /// The sidebar's rows, grouped: the agents, then the tabs with none.
     pub(super) fn grouped_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let Some(grouped) = self.grouped.as_ref() else { return Vec::new() };
-        let mut rows: Vec<gpui::AnyElement> = grouped
-            .agents
-            .iter()
-            .map(|(agent, _)| self.grouped_agent(grouped, agent, cx))
-            .collect();
+        let servers: HashSet<&String> = grouped.agents.iter().map(|(_, s)| s).collect();
+        let starts = places(&grouped.agents, servers.len());
+        let mut rows: Vec<gpui::AnyElement> = Vec::new();
+        let mut folded = false;
+        for (i, ((agent, server), start)) in grouped.agents.iter().zip(&starts).enumerate() {
+            if let Some(place) = start {
+                folded = grouped.folded.contains(place);
+                let away = grouped.away.contains(server);
+                rows.push(self.place_header(i, place, folded, away, cx));
+            }
+            if !folded {
+                rows.push(self.grouped_agent(grouped, agent, grouped.away.contains(server), cx));
+            }
+        }
         if grouped.agents.is_empty() {
             rows.push(
                 div()
@@ -169,12 +226,50 @@ impl WindowView {
         rows
     }
 
+    /// A place's header (machine · workspace), folding its agents; a
+    /// machine away says so.
+    fn place_header(
+        &self,
+        i: usize,
+        place: &str,
+        folded: bool,
+        away: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let key = place.to_owned();
+        div()
+            .id(("place", i))
+            .flex()
+            .items_center()
+            .gap(px(4.))
+            .px_2()
+            .pt(px(if i == 0 { 2. } else { 8. }))
+            .pb(px(2.))
+            .text_size(px(11.))
+            .text_color(ui(if away { 0xffffff45 } else { 0xffffff70 }))
+            .hover(|d| d.text_color(ui(0xffffffb0)))
+            .child(div().flex_none().text_size(px(9.)).child(if folded { "▸" } else { "▾" }))
+            .child(Self::one_line(place.to_owned()).flex_1().min_w_0())
+            .when(away, |d| d.child(div().flex_none().child("reconnecting")))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(grouped) = this.grouped.as_mut()
+                    && !grouped.folded.remove(&key)
+                {
+                    grouped.folded.insert(key.clone());
+                }
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     /// An agent's row: its state, its tab's title (under the agent that
-    /// started it), and what it has for you, else its name.
+    /// started it), and what it has for you, else its name (dimmed, its
+    /// machine `away`).
     fn grouped_agent(
         &self,
         grouped: &Grouped,
         agent: &AgentInfo,
+        away: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let pane = agent.pane;
@@ -210,6 +305,7 @@ impl WindowView {
             .pl(px(4. + 14. * depth as f32))
             .pr(px(8.))
             .rounded(px(7.))
+            .when(away, |d| d.opacity(0.45))
             .when(chosen, |d| d.bg(ui(0xffffff1c)))
             .when(!chosen && waiting, |d| d.bg(ui(0xe0af6814)))
             .hover(|d| d.bg(ui(0xffffff10)))
@@ -326,5 +422,41 @@ impl WindowView {
             drop(app_state::control_on(ids::server_of(pane), request, cx));
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use artty_core::control::AgentInfo;
+
+    fn agent(pane: u64, parent: Option<u64>, workspace: &str, server: &str) -> (AgentInfo, String) {
+        let json = serde_json::json!({
+            "pane": pane, "agent": "claude", "title": "", "workspace": workspace, "state": "idle",
+            "pending": 0, "unread": 0, "parent": parent,
+        });
+        (serde_json::from_value(json).unwrap(), server.to_owned())
+    }
+
+    #[test]
+    fn places_only_when_more_than_one() {
+        // One place: no headers.
+        let one = [agent(1, None, "api", "mac"), agent(2, None, "api", "mac")];
+        assert_eq!(super::places(&one, 1), [None, None]);
+        // Two: a header where each begins; one started by another is under
+        // it, though elsewhere.
+        let two = [
+            agent(1, None, "api", "mac"),
+            agent(5, Some(1), "docs", "mac"),
+            agent(2, None, "docs", "mac"),
+            agent(3, None, "docs", "mac"),
+        ];
+        let starts = super::places(&two, 1);
+        assert_eq!(starts, [Some("api".into()), None, Some("docs".into()), None]);
+        // Machines named when there are several.
+        let machines = [agent(1, None, "api", "mac"), agent(2, None, "train", "gpu")];
+        assert_eq!(
+            super::places(&machines, 2),
+            [Some("mac · api".into()), Some("gpu · train".into())]
+        );
     }
 }

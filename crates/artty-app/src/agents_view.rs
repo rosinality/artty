@@ -201,15 +201,16 @@ impl WindowView {
         &self,
         agent: &AgentInfo,
         server: &str,
-    ) -> (u8, usize, usize, usize, String) {
+    ) -> (u8, String, usize, usize, usize) {
         for (w, workspace) in self.layout.workspaces.iter().enumerate() {
             for (t, tab) in workspace.tabs.iter().enumerate() {
                 if let Some(p) = tab.root.panes().iter().position(|&p| p == agent.pane) {
-                    return (0, w, t, p, String::new());
+                    return (0, String::new(), w, t, p);
                 }
             }
         }
-        (1, 0, 0, agent.pane as usize, format!("{server}\u{0}{}", agent.workspace))
+        // (A workspace's together, by machine.)
+        (1, format!("{server}\u{0}{}", agent.workspace), 0, 0, agent.pane as usize)
     }
 
     /// The chosen agent's terminal, live, while Agents shows it: its
