@@ -1506,6 +1506,24 @@ impl Server {
         }
     }
 
+    /// A way to answer `waiter` from another thread.
+    fn reply_later(&self, waiter: Waiter) -> Box<dyn FnOnce(Response) + Send> {
+        match waiter {
+            Waiter::Command(reply) => Box::new(move |response| {
+                let _ = reply.send(response);
+            }),
+            Waiter::App(client, id) => {
+                let tx = self.clients.get(&client).map(|c| c.tx.clone());
+                Box::new(move |response| {
+                    let json = serde_json::to_string(&response).unwrap_or_default();
+                    if let Some(tx) = tx {
+                        let _ = tx.send(ServerMessage::Control { id, response: json });
+                    }
+                })
+            },
+        }
+    }
+
     fn answer(clients: &HashMap<ClientId, Client>, waiter: Waiter, response: Response) {
         match waiter {
             Waiter::Command(reply) => {
@@ -2234,6 +2252,40 @@ impl Server {
                     Err(message) => Self::answer(&self.clients, waiter, Response::error(message)),
                 }
             },
+            // Reading agents' transcripts takes a while: off the main loop.
+            Request::Sessions { text, limit } => {
+                let limit = limit.unwrap_or(30).min(200);
+                let live: HashSet<String> = self
+                    .panes
+                    .values()
+                    .filter_map(|p| p.agent_session().map(str::to_owned))
+                    .collect();
+                let reply = self.reply_later(waiter);
+                let _ =
+                    std::thread::Builder::new().name("artty-sessions".into()).spawn(move || {
+                        let sessions = match text.as_deref().map(str::trim) {
+                            Some(text) if !text.is_empty() => crate::sessions::search(text)
+                                .into_iter()
+                                .filter(|hit| !live.contains(&hit.session))
+                                .take(limit)
+                                .collect(),
+                            _ => crate::sessions::recent(limit, &live),
+                        };
+                        reply(Response::Sessions { sessions });
+                    });
+            },
+            Request::Conversation { session, limit } => {
+                let reply = self.reply_later(waiter);
+                let _ =
+                    std::thread::Builder::new().name("artty-sessions".into()).spawn(move || {
+                        reply(match crate::sessions::conversation(&session, limit.unwrap_or(60)) {
+                            Some(messages) => Response::Conversation { messages },
+                            None => Response::error(format!(
+                                "no conversation {session} (only Claude Code's are read)"
+                            )),
+                        })
+                    });
+            },
             Request::ThreadClear { tab } => {
                 let response = if self.in_a_pane(peer) {
                     Response::error(
@@ -2411,7 +2463,9 @@ impl Server {
         if let Request::New { command, fork: Some(source), cwd, .. } = &mut request {
             let agent = match command.as_slice() {
                 [name] => name.strip_suffix("-acp").unwrap_or(name),
-                _ => return Err("--fork: a copy of an agent's conversation (--agent claude)".into()),
+                _ => {
+                    return Err("--fork: a copy of an agent's conversation (--agent claude)".into());
+                },
             };
             if agent != "claude" || !self.config.acp.contains_key(agent) {
                 return Err(format!(
@@ -3288,7 +3342,9 @@ impl Server {
             | Request::AskWait { .. }
             | Request::Events { .. }
             | Request::Decide { .. }
-            | Request::ThreadClear { .. } => unreachable!("handled before"),
+            | Request::ThreadClear { .. }
+            | Request::Sessions { .. }
+            | Request::Conversation { .. } => unreachable!("handled before"),
             Request::AskForward { id } => {
                 let ask = self.forward(id)?;
                 self.pump_asks(Instant::now());

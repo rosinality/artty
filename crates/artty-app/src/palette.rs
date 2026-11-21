@@ -2,6 +2,10 @@
 //! by its title, workspace, folder, program or agent (one out of sight is
 //! brought into view) — and ⌘⇧P (or `>` first) runs any command, with its
 //! keys shown. Matching is fuzzy (see `fuzzy`).
+//!
+//! It also picks where a message from a thread goes ("Send to…"): another
+//! agent (an ask, saying where it's from), or a copy of the conversation it
+//! came from, given what's typed as its task.
 
 use std::collections::HashSet;
 
@@ -17,6 +21,17 @@ pub(super) struct Palette {
     places: Vec<Place>,
     commands: Vec<Command>,
     selected: usize,
+    sending: Option<Sending>,
+}
+
+/// A message from an agent's thread, to send on.
+pub(super) struct Sending {
+    /// The agent whose thread it's from, its tab's title, and its
+    /// conversation's id (a copy of it can be started).
+    pub from: PaneId,
+    pub title: String,
+    pub session: Option<String>,
+    pub text: String,
 }
 
 /// A pane to go to.
@@ -30,6 +45,8 @@ struct Place {
     /// Shown in this window now.
     here: bool,
     attention: bool,
+    /// An agent runs in it.
+    agent: bool,
 }
 
 struct Command {
@@ -42,6 +59,8 @@ struct Command {
 enum Row<'a> {
     Place(&'a Place),
     Command(&'a Command),
+    /// A copy of the conversation a message is sent from.
+    Copy,
 }
 
 /// "artty::ToggleFiles" as "Toggle Files".
@@ -59,7 +78,7 @@ fn command_name(action: &str) -> String {
 
 impl Palette {
     fn commanding(&self) -> bool {
-        self.query.starts_with('>')
+        self.sending.is_none() && self.query.starts_with('>')
     }
 
     /// The rows matching the query, best first.
@@ -88,8 +107,33 @@ impl Palette {
         } else {
             scored.sort_by_key(|(score, p)| (std::cmp::Reverse(*score), !p.here));
         }
-        scored.into_iter().take(SHOWN).map(|(_, p)| Row::Place(p)).collect()
+        let mut rows: Vec<Row> =
+            scored.into_iter().take(SHOWN).map(|(_, p)| Row::Place(p)).collect();
+        if self.sending.as_ref().is_some_and(|s| s.session.is_some()) {
+            rows.push(Row::Copy);
+        }
+        rows
     }
+}
+
+/// What an agent is given, sent on from another's thread: where from, and
+/// how to ask there for more.
+fn sent(sending: &Sending) -> String {
+    let from = ids::local_id(sending.from);
+    let mut out = format!(
+        "From {} (pane {from}), sent on by the user:\n\n{}\n\n",
+        sending.title,
+        sending.text.trim()
+    );
+    out.push_str(&format!("(To ask it more: `artty ask --tab {from} \"...\"`"));
+    if let Some(session) = &sending.session {
+        out.push_str(&format!(
+            "; or a copy of its conversation, which leaves it as it is: `artty new --background \
+             --agent claude --fork {session} --task \"...\"`"
+        ));
+    }
+    out.push_str(".)");
+    out
 }
 
 impl WindowView {
@@ -104,6 +148,60 @@ impl WindowView {
             self.finish_rename(true, cx);
         }
         self.picker = None;
+        let places = self.palette_places(cx);
+        let mut commands: Vec<Command> = window
+            .available_actions(cx)
+            .into_iter()
+            .filter(|action| {
+                action.name().starts_with("artty::") && action.name() != "artty::SendText"
+            })
+            .map(|action| {
+                let keys = window
+                    .highest_precedence_binding_for_action(action.as_ref())
+                    .map(|binding| binding.keystrokes().iter().map(|k| k.to_string()).collect())
+                    .unwrap_or_default();
+                Command { name: command_name(action.name()), action, keys }
+            })
+            .collect();
+        commands.sort_by(|a, b| a.name.cmp(&b.name));
+        commands.dedup_by(|a, b| a.name == b.name);
+        self.marked_text = None;
+        self.palette = Some(Palette {
+            query: if commanding { ">".to_owned() } else { String::new() },
+            places,
+            commands,
+            selected: 0,
+            sending: None,
+        });
+        cx.notify();
+    }
+
+    /// "Send to…": the palette, listing the agents `sending` can go to (on
+    /// its machine: an ask is), and a copy of its conversation.
+    pub(super) fn open_send(&mut self, sending: Sending, cx: &mut Context<Self>) {
+        if self.renaming.is_some() {
+            self.finish_rename(true, cx);
+        }
+        self.picker = None;
+        let server = ids::server_of(sending.from);
+        let places = self
+            .palette_places(cx)
+            .into_iter()
+            .filter(|p| p.agent && p.pane != sending.from && ids::server_of(p.pane) == server)
+            .collect();
+        self.marked_text = None;
+        self.palette = Some(Palette {
+            query: String::new(),
+            places,
+            commands: Vec::new(),
+            selected: 0,
+            sending: Some(sending),
+        });
+        cx.notify();
+    }
+
+    /// Every pane, as the palette lists them.
+    fn palette_places(&self, cx: &mut Context<Self>) -> Vec<Place> {
         let here: HashSet<PaneId> = self.tabs.iter().flat_map(|t| t.root.panes()).collect();
         let names: HashMap<ServerId, String> =
             app_state::servers(cx).into_iter().map(|(id, name, _)| (id, name)).collect();
@@ -144,34 +242,12 @@ impl WindowView {
                     here: here.contains(&pane),
                     attention: matches!(state.icon.as_str(), "waiting" | "attention")
                         || info.needs_attention,
+                    agent: state.agent.is_some(),
                 }
             })
             .collect();
         places.sort_by_key(|p| p.pane);
-        let mut commands: Vec<Command> = window
-            .available_actions(cx)
-            .into_iter()
-            .filter(|action| {
-                action.name().starts_with("artty::") && action.name() != "artty::SendText"
-            })
-            .map(|action| {
-                let keys = window
-                    .highest_precedence_binding_for_action(action.as_ref())
-                    .map(|binding| binding.keystrokes().iter().map(|k| k.to_string()).collect())
-                    .unwrap_or_default();
-                Command { name: command_name(action.name()), action, keys }
-            })
-            .collect();
-        commands.sort_by(|a, b| a.name.cmp(&b.name));
-        commands.dedup_by(|a, b| a.name == b.name);
-        self.marked_text = None;
-        self.palette = Some(Palette {
-            query: if commanding { ">".to_owned() } else { String::new() },
-            places,
-            commands,
-            selected: 0,
-        });
-        cx.notify();
+        places
     }
 
     pub(super) fn palette_key(
@@ -207,6 +283,9 @@ impl WindowView {
     }
 
     fn choose_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.as_ref().is_some_and(|p| p.sending.is_some()) {
+            return self.choose_send(cx);
+        }
         let Some(palette) = self.palette.take() else { return };
         cx.notify();
         match palette.rows().get(palette.selected) {
@@ -224,8 +303,76 @@ impl WindowView {
                 // (Sent now; no need of the answer.)
                 drop(app_state::control_on(server, request, cx));
             },
-            None => {},
+            Some(Row::Copy) | None => {},
         }
+    }
+
+    /// The message sent to the agent chosen, or a copy of its conversation
+    /// started with the task typed.
+    fn choose_send(&mut self, cx: &mut Context<Self>) {
+        let Some(palette) = self.palette.as_ref() else { return };
+        let Some(sending) = palette.sending.as_ref() else { return };
+        let server = ids::server_of(sending.from);
+        let from = ids::local_id(sending.from);
+        let task = palette.query.trim().to_owned();
+        let (request, to) = match palette.rows().get(palette.selected) {
+            Some(Row::Place(place)) => (
+                Request::Ask {
+                    tab: ids::local_id(place.pane),
+                    text: sent(sending),
+                    raw: false,
+                    wait: false,
+                    timeout_secs: None,
+                    thread: Some(from),
+                    back: false,
+                },
+                place.title.clone(),
+            ),
+            Some(Row::Copy) if task.is_empty() => {
+                return self.show_toast("Type the copy's task first", cx);
+            },
+            Some(Row::Copy) => (
+                Request::New {
+                    cwd: None,
+                    command: vec!["claude".into()],
+                    title: None,
+                    focus: false,
+                    split: None,
+                    target: None,
+                    workspace: None,
+                    worktree: None,
+                    task: Some(task),
+                    thread: Some(from),
+                    back: false,
+                    fork: sending.session.clone(),
+                },
+                format!("a copy of {}", sending.title),
+            ),
+            _ => return,
+        };
+        self.palette = None;
+        cx.notify();
+        let answer = app_state::control_on(server, request, cx);
+        cx.spawn(async move |this, cx| {
+            let result = answer.await;
+            let _ = this.update(cx, |this, cx| {
+                match result {
+                    Ok(Response::Error { message }) => {
+                        this.show_toast(format!("Not sent: {message}"), cx)
+                    },
+                    Err(_) => this.show_toast("Not sent: no answer from its server", cx),
+                    Ok(Response::Started { id, .. }) | Ok(Response::Tab { id }) => {
+                        this.show_toast(format!("Started {to}"), cx);
+                        if let Some(agents) = this.agents_in_mut(Shown::View) {
+                            agents.selected = Some(ids::tag(server, id));
+                        }
+                    },
+                    Ok(_) => this.show_toast(format!("Sent to {to}"), cx),
+                }
+                this.refresh_agents(cx);
+            });
+        })
+        .detach();
     }
 
     pub(super) fn palette_overlay(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
@@ -239,6 +386,14 @@ impl WindowView {
                 let (icon, title, detail, here) = match row {
                     Row::Place(p) => (p.icon.as_str(), p.title.clone(), p.detail.clone(), p.here),
                     Row::Command(c) => ("", c.name.clone(), c.keys.clone(), true),
+                    Row::Copy => {
+                        let from = palette.sending.as_ref().map_or("", |s| s.title.as_str());
+                        let detail = match palette.query.trim() {
+                            "" => "type its task: the conversation comes with it".to_owned(),
+                            task => format!("task: {task}"),
+                        };
+                        ("", format!("A copy of {from}"), detail, true)
+                    },
                 };
                 div()
                     .id(("palette-item", i))
@@ -276,7 +431,9 @@ impl WindowView {
             })
             .collect();
         let empty = items.is_empty();
-        let hint = if palette.commanding() {
+        let hint = if palette.sending.is_some() {
+            "Send to an agent… (or type a task for a copy)"
+        } else if palette.commanding() {
             "Run a command…"
         } else {
             "Go to a pane: title, workspace, folder, program… (> for commands)"
@@ -319,6 +476,20 @@ impl WindowView {
                         format!("{}{marked}▏", palette.query)
                     }),
             )
+            .when_some(palette.sending.as_ref(), |d, sending| {
+                let text: String = sending.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let text = match text.char_indices().nth(160) {
+                    Some((at, _)) => format!("{}…", &text[..at]),
+                    None => text,
+                };
+                d.child(
+                    Self::one_line(format!("From {}: {text}", sending.title))
+                        .px(px(10.))
+                        .pb(px(4.))
+                        .text_size(px(11.5))
+                        .text_color(ui(0xffffff80)),
+                )
+            })
             .child(
                 div()
                     .id("palette-rows")
@@ -351,6 +522,22 @@ impl WindowView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn what_is_sent_says_where_from() {
+        let mut sending = super::Sending {
+            from: 7,
+            title: "parser".into(),
+            session: Some("abc-1".into()),
+            text: "  the method  ".into(),
+        };
+        let text = super::sent(&sending);
+        assert!(text.starts_with("From parser (pane 7), sent on by the user:\n\nthe method\n\n"));
+        assert!(text.contains("artty ask --tab 7"), "{text}");
+        assert!(text.contains("--fork abc-1"), "{text}");
+        sending.session = None;
+        assert!(!super::sent(&sending).contains("--fork"));
+    }
+
     #[test]
     fn command_names_read_as_words() {
         assert_eq!(super::command_name("artty::ToggleFiles"), "Toggle Files");

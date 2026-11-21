@@ -1167,6 +1167,7 @@ impl Connection {
                 title: found.title,
                 snippet: found.snippet,
                 modified: found.modified,
+                forked_from: None,
             },
         )?)
     }

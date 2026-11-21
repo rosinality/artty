@@ -31,7 +31,12 @@ pub fn search(text: &str) -> Vec<SessionHit> {
             break;
         }
         read += std::fs::metadata(&path).map_or(0, |m| m.len());
-        if let Some(hit) = search_file(agent, &path, modified, text) {
+        if let Some(mut hit) = search_file(agent, &path, modified, text) {
+            // Its title as it's named, if it is.
+            if let Some(head) = head(agent, &path, modified) {
+                hit.title = head.title;
+                hit.forked_from = head.forked_from;
+            }
             hits.push(hit);
         }
     }
@@ -247,6 +252,12 @@ fn request(value: &Value) -> Option<String> {
     if role != "user" {
         return None;
     }
+    // A tool's result comes back as the user's (Claude Code's).
+    if content.as_array().is_some_and(|items| {
+        items.iter().any(|i| i.get("type").and_then(Value::as_str) == Some("tool_result"))
+    }) {
+        return None;
+    }
     let mut said = Vec::new();
     match content {
         Value::String(s) => said.push(s.clone()),
@@ -311,7 +322,166 @@ fn search_file(agent: &str, path: &Path, modified: u64, text: &str) -> Option<Se
         title: shorten(&title.unwrap_or_default(), 100),
         snippet,
         modified,
+        forked_from: None,
     })
+}
+
+/// The latest conversations, newest first, `limit` at most: those whose
+/// ids are in `skip` left out, and those with nothing asked in them.
+pub fn recent(limit: usize, skip: &std::collections::HashSet<String>) -> Vec<SessionHit> {
+    let mut files = transcripts();
+    files.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
+    let mut found = Vec::new();
+    for (agent, path, modified) in files.into_iter().take(MAX_FILES) {
+        if found.len() >= limit {
+            break;
+        }
+        if let Some(hit) = head(agent, &path, modified).filter(|h| !skip.contains(&h.session)) {
+            found.push(hit);
+        }
+    }
+    found
+}
+
+/// A conversation as its transcript's beginning tells: where, what was
+/// asked first (or its title), whether it's a copy.
+fn head(agent: &str, path: &Path, modified: u64) -> Option<SessionHit> {
+    let file = std::fs::File::open(path).ok()?;
+    let stem = path.file_stem()?.to_string_lossy().into_owned();
+    let mut session = (agent == "claude").then(|| stem.clone());
+    let (mut cwd, mut request_text, mut title, mut forked_from) = (None, None, None, None);
+    let mut read = 0;
+    for line in BufReader::new(file).lines().map_while(Result::ok).take(400) {
+        read += line.len();
+        if read > 1 << 20 {
+            break;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else { continue };
+        if cwd.is_none() {
+            cwd = value
+                .get("cwd")
+                .or_else(|| value.get("payload")?.get("cwd"))
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+        }
+        if session.is_none() && value.get("type").and_then(Value::as_str) == Some("session_meta") {
+            session = value.get("payload")?.get("id").and_then(Value::as_str).map(str::to_owned);
+        }
+        if forked_from.is_none() {
+            forked_from = value.get("forkedFrom").and_then(|f| {
+                f.as_str().or_else(|| f.get("sessionId")?.as_str()).map(str::to_owned)
+            });
+        }
+        match value.get("type").and_then(Value::as_str) {
+            Some("custom-title") => {
+                title = value.get("customTitle").and_then(Value::as_str).map(str::to_owned)
+            },
+            Some("ai-title") if title.is_none() => {
+                title = value.get("aiTitle").and_then(Value::as_str).map(str::to_owned)
+            },
+            _ => {},
+        }
+        if request_text.is_none() {
+            request_text = request(&value);
+        }
+    }
+    let request_text = request_text?;
+    let session = session
+        .unwrap_or_else(|| stem.get(stem.len().saturating_sub(36)..).unwrap_or(&stem).to_owned());
+    Some(SessionHit {
+        agent: agent.to_owned(),
+        session,
+        cwd,
+        title: shorten(
+            title.as_deref().filter(|t| !t.trim().is_empty()).unwrap_or(&request_text),
+            100,
+        ),
+        snippet: shorten(&request_text, 200),
+        modified,
+        forked_from,
+    })
+}
+
+/// What was said in a Claude Code conversation as it stands (a rewind's
+/// abandoned line left out): people's requests and the agent's text, the
+/// last `limit`.
+pub fn conversation(session: &str, limit: usize) -> Option<Vec<artty_core::control::Said>> {
+    let claude = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| Some(home()?.join(".claude")))?;
+    conversation_in(&claude, session, limit)
+}
+
+fn conversation_in(
+    claude: &Path,
+    session: &str,
+    limit: usize,
+) -> Option<Vec<artty_core::control::Said>> {
+    use std::io::Read;
+    let path = claude_transcript(claude, session)?;
+    let mut text = String::new();
+    std::fs::File::open(path).ok()?.take(256 << 20).read_to_string(&mut text).ok()?;
+    let mut entries: std::collections::HashMap<String, (Option<String>, Value)> =
+        Default::default();
+    let mut last = None;
+    for line in text.lines().filter(|l| l.contains("\"uuid\"")) {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        if entry.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let text = |key: &str| entry.get(key).and_then(Value::as_str).map(str::to_owned);
+        let Some(uuid) = text("uuid") else { continue };
+        let parent = text("parentUuid").or_else(|| text("logicalParentUuid"));
+        last = Some(uuid.clone());
+        entries.insert(uuid, (parent, entry));
+    }
+    // Back from the last along the line it's on.
+    let mut chain = Vec::new();
+    let mut at = last;
+    while let Some(uuid) = at {
+        let Some((parent, entry)) = entries.remove(&uuid) else { break };
+        chain.push(entry);
+        at = parent;
+    }
+    chain.reverse();
+    let mut said: Vec<artty_core::control::Said> = Vec::new();
+    for entry in chain {
+        let (role, text) = match entry.get("type").and_then(Value::as_str) {
+            Some("user") => match request(&entry) {
+                Some(text) => ("user", text),
+                None => continue,
+            },
+            Some("assistant") => {
+                let mut parts = Vec::new();
+                if let Some(content) = entry.get("message").and_then(|m| m.get("content")) {
+                    match content {
+                        Value::String(s) => parts.push(s.clone()),
+                        Value::Array(items) => parts.extend(items.iter().filter_map(|i| {
+                            (i.get("type")?.as_str()? == "text")
+                                .then(|| i.get("text")?.as_str().map(str::to_owned))?
+                        })),
+                        _ => {},
+                    }
+                }
+                let text = parts.join("\n\n");
+                if text.trim().is_empty() {
+                    continue;
+                }
+                ("assistant", text)
+            },
+            _ => continue,
+        };
+        // One message, though written in pieces.
+        match said.last_mut() {
+            Some(prev) if prev.role == role && role == "assistant" => {
+                prev.text.push_str("\n\n");
+                prev.text.push_str(&text);
+            },
+            _ => said.push(artty_core::control::Said { role: role.into(), text }),
+        }
+    }
+    let skip = said.len().saturating_sub(limit);
+    Some(said.split_off(skip))
 }
 
 /// `text` around the first `wanted` in it, on one line.
@@ -461,6 +631,49 @@ mod tests {
         // Capitals: exact.
         assert!(search("Refresh_token").is_empty());
         assert!(search("nothing like this").is_empty());
+
+        // The latest, those going on left out.
+        let all = recent(10, &Default::default());
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert_eq!(
+            all.iter().find(|h| h.agent == "claude").unwrap().title,
+            "Fix the flaky login test"
+        );
+        let skip =
+            std::collections::HashSet::from(["0b5f2a1e-1111-2222-3333-444455556666".to_owned()]);
+        let left = recent(10, &skip);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].agent, "codex");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_conversation_as_it_stands() {
+        let dir = std::env::temp_dir().join(format!("artty-said-{}", std::process::id()));
+        let project = dir.join("projects/-src");
+        std::fs::create_dir_all(&project).unwrap();
+        // b was rewound: d goes on from a. A copy says where it's from.
+        let lines = [
+            r#"{"type":"user","uuid":"a","parentUuid":null,"cwd":"/src","forkedFrom":{"sessionId":"orig-1"},"message":{"role":"user","content":"Plan the parser"}}"#,
+            r#"{"type":"assistant","uuid":"b","parentUuid":"a","message":{"content":[{"type":"text","text":"Abandoned"}]}}"#,
+            r#"{"type":"assistant","uuid":"c","parentUuid":"a","message":{"content":[{"type":"text","text":"Table-driven."},{"type":"tool_use","name":"Bash"}]}}"#,
+            r#"{"type":"user","uuid":"t","parentUuid":"c","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#,
+            r#"{"type":"assistant","uuid":"d","parentUuid":"t","message":{"content":[{"type":"text","text":"Done."}]}}"#,
+            r#"{"type":"assistant","uuid":"s","parentUuid":"d","isSidechain":true,"message":{"content":[{"type":"text","text":"subagent"}]}}"#,
+            r#"{"type":"ai-title","aiTitle":"Parser plan"}"#,
+        ];
+        std::fs::write(project.join("sess-1.jsonl"), lines.join("\n")).unwrap();
+        let said = conversation_in(&dir, "sess-1", 10).unwrap();
+        let said: Vec<(&str, &str)> =
+            said.iter().map(|s| (s.role.as_str(), s.text.as_str())).collect();
+        assert_eq!(said, [("user", "Plan the parser"), ("assistant", "Table-driven.\n\nDone.")]);
+        assert_eq!(conversation_in(&dir, "sess-1", 1).unwrap().len(), 1);
+        assert!(conversation_in(&dir, "no-such", 10).is_none());
+
+        let hit = head("claude", &project.join("sess-1.jsonl"), 0).unwrap();
+        assert_eq!(hit.title, "Parser plan");
+        assert_eq!(hit.forked_from.as_deref(), Some("orig-1"));
+        assert_eq!(hit.cwd.as_deref(), Some(Path::new("/src")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

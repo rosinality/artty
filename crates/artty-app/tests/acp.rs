@@ -279,7 +279,14 @@ fn a_copy_of_a_conversation() {
     let before = thread(&scratch, &pane);
 
     let out = scratch.artty(&[
-        "new", "--background", "--agent", "claude", "--fork", "fake-acp-session", "--task", "which",
+        "new",
+        "--background",
+        "--agent",
+        "claude",
+        "--fork",
+        "fake-acp-session",
+        "--task",
+        "which",
     ]);
     assert!(out.status.success(), "{}", stderr(&out));
     let copy = stdout(&out);
@@ -294,7 +301,8 @@ fn a_copy_of_a_conversation() {
     let agents: Value =
         serde_json::from_str(&stdout(&scratch.artty(&["agents", "--json"]))).unwrap();
     let listed = agents.as_array().unwrap();
-    let find = |p: &str| listed.iter().find(|a| a["pane"] == p.parse::<u64>().unwrap()).unwrap().clone();
+    let find =
+        |p: &str| listed.iter().find(|a| a["pane"] == p.parse::<u64>().unwrap()).unwrap().clone();
     assert_eq!(find(&copy)["session"], "fork-of-fake-acp-session", "{listed:?}");
     assert_eq!(find(&copy)["parent"].to_string(), pane, "{listed:?}");
     assert_eq!(find(&pane)["session"], "fake-acp-session");
@@ -310,7 +318,8 @@ fn a_copy_of_a_conversation() {
 #[test]
 fn who_started_whom_kept_in_a_restart() {
     let (mut scratch, pane) = started();
-    let out = scratch.artty(&["new", "--background", "--agent", "claude", "--fork", "fake-acp-session"]);
+    let out =
+        scratch.artty(&["new", "--background", "--agent", "claude", "--fork", "fake-acp-session"]);
     assert!(out.status.success(), "{}", stderr(&out));
     let copy = stdout(&out);
     let parent_of = |scratch: &Scratch| {
@@ -343,4 +352,43 @@ fn who_started_whom_kept_in_a_restart() {
         .unwrap();
     assert_ne!(copy, source);
     assert_eq!(parent, source);
+}
+
+#[test]
+fn past_conversations_listed() {
+    let (scratch, pane) = started();
+    // Two conversations had here: one's the agent's own (going on: not
+    // listed), one's over.
+    let project = scratch.dir.join(".claude/projects/-src");
+    std::fs::create_dir_all(&project).unwrap();
+    let transcript = |title: &str| {
+        [
+            r#"{"type":"user","uuid":"a","parentUuid":null,"cwd":"/src","message":{"role":"user","content":"Plan the parser"}}"#.to_owned(),
+            r#"{"type":"assistant","uuid":"b","parentUuid":"a","message":{"content":[{"type":"text","text":"Table-driven."}]}}"#.to_owned(),
+            format!(r#"{{"type":"ai-title","aiTitle":"{title}"}}"#),
+        ]
+        .join("\n")
+    };
+    std::fs::write(project.join("fake-acp-session.jsonl"), transcript("Going on")).unwrap();
+    std::fs::write(project.join("over-1.jsonl"), transcript("Parser plan")).unwrap();
+
+    let out = scratch.artty(&["sessions", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let listed: Value = serde_json::from_str(&stdout(&out)).unwrap();
+    let ids: Vec<&str> =
+        listed.as_array().unwrap().iter().filter_map(|h| h["session"].as_str()).collect();
+    assert_eq!(ids, ["over-1"], "{listed}");
+    assert_eq!(listed[0]["title"], "Parser plan");
+    let out = scratch.artty(&["sessions", "--search", "table-driven"]);
+    assert!(
+        stdout(&out).contains("over-1") && !stdout(&out).contains("fake-acp"),
+        "{}",
+        stdout(&out)
+    );
+
+    let out = scratch.artty(&["sessions", "over-1"]);
+    assert_eq!(stdout(&out), "── user\nPlan the parser\n\n── agent\nTable-driven.");
+    let out = scratch.artty(&["sessions", "nothing-1"]);
+    assert!(!out.status.success());
+    let _ = pane;
 }

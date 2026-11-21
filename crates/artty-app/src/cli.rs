@@ -23,6 +23,7 @@ pub const COMMANDS: &[&str] = &[
     "new",
     "run",
     "ask",
+    "sessions",
     "approve",
     "approvals",
     "approval",
@@ -132,8 +133,15 @@ artty, your own pane is found automatically:
   artty thread --search TEXT [--tab N] [--json]
                                          every agent's thread (or pane N's)
                                          searched: newest matches first
+  artty sessions [--search TEXT] [--limit N] [--json]
+                                         agents' past conversations on this
+                                         machine (not those going on in panes),
+                                         newest first: id, agent, when, folder,
+                                         title; or those mentioning TEXT
+  artty sessions ID [--lines N]          what was said in conversation ID
+                                         (Claude Code's), the last N messages
   artty approve --hook --agent NAME      (an agent's PermissionRequest hook)
-  artty acp [AGENT] [--resume ID] [--model M] [--mode MODE]
+  artty acp [AGENT] [--resume ID | --fork ID] [--model M] [--mode MODE]
                                          run AGENT (claude) without its terminal
                                          UI, through its Agent Client Protocol
                                          adapter (the acp.AGENT setting), in
@@ -310,6 +318,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
         match arg.as_str() {
             "--tab" => tab = Some(args.number("--tab")?),
             "--lines" => _ = flags.insert("lines", args.value("--lines")?),
+            "--limit" => _ = flags.insert("limit", args.value("--limit")?),
             "--timeout" => _ = flags.insert("timeout", args.value("--timeout")?),
             "--cwd" => _ = flags.insert("cwd", args.value("--cwd")?),
             "--title" => _ = flags.insert("title", args.value("--title")?),
@@ -549,7 +558,9 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 task => task.map(str::to_owned),
             };
             if flags.contains_key("fork") && command.is_empty() {
-                return Err("new: --fork needs the agent it's a conversation of (--agent claude)".into());
+                return Err(
+                    "new: --fork needs the agent it's a conversation of (--agent claude)".into()
+                );
             }
             if task.is_some() && command.is_empty() {
                 return Err("new: --task needs an agent to give it to (--agent NAME)".into());
@@ -698,6 +709,22 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 limit: number("lines")?.map(|n| n as usize),
             }
         },
+        "sessions" => {
+            let limit = |name: &str| -> Result<Option<usize>, String> {
+                flags
+                    .get(name)
+                    .map(|v| v.parse().map_err(|_| format!("--{name}: not a number")))
+                    .transpose()
+            };
+            match rest.first() {
+                Some(session) => {
+                    Request::Conversation { session: session.clone(), limit: limit("lines")? }
+                },
+                None => {
+                    Request::Sessions { text: flags.get("search").cloned(), limit: limit("limit")? }
+                },
+            }
+        },
         "queue" => match flags.get("dismiss") {
             Some(id) => Request::QueueDismiss {
                 id: id.parse().map_err(|_| "--dismiss: not a number (a reply's id)")?,
@@ -836,6 +863,40 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         Response::Error { message } => Err(message),
         Response::Tab { id } => {
             println!("{id}");
+            Ok(0)
+        },
+        Response::Sessions { sessions } if json => {
+            println!("{}", serde_json::to_string_pretty(&sessions).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Sessions { sessions } => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            for hit in &sessions {
+                let cwd = hit.cwd.as_ref().map(|c| c.display().to_string()).unwrap_or_default();
+                let cwd = match cwd.strip_prefix(&home).filter(|_| !home.is_empty()) {
+                    Some(rest) => format!("~{rest}"),
+                    None => cwd,
+                };
+                let copy = if hit.forked_from.is_some() { " (a copy)" } else { "" };
+                println!(
+                    "{}  {:<6} {}  {cwd}  {}{copy}",
+                    hit.session,
+                    hit.agent,
+                    when(hit.modified),
+                    hit.title
+                );
+            }
+            Ok(if sessions.is_empty() { 1 } else { 0 })
+        },
+        Response::Conversation { messages } if json => {
+            println!("{}", serde_json::to_string_pretty(&messages).unwrap_or_default());
+            Ok(0)
+        },
+        Response::Conversation { messages } => {
+            for said in &messages {
+                let who = if said.role == "user" { "user" } else { "agent" };
+                println!("── {who}\n{}\n", said.text.trim());
+            }
             Ok(0)
         },
         Response::ThreadHits { hits } if json => {
@@ -1310,6 +1371,17 @@ fn clock(ms: u64) -> String {
         return "--:--".to_owned();
     }
     format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+}
+
+/// A day and time, as `11-21 14:05` (seconds since the epoch).
+fn when(secs: u64) -> String {
+    let secs = secs as libc::time_t;
+    // SAFETY: `tm` is written by localtime_r before it's read.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&secs, &mut tm) }.is_null() {
+        return "--".to_owned();
+    }
+    format!("{:02}-{:02} {:02}:{:02}", tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min)
 }
 
 fn print_approval(approval: &ApprovalInfo) {

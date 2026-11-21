@@ -431,6 +431,22 @@ pub enum Request {
         #[serde(default)]
         timeout_secs: Option<u64>,
     },
+    /// Agents' conversations on this machine, newest first: the latest
+    /// (`limit` at most), or those mentioning `text`. Those going on in
+    /// artty's panes aren't listed.
+    Sessions {
+        #[serde(default)]
+        text: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// What was said in a conversation (Claude Code's), as it stands: the
+    /// people's messages and the agent's, the last `limit` of them.
+    Conversation {
+        session: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     /// Every pane's thread entries after `after` (an entry's `seq`), or
     /// `tab`'s; none yet: wait for one, at most `timeout_secs`. Without
     /// `after`: none, and where they're up to (to go on from).
@@ -442,6 +458,13 @@ pub enum Request {
         #[serde(default)]
         timeout_secs: Option<u64>,
     },
+}
+
+/// A message in a conversation: `user` or `assistant`, and its text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Said {
+    pub role: String,
+    pub text: String,
 }
 
 /// A thread entry that matched a search: where, and the text around it.
@@ -852,6 +875,12 @@ pub enum Response {
     },
     ThreadHits {
         hits: Vec<ThreadHit>,
+    },
+    Sessions {
+        sessions: Vec<crate::protocol::SessionHit>,
+    },
+    Conversation {
+        messages: Vec<Said>,
     },
     /// Thread entries, oldest first; `last`: where they're up to (the next
     /// `Events` goes on from there).

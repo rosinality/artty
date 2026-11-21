@@ -196,7 +196,53 @@ impl WindowView {
         right: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        self.copyable_from(label, text, seq, right, None, cx)
+    }
+
+    /// [`Self::copyable`], and (`from`: the agent whose thread it's in)
+    /// "Send to…": it, or what's selected in it, to another agent or a copy
+    /// of this one's conversation.
+    fn copyable_from(
+        &self,
+        label: String,
+        text: &str,
+        seq: u64,
+        right: bool,
+        from: Option<&AgentInfo>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
         let text = text.to_owned();
+        let send = from.map(|agent| {
+            let (pane, title, session) = (agent.pane, agent.title.clone(), agent.session.clone());
+            let whole = text.clone();
+            div()
+                .id(SharedString::from(format!("send-{seq}")))
+                .px(px(5.))
+                .rounded(px(4.))
+                .opacity(0.)
+                .group_hover(SharedString::from(format!("entry-{seq}")), |s| s.opacity(1.))
+                .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffd0)))
+                .child("Send to…")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    // What's selected in it, else all of it.
+                    let selected = [Shown::View, Shown::Panel]
+                        .into_iter()
+                        .filter_map(|w| this.agents_in(w))
+                        .filter_map(|a| a.text_sel.as_ref())
+                        .any(|sel| sel.message == seq.to_string() && sel.anchor != sel.head);
+                    let text = match selected {
+                        true => this.selected_text(false).unwrap_or_else(|| whole.clone()),
+                        false => whole.clone(),
+                    };
+                    let sending = super::palette::Sending {
+                        from: pane,
+                        title: title.clone(),
+                        session: session.clone(),
+                        text,
+                    };
+                    this.open_send(sending, cx);
+                }))
+        });
         div()
             .flex()
             .when(right, |d| d.flex_row_reverse())
@@ -219,6 +265,7 @@ impl WindowView {
                         this.show_toast("Copied", cx);
                     })),
             )
+            .children(send)
     }
 
     /// What's selected in a message shown (Agents, or the panel):
@@ -496,6 +543,7 @@ impl WindowView {
                 if let Ok(Response::Agents { agents }) = answer.await {
                     found.extend(agents.into_iter().map(|mut agent| {
                         agent.pane = ids::tag(server, agent.pane);
+                        agent.parent = agent.parent.map(|p| ids::tag(server, p));
                         (agent, name.clone())
                     }));
                 }
@@ -518,6 +566,8 @@ impl WindowView {
                 // As the sidebar has their tabs (↑↓ go that way too).
                 let mut found = found;
                 found.sort_by_cached_key(|(agent, server)| this.agent_order(agent, server));
+                // Each followed by those it started.
+                let found = nested(found);
                 let Some(agents) = this.agents_in_mut(which) else { return };
                 agents.loading = false;
                 agents.loaded = true;
@@ -748,7 +798,10 @@ impl WindowView {
         let mut rows = Vec::new();
         for (agent, server) in &agents.agents {
             let here = place(agent, server);
-            if places.len() > 1 && last_place.as_ref() != Some(&here) {
+            // (One started by another is under it, wherever its tab is.)
+            let under =
+                agent.parent.is_some_and(|p| agents.agents.iter().any(|(a, _)| a.pane == p));
+            if !under && places.len() > 1 && last_place.as_ref() != Some(&here) {
                 rows.push(
                     Self::one_line(here.clone())
                         .px_2()
@@ -759,7 +812,9 @@ impl WindowView {
                         .into_any_element(),
                 );
             }
-            last_place = Some(here);
+            if !under {
+                last_place = Some(here);
+            }
             rows.push(self.sidebar_agent(agents, agent, cx));
         }
         rows
@@ -786,6 +841,7 @@ impl WindowView {
         };
         let title = agent.title.clone();
         let text = if chosen { ui(0xffffffee) } else { ui(0xffffffb0) };
+        let depth = depth(&agents.agents, agent);
         div()
             .id(SharedString::from(format!("agent-{pane}")))
             .flex_none()
@@ -793,7 +849,7 @@ impl WindowView {
             .items_center()
             .gap(px(4.))
             .h(px(32.))
-            .pl(px(4.))
+            .pl(px(4. + 14. * depth as f32))
             .pr(px(8.))
             .rounded(px(7.))
             .when(chosen, |d| d.bg(ui(0xffffff1c)))
@@ -880,7 +936,7 @@ impl WindowView {
                         .flex_col()
                         .items_end()
                         .gap(px(3.))
-                        .child(self.copyable(
+                        .child(self.copyable_from(
                             match (ask, from) {
                                 (_, Some(from)) => format!("{} · {time}", from_label(from)),
                                 (_, None) => format!("you · {time}"),
@@ -888,6 +944,7 @@ impl WindowView {
                             text,
                             seq,
                             true,
+                            Some(agent),
                             cx,
                         ))
                         .child(bubble(true).child(self.markdown(
@@ -904,7 +961,14 @@ impl WindowView {
                 .flex()
                 .flex_col()
                 .gap(px(3.))
-                .child(self.copyable(format!("{} · {time}", agent.agent), text, seq, false, cx))
+                .child(self.copyable_from(
+                    format!("{} · {time}", agent.agent),
+                    text,
+                    seq,
+                    false,
+                    Some(agent),
+                    cx,
+                ))
                 .child(bubble(false).child(self.markdown(
                     agents,
                     text,
@@ -1536,6 +1600,63 @@ impl WindowView {
 }
 
 /// An agent that asked another, as its thread shows it: "from api (claude)".
+/// The agents in their order, each followed (at once) by those it started,
+/// in theirs; one whose starter isn't listed stays where it is.
+fn nested(agents: Vec<(AgentInfo, String)>) -> Vec<(AgentInfo, String)> {
+    let listed: HashSet<PaneId> = agents.iter().map(|(a, _)| a.pane).collect();
+    let parent = |a: &AgentInfo| a.parent.filter(|p| listed.contains(p) && *p != a.pane);
+    let mut out = Vec::with_capacity(agents.len());
+    let mut placed = HashSet::new();
+    fn place(
+        at: usize,
+        agents: &[(AgentInfo, String)],
+        parent: &dyn Fn(&AgentInfo) -> Option<PaneId>,
+        placed: &mut HashSet<PaneId>,
+        out: &mut Vec<(AgentInfo, String)>,
+    ) {
+        if !placed.insert(agents[at].0.pane) {
+            return;
+        }
+        out.push(agents[at].clone());
+        let pane = agents[at].0.pane;
+        for (i, (child, _)) in agents.iter().enumerate() {
+            if parent(child) == Some(pane) {
+                place(i, agents, parent, placed, out);
+            }
+        }
+    }
+    for (i, (agent, _)) in agents.iter().enumerate() {
+        // From the top of each line of starters (a loop: from anywhere).
+        let mut top = agent;
+        let mut seen = HashSet::from([top.pane]);
+        while let Some(p) = parent(top) {
+            let Some((up, _)) = agents.iter().find(|(a, _)| a.pane == p) else { break };
+            if !seen.insert(up.pane) {
+                break;
+            }
+            top = up;
+        }
+        let top = agents.iter().position(|(a, _)| a.pane == top.pane).unwrap_or(i);
+        place(top, &agents, &parent, &mut placed, &mut out);
+        place(i, &agents, &parent, &mut placed, &mut out);
+    }
+    out
+}
+
+/// How many starters up `agent` is listed under.
+fn depth(agents: &[(AgentInfo, String)], agent: &AgentInfo) -> usize {
+    let mut depth = 0;
+    let mut at = agent;
+    while let Some(p) = at.parent
+        && depth < 6
+        && let Some((up, _)) = agents.iter().find(|(a, _)| a.pane == p && a.pane != at.pane)
+    {
+        depth += 1;
+        at = up;
+    }
+    depth
+}
+
 pub(super) fn from_label(from: &artty_core::control::AskFrom) -> String {
     match &from.agent {
         Some(agent) => format!("from {} · {agent}", from.title),
@@ -1647,6 +1768,35 @@ mod tests {
         let long = serde_json::json!({ "content": "l\n".repeat(30) });
         assert!(super::edit_diff("Write", &long).unwrap().contains("… 6 more lines"));
         assert_eq!(super::edit_diff("Bash", &serde_json::json!({ "command": "ls" })), None);
+    }
+
+    #[test]
+    fn started_ones_under_their_starter() {
+        let agent = |pane: u64, parent: Option<u64>| {
+            let json = serde_json::json!({
+                "pane": pane, "agent": "claude", "title": "", "workspace": "", "state": "idle",
+                "pending": 0, "unread": 0, "parent": parent,
+            });
+            (serde_json::from_value::<artty_core::control::AgentInfo>(json).unwrap(), String::new())
+        };
+        let order = |list: Vec<(artty_core::control::AgentInfo, String)>| {
+            let nested = super::nested(list);
+            let panes: Vec<u64> = nested.iter().map(|(a, _)| a.pane).collect();
+            let depths: Vec<usize> = nested.iter().map(|(a, _)| super::depth(&nested, a)).collect();
+            (panes, depths)
+        };
+        // 4 started 5, which started 2; 1 started by one not listed.
+        let list = vec![
+            agent(1, Some(9)),
+            agent(2, Some(5)),
+            agent(3, None),
+            agent(4, None),
+            agent(5, Some(4)),
+        ];
+        assert_eq!(order(list), (vec![1, 4, 5, 2, 3], vec![0, 0, 1, 2, 0]));
+        // A loop doesn't lose anyone.
+        let (panes, _) = order(vec![agent(1, Some(2)), agent(2, Some(1))]);
+        assert_eq!(panes.len(), 2);
     }
 
     use super::word_at;
