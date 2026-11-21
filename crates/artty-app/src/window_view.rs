@@ -32,6 +32,8 @@ use crate::terminal::{self, Metrics, hsla};
 
 #[path = "activity.rs"]
 mod activity;
+#[path = "agent_sidebar.rs"]
+mod agent_sidebar;
 #[path = "agents_view.rs"]
 mod agents_view;
 #[path = "ask_sheet.rs"]
@@ -73,6 +75,7 @@ actions!(
         ShowActivity,
         ShowAgents,
         SendTo,
+        GroupByAgent,
         ToggleThread,
         NextWorkspace,
         PreviousWorkspace,
@@ -430,6 +433,8 @@ pub struct WindowView {
     agents: Option<agents_view::Agents>,
     /// The thread panel beside the terminal (⌘⇧J), when open.
     thread_panel: Option<thread_panel::ThreadPanel>,
+    /// The sidebar grouped by agent (not by workspace), when it is.
+    grouped: Option<agent_sidebar::Grouped>,
     /// What's being written to each agent (in Agents or the panel).
     drafts: compose::Drafts,
     /// The pane whose screens a server sends for the Agents view, and over
@@ -587,6 +592,7 @@ impl WindowView {
             activity: None,
             agents: None,
             thread_panel: None,
+            grouped: None,
             drafts: Default::default(),
             peeking: None,
             copy_mode: None,
@@ -1602,6 +1608,7 @@ impl WindowView {
             self.refresh_activity(cx);
         }
         self.refresh_agents(cx);
+        self.refresh_grouped(cx);
         if self.toast.as_ref().is_some_and(|(_, shown)| shown.elapsed() >= pane_actions::TOAST_TIME)
         {
             self.toast = None;
@@ -3307,6 +3314,11 @@ impl WindowView {
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(ui(0xffffff70))
             .child(div().flex_1().child(if lone.is_some() { "TABS" } else { "WORKSPACES" }))
+            .child(
+                button("group-by-agent", "◆", "Group by agent")
+                    .text_size(px(10.))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_grouping(cx))),
+            )
             .when_some(lone, |d, workspace| {
                 d.child(
                     button("new-workspace", "⊞", "New Workspace  ⇧⌘N")
@@ -3525,11 +3537,16 @@ impl WindowView {
             .when_some(self.needs_you(cx), |d, section| d.child(section))
             // With Agents shown, the sidebar lists the agents instead of tabs.
             .when(self.showing_agents(), |d| d.child(self.agents_heading(cx)))
-            .when(!app_state::several_servers(cx) && !self.showing_agents(), |d| {
-                d.child(self.sidebar_heading(cx))
+            .when(self.grouped.is_some() && !self.showing_agents(), |d| {
+                d.child(self.grouped_heading(cx))
             })
+            .when(
+                !app_state::several_servers(cx) && !self.showing_agents() && self.grouped.is_none(),
+                |d| d.child(self.sidebar_heading(cx)),
+            )
             .child(div().id("tab-list").flex().flex_col().flex_1().gap(px(1.)).overflow_y_scroll().children(match self.showing_agents() {
                 true => self.sidebar_agents(cx),
+                false if self.grouped.is_some() => self.grouped_rows(cx),
                 false => rows,
             }))
             .when_some(self.status_row(cx), |d, row| d.child(row))
@@ -4164,6 +4181,7 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
             .on_action(cx.listener(|this, _: &ShowAgents, _, cx| this.toggle_agents(cx)))
             .on_action(cx.listener(|this, _: &SendTo, _, cx| this.send_to(cx)))
+            .on_action(cx.listener(|this, _: &GroupByAgent, _, cx| this.toggle_grouping(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleThread, window, cx| this.thread_key(window, cx)),
             )

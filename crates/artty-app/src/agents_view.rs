@@ -178,7 +178,11 @@ impl WindowView {
     /// Where an agent goes in the list: as its tab is in this window's
     /// sidebar (workspace, tab, pane), then those elsewhere (another
     /// window's, another machine's) by machine and workspace.
-    fn agent_order(&self, agent: &AgentInfo, server: &str) -> (u8, usize, usize, usize, String) {
+    pub(super) fn agent_order(
+        &self,
+        agent: &AgentInfo,
+        server: &str,
+    ) -> (u8, usize, usize, usize, String) {
         for (w, workspace) in self.layout.workspaces.iter().enumerate() {
             for (t, tab) in workspace.tabs.iter().enumerate() {
                 if let Some(p) = tab.root.panes().iter().position(|&p| p == agent.pane) {
@@ -1995,7 +1999,7 @@ impl WindowView {
 /// An agent that asked another, as its thread shows it: "from api (claude)".
 /// The agents in their order, each followed (at once) by those it started,
 /// in theirs; one whose starter isn't listed stays where it is.
-fn nested(agents: Vec<(AgentInfo, String)>) -> Vec<(AgentInfo, String)> {
+pub(super) fn nested(agents: Vec<(AgentInfo, String)>) -> Vec<(AgentInfo, String)> {
     let listed: HashSet<PaneId> = agents.iter().map(|(a, _)| a.pane).collect();
     let parent = |a: &AgentInfo| a.parent.filter(|p| listed.contains(p) && *p != a.pane);
     let mut out = Vec::with_capacity(agents.len());
@@ -2037,7 +2041,7 @@ fn nested(agents: Vec<(AgentInfo, String)>) -> Vec<(AgentInfo, String)> {
 }
 
 /// How many starters up `agent` is listed under.
-fn depth(agents: &[(AgentInfo, String)], agent: &AgentInfo) -> usize {
+pub(super) fn depth(agents: &[(AgentInfo, String)], agent: &AgentInfo) -> usize {
     let mut depth = 0;
     let mut at = agent;
     while let Some(p) = at.parent
