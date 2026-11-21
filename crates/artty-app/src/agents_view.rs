@@ -914,10 +914,23 @@ impl WindowView {
     /// the thread shown, else its last reply (a past conversation's: its
     /// last message).
     pub(super) fn send_to(&mut self, cx: &mut Context<Self>) {
-        let selected = self.selected_text(false);
-        let Some(agents) = self.agents.as_ref() else {
-            return self.show_toast("Send to…: from a thread in Agents (⇧⌘K)", cx);
+        // Agents', else the thread panel's (beside the terminal).
+        let which = match (self.showing_agents(), self.panel_shown()) {
+            (true, _) => Shown::View,
+            (false, true) => Shown::Panel,
+            (false, false) => {
+                return self
+                    .show_toast("Send to…: from a thread (Agents ⇧⌘K, or the panel ⇧⌘J)", cx);
+            },
         };
+        self.send_from(which, cx);
+    }
+
+    /// "Send to…" from Agents or the panel: what's selected there, else
+    /// its last reply.
+    fn send_from(&mut self, which: Shown, cx: &mut Context<Self>) {
+        let selected = self.selected_text(false);
+        let Some(agents) = self.agents_in(which) else { return };
         if agents.archived.is_some() {
             let last = match &agents.said {
                 Some(Ok(said)) => said.iter().rev().find(|s| s.role == "assistant"),
@@ -947,6 +960,104 @@ impl WindowView {
             text,
         };
         self.open_send(sending, cx);
+    }
+
+    /// A copy of `agent`'s conversation started, given a task (typed in
+    /// the palette).
+    fn start_copy(&mut self, agent: &AgentInfo, cx: &mut Context<Self>) {
+        let Some(session) = copyable(agent) else {
+            return self.show_toast("Only Claude Code's conversations are copied", cx);
+        };
+        let sending = super::palette::Sending {
+            from: Some(agent.pane),
+            server: ids::server_of(agent.pane),
+            title: agent.title.clone(),
+            session: Some(session),
+            text: String::new(),
+        };
+        self.open_send(sending, cx);
+    }
+
+    /// Under an agent's name (in the panel): the agent that started it and
+    /// those it started (a click goes to each), and what can be done with
+    /// it: send on, a copy, its thread cleared.
+    fn agent_bar(
+        &self,
+        agents: &Agents,
+        agent: &AgentInfo,
+        which: Shown,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let link = |id: String, label: String, pane: PaneId| {
+            div()
+                .id(SharedString::from(id))
+                .px(px(5.))
+                .rounded(px(4.))
+                .bg(ui(0xffffff0c))
+                .text_color(ui(0xffffffc0))
+                .hover(|d| d.bg(ui(0xffffff18)).text_color(ui(0xffffffee)))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| this.go_to_agent(pane, cx)))
+        };
+        let parent = agent
+            .parent
+            .and_then(|p| agents.agents.iter().find(|(a, _)| a.pane == p))
+            .map(|(a, _)| link(format!("parent-{}", a.pane), format!("↑ {}", a.title), a.pane));
+        let workers: Vec<_> = agents
+            .agents
+            .iter()
+            .filter(|(a, _)| a.parent == Some(agent.pane))
+            .map(|(a, _)| link(format!("worker-{}", a.pane), format!("↳ {}", a.title), a.pane))
+            .collect();
+        let action = |id: &str, label: &str| {
+            div()
+                .id(SharedString::from(id.to_owned()))
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(4.))
+                .text_color(ui(0xffffff90))
+                .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffee)))
+                .child(label.to_owned())
+        };
+        let (pane, copy_of) = (agent.pane, agent.clone());
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .px(px(16.))
+            .py(px(6.))
+            .border_b_1()
+            .border_color(ui(0xffffff12))
+            .text_size(px(11.5))
+            .when(parent.is_some() || !workers.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(4.))
+                        .text_color(ui(0xffffff70))
+                        .children(parent)
+                        .children(workers),
+                )
+            })
+            .child(
+                div()
+                    .flex()
+                    .gap(px(2.))
+                    .child(
+                        action("bar-send", "Send to…")
+                            .on_click(cx.listener(move |this, _, _, cx| this.send_from(which, cx))),
+                    )
+                    .when(copyable(agent).is_some(), |d| {
+                        d.child(action("bar-copy", "Start a copy…").on_click(
+                            cx.listener(move |this, _, _, cx| this.start_copy(&copy_of, cx)),
+                        ))
+                    })
+                    .child(div().flex_1())
+                    .child(action("bar-clear", "Clear thread…").on_click(
+                        cx.listener(move |this, _, window, cx| this.clear_thread(pane, window, cx)),
+                    )),
+            )
     }
 
     /// The past conversation shown, sent on (`text`), or (none) a copy of
@@ -1771,6 +1882,9 @@ impl WindowView {
                         )
                     }),
             )
+            // In the panel (Agents has a column for it): who it's with, and
+            // what can be done.
+            .when(which == Shown::Panel, |d| d.child(self.agent_bar(agents, agent, which, cx)))
             .child(
                 div()
                     .flex_1()

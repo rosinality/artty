@@ -230,7 +230,7 @@ impl WindowView {
     }
 
     /// To an agent's terminal: here, or (another window's) there.
-    fn go_to_agent(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+    pub(super) fn go_to_agent(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         if self.showing_view() {
             self.show_terminals(cx);
         }

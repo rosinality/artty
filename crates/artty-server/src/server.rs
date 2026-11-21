@@ -4155,7 +4155,13 @@ impl Server {
             _ => None,
         };
         let ports = self.ports.get(&info.id).cloned().unwrap_or_default();
-        PaneState { info, icon: icon.to_owned(), progress, agent: pane.agent_name(), ports }
+        // An agent as its status has it (one run through `artty acp`, or
+        // known by what it reports), else by its process's name.
+        let agent = match &pane.status {
+            Status::Agent { name, .. } => Some(name.clone()),
+            _ => pane.agent_name(),
+        };
+        PaneState { info, icon: icon.to_owned(), progress, agent, ports }
     }
 
     /// Send each app its windows' layouts, pane states and screen updates.
