@@ -1001,15 +1001,83 @@ impl WindowView {
     /// the thread shown, else its last reply (a past conversation's: its
     /// last message).
     pub(super) fn send_to(&mut self, cx: &mut Context<Self>) {
-        // Agents', else the thread panel's (beside the terminal).
-        let which = match (self.showing_agents(), self.panel_shown()) {
-            (true, _) => Shown::View,
-            (false, true) => Shown::Panel,
-            (false, false) => {
-                return self.show_toast("Send to…: from an agent's thread (the panel, ⇧⌘J)", cx);
-            },
+        // Agents' thread; the panel's, while it has the keyboard or a
+        // selection; else the focused terminal's agent: what's selected
+        // there, else its last reply.
+        let panel_chosen = self.panel_typing()
+            || self.thread_panel.as_ref().is_some_and(|p| p.agents.text_sel.is_some());
+        if self.showing_agents() {
+            return self.send_from(Shown::View, cx);
+        }
+        if self.panel_shown() && panel_chosen {
+            return self.send_from(Shown::Panel, cx);
+        }
+        match self.focused_id() {
+            Some(pane) => self.send_from_pane(pane, true, cx),
+            None => self.show_toast("Send to…: from an agent's terminal or thread", cx),
+        }
+    }
+
+    /// The agent in `pane`, as last heard.
+    pub(super) fn known_agent(&self, pane: PaneId) -> Option<AgentInfo> {
+        self.known.agents.iter().find(|(a, _)| a.pane == pane).map(|(a, _)| a.clone())
+    }
+
+    /// "Send to…" from an agent's terminal (no thread shown): what's
+    /// selected in it (`selection`: if anything is), else its last reply.
+    pub(super) fn send_from_pane(&mut self, pane: PaneId, selection: bool, cx: &mut Context<Self>) {
+        let Some(agent) = self.known_agent(pane) else {
+            return self.show_toast("No agent in this pane to send from", cx);
         };
-        self.send_from(which, cx);
+        let selected = selection.then(|| app_state::query(Query::SelectionText { pane }, cx));
+        let thread = app_state::control_on(
+            ids::server_of(pane),
+            Request::Thread { tab: ids::local_id(pane), after: None, limit: Some(40) },
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let selected = match selected {
+                Some(answer) => match answer.await {
+                    Ok(Reply::Text(Some(text))) if !text.trim().is_empty() => Some(text),
+                    _ => None,
+                },
+                None => None,
+            };
+            let text = match selected {
+                Some(text) => Some(text),
+                None => match thread.await {
+                    Ok(Response::Thread { entries, .. }) => {
+                        entries.iter().rev().find_map(|e| match &e.item {
+                            ThreadItem::Reply { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                    },
+                    _ => None,
+                },
+            };
+            let _ = this.update(cx, |this, cx| {
+                let Some(text) = text else {
+                    return this.show_toast("Nothing to send yet: no reply, nothing selected", cx);
+                };
+                let sending = super::palette::Sending {
+                    from: Some(agent.pane),
+                    server: ids::server_of(agent.pane),
+                    title: agent.title.clone(),
+                    session: copyable(&agent),
+                    text,
+                };
+                this.open_send(sending, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// The thread panel, at `pane`'s agent (its terminal brought up).
+    pub(super) fn show_thread_of(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+        self.go_to_agent(pane, cx);
+        if !self.panel_shown() {
+            self.open_thread_panel(cx);
+        }
     }
 
     /// "Send to…" from Agents or the panel: what's selected there, else
@@ -1050,7 +1118,7 @@ impl WindowView {
 
     /// A copy of `agent`'s conversation started, given a task (typed in
     /// the palette).
-    fn start_copy(&mut self, agent: &AgentInfo, cx: &mut Context<Self>) {
+    pub(super) fn start_copy(&mut self, agent: &AgentInfo, cx: &mut Context<Self>) {
         let Some(session) = copyable(agent) else {
             return self.show_toast("Only Claude Code's conversations are copied", cx);
         };

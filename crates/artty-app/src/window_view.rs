@@ -178,6 +178,19 @@ enum MenuCommand {
     ReconnectFromScratch,
     Connect,
     Disconnect,
+    /// An agent's: what's selected in its terminal (else its last reply)
+    /// sent on; a copy of its conversation; its thread in the panel.
+    SendTo(PaneId),
+    StartCopy(PaneId),
+    ShowThread(PaneId),
+}
+
+/// The pane a menu is for, if a pane's.
+fn pane_of(target: &MenuTarget) -> Option<PaneId> {
+    match target {
+        MenuTarget::Pane(pane) => Some(*pane),
+        _ => None,
+    }
 }
 
 /// A fold's arrowhead, drawn (a font's are thin, narrow, and sit where
@@ -1452,6 +1465,23 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) {
         let Some(menu) = self.context_menu.take() else { return };
+        // An agent's, from a pane's menu or a tab's.
+        match command {
+            MenuCommand::SendTo(agent) => {
+                return self.send_from_pane(agent, menu.has_selection, cx);
+            },
+            MenuCommand::StartCopy(agent) => {
+                if let Some(agent) = self.known_agent(agent) {
+                    self.start_copy(&agent, cx);
+                }
+                return cx.notify();
+            },
+            MenuCommand::ShowThread(agent) => {
+                self.show_thread_of(agent, cx);
+                return cx.notify();
+            },
+            _ => {},
+        }
         let place = |index: usize| self.places.get(index).copied();
         match menu.target {
             MenuTarget::Tab(index) => {
@@ -3661,6 +3691,27 @@ impl WindowView {
     }
 
     /// The right-click menu, over a backdrop that dismisses it.
+    /// What a menu offers for the agent in `pane` (none: nothing), then a
+    /// separator: send what's selected (`selection`), else its last reply;
+    /// a copy (Claude Code's); its thread.
+    fn agent_menu_items(
+        &self,
+        pane: Option<PaneId>,
+        selection: bool,
+    ) -> Vec<Option<(SharedString, &'static str, bool, MenuCommand)>> {
+        let Some(agent) = pane.and_then(|p| self.known_agent(p)) else { return Vec::new() };
+        let pane = agent.pane;
+        let send = if selection { "Send Selection to…" } else { "Send Last Reply to…" };
+        let mut items =
+            vec![Some((SharedString::from(send), "⌥⌘S", true, MenuCommand::SendTo(pane)))];
+        if agent.session.is_some() && agent.agent.starts_with("claude") {
+            items.push(Some(("Start a Copy…".into(), "", true, MenuCommand::StartCopy(pane))));
+        }
+        items.push(Some(("Show Thread".into(), "⇧⌘J", true, MenuCommand::ShowThread(pane))));
+        items.push(None);
+        items
+    }
+
     fn context_menu_overlay(
         &self,
         viewport: gpui::Size<Pixels>,
@@ -3688,6 +3739,7 @@ impl WindowView {
                         None,
                     ]);
                 }
+                items.extend(self.agent_menu_items(pane_of(&menu.target), menu.has_selection));
                 items.extend([
                     item("Split Right", "⌘D", true, MenuCommand::SplitRight),
                     item("Split Down", "⇧⌘D", true, MenuCommand::SplitDown),
@@ -3731,12 +3783,18 @@ impl WindowView {
                     .get(index)
                     .and_then(|&(w, _)| self.layout.workspaces.iter().find(|ws| ws.id == w))
                     .is_some_and(|w| w.tabs.len() < 2);
-                vec![
+                // Its agent's (the first of its panes running one).
+                let agent = self.tabs.get(index).and_then(|t| {
+                    t.root.panes().into_iter().find(|&p| self.known_agent(p).is_some())
+                });
+                let mut items = self.agent_menu_items(agent, false);
+                items.extend([
                     item("Rename Tab…", "", true, MenuCommand::RenameTab),
                     item("Move to New Workspace", "", !alone, MenuCommand::TabToNewWorkspace),
                     None,
                     item("Close Tab", "⇧⌘W", true, MenuCommand::CloseTab),
-                ]
+                ]);
+                items
             },
             MenuTarget::Workspace(workspace) => {
                 let collapsed = self
@@ -4714,6 +4772,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-up", JumpToPreviousPrompt, None),
         KeyBinding::new("cmd-down", JumpToNextPrompt, None),
         KeyBinding::new("cmd-alt-c", CopyCommandOutput, None),
+        KeyBinding::new("cmd-alt-s", SendTo, None),
         KeyBinding::new("cmd-shift-c", CopyMode, None),
         KeyBinding::new("ctrl-cmd-left", ResizePaneLeft, None),
         KeyBinding::new("ctrl-cmd-right", ResizePaneRight, None),
