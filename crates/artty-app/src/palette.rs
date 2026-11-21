@@ -22,6 +22,8 @@ pub(super) struct Palette {
     commands: Vec<Command>,
     selected: usize,
     sending: Option<Sending>,
+    /// Sending, the agent chosen: a note is typed for it.
+    chosen: Chosen,
 }
 
 /// A message from an agent's thread, to send on.
@@ -35,6 +37,10 @@ pub(super) struct Sending {
     pub session: Option<String>,
     pub text: String,
 }
+
+/// The agent a message goes to, once chosen (its pane, its title): what's
+/// typed then is a note to go with it.
+type Chosen = Option<(PaneId, String)>;
 
 /// A pane to go to.
 struct Place {
@@ -63,6 +69,8 @@ enum Row<'a> {
     Command(&'a Command),
     /// A copy of the conversation a message is sent from.
     Copy,
+    /// The agent chosen: send to it (with the note typed).
+    Note,
 }
 
 /// "artty::ToggleFiles" as "Toggle Files".
@@ -85,6 +93,9 @@ impl Palette {
 
     /// The rows matching the query, best first.
     fn rows(&self) -> Vec<Row<'_>> {
+        if self.chosen.is_some() {
+            return vec![Row::Note];
+        }
         if self.commanding() {
             let query = self.query[1..].trim();
             let mut scored: Vec<(i32, &Command)> = self
@@ -120,17 +131,23 @@ impl Palette {
 
 /// What an agent is given, sent on from another's thread: where from, and
 /// how to ask there for more.
-fn sent(sending: &Sending) -> String {
+fn sent(sending: &Sending, note: &str) -> String {
     let (title, text) = (&sending.title, sending.text.trim());
-    let mut out = match sending.from.map(ids::local_id) {
-        Some(from) => format!(
-            "From {title} (pane {from}), sent on by the user:\n\n{text}\n\n(To ask it more: \
-             `artty ask --tab {from} \"...\"`"
-        ),
-        None => format!(
-            "From a past conversation, {title}, sent on by the user:\n\n{text}\n\n(It's over"
-        ),
+    // The user's own word first, if any.
+    let note = match note.trim() {
+        "" => String::new(),
+        note => format!("{note}\n\n"),
     };
+    let mut out = note
+        + &match sending.from.map(ids::local_id) {
+            Some(from) => format!(
+                "From {title} (pane {from}), sent on by the user:\n\n{text}\n\n(To ask it more: \
+             `artty ask --tab {from} \"...\"`"
+            ),
+            None => format!(
+                "From a past conversation, {title}, sent on by the user:\n\n{text}\n\n(It's over"
+            ),
+        };
     if let Some(session) = &sending.session {
         out.push_str(&format!(
             "; to ask a copy of its conversation, which leaves it as it is: `artty new \
@@ -177,6 +194,7 @@ impl WindowView {
             commands,
             selected: 0,
             sending: None,
+            chosen: None,
         });
         cx.notify();
     }
@@ -206,6 +224,7 @@ impl WindowView {
             commands: Vec::new(),
             selected: 0,
             sending: Some(sending),
+            chosen: None,
         });
         cx.notify();
     }
@@ -273,6 +292,11 @@ impl WindowView {
             "enter" => return self.choose_palette(window, cx),
             "up" => palette.selected = palette.selected.saturating_sub(1),
             "down" => palette.selected = (palette.selected + 1).min(count.saturating_sub(1)),
+            // (A note empty: back to choosing the agent.)
+            "backspace" if palette.chosen.is_some() && palette.query.is_empty() => {
+                palette.chosen = None;
+                palette.selected = 0;
+            },
             "backspace" => {
                 palette.query.pop();
                 palette.selected = 0;
@@ -313,7 +337,7 @@ impl WindowView {
                 // (Sent now; no need of the answer.)
                 drop(app_state::control_on(server, request, cx));
             },
-            Some(Row::Copy) | None => {},
+            Some(Row::Copy | Row::Note) | None => {},
         }
     }
 
@@ -326,18 +350,29 @@ impl WindowView {
         let from = sending.from.map(ids::local_id);
         let task = palette.query.trim().to_owned();
         let (request, to) = match palette.rows().get(palette.selected) {
-            Some(Row::Place(place)) => (
-                Request::Ask {
-                    tab: ids::local_id(place.pane),
-                    text: sent(sending),
+            // The agent chosen: now a note for it, if any (Enter sends).
+            Some(Row::Place(place)) => {
+                let chosen = Some((place.pane, place.title.clone()));
+                if let Some(palette) = self.palette.as_mut() {
+                    palette.chosen = chosen;
+                    palette.query.clear();
+                    palette.selected = 0;
+                }
+                return cx.notify();
+            },
+            Some(Row::Note) => {
+                let Some((pane, title)) = palette.chosen.clone() else { return };
+                let ask = Request::Ask {
+                    tab: ids::local_id(pane),
+                    text: sent(sending, &task),
                     raw: false,
                     wait: false,
                     timeout_secs: None,
                     thread: from,
                     back: false,
-                },
-                place.title.clone(),
-            ),
+                };
+                (ask, title)
+            },
             Some(Row::Copy) if task.is_empty() => {
                 return self.show_toast("Type the copy's task first", cx);
             },
@@ -395,6 +430,14 @@ impl WindowView {
                 let (icon, title, detail, here) = match row {
                     Row::Place(p) => (p.icon.as_str(), p.title.clone(), p.detail.clone(), p.here),
                     Row::Command(c) => ("", c.name.clone(), c.keys.clone(), true),
+                    Row::Note => {
+                        let to = palette.chosen.as_ref().map_or("", |(_, t)| t.as_str());
+                        let detail = match palette.query.trim() {
+                            "" => "no note".to_owned(),
+                            note => format!("with: {note}"),
+                        };
+                        ("", format!("Send to {to}"), detail, true)
+                    },
                     Row::Copy => {
                         let from = palette.sending.as_ref().map_or("", |s| s.title.as_str());
                         let detail = match palette.query.trim() {
@@ -440,7 +483,12 @@ impl WindowView {
             })
             .collect();
         let empty = items.is_empty();
-        let hint = if palette.sending.as_ref().is_some_and(|s| s.text.trim().is_empty()) {
+        let note_for = palette.chosen.as_ref().map(|(_, title)| {
+            format!("A note for {title}, if you like (↩ sends · ⌫ back to the agents)")
+        });
+        let hint = if let Some(hint) = note_for.as_deref() {
+            hint
+        } else if palette.sending.as_ref().is_some_and(|s| s.text.trim().is_empty()) {
             "What should the copy do? (Enter starts it)"
         } else if palette.sending.is_some() {
             "Send to an agent… (or type a task for a copy)"
@@ -546,14 +594,17 @@ mod tests {
             session: Some("abc-1".into()),
             text: "  the method  ".into(),
         };
-        let text = super::sent(&sending);
+        let text = super::sent(&sending, "");
         assert!(text.starts_with("From parser (pane 7), sent on by the user:\n\nthe method\n\n"));
         assert!(text.contains("artty ask --tab 7"), "{text}");
         assert!(text.contains("--fork abc-1"), "{text}");
         sending.session = None;
-        assert!(!super::sent(&sending).contains("--fork"));
+        assert!(!super::sent(&sending, "").contains("--fork"));
+        // A note goes first.
+        let noted = super::sent(&sending, "  Use this for the lexer.  ");
+        assert!(noted.starts_with("Use this for the lexer.\n\nFrom parser (pane 7)"), "{noted}");
         sending.from = None;
-        assert!(super::sent(&sending).starts_with("From a past conversation, parser,"));
+        assert!(super::sent(&sending, "").starts_with("From a past conversation, parser,"));
     }
 
     #[test]
