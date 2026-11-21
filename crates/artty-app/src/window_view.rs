@@ -1967,7 +1967,10 @@ impl WindowView {
             return;
         }
         let (line, column, right) = self.cell_at(id, event.position);
-        let op = if event.modifiers.shift {
+        // Shift extends what's selected; over a program that takes the
+        // mouse (Claude Code), it's how a selection starts at all.
+        let taken = self.mode(id, cx).intersects(TermMode::MOUSE_MODE);
+        let op = if event.modifiers.shift && !taken {
             SelectionOp::Update { line, column, right }
         } else {
             let kind = match event.click_count {
