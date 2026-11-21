@@ -15,8 +15,9 @@ pub(super) struct Grouped {
     /// (each followed by those it started), with their server's name.
     agents: Vec<(AgentInfo, String)>,
     loading: bool,
-    /// The tabs with no agent, folded away.
+    /// The tabs with no agent, folded away; the past conversations too.
     others_folded: bool,
+    past_folded: bool,
 }
 
 impl WindowView {
@@ -38,6 +39,9 @@ impl WindowView {
 
     /// The agents asked for again (while the sidebar's grouped by them).
     pub(super) fn refresh_grouped(&mut self, cx: &mut Context<Self>) {
+        if self.grouped.is_some() {
+            self.refresh_past(false, cx);
+        }
         let Some(grouped) = self.grouped.as_mut().filter(|g| !g.loading) else { return };
         grouped.loading = true;
         let asks: Vec<_> = app_state::servers(cx)
@@ -116,6 +120,7 @@ impl WindowView {
                     .into_any_element(),
             );
         }
+        rows.extend(self.grouped_past(grouped, cx));
         // The tabs with no agent, in their workspaces' order.
         let agent_panes: HashSet<PaneId> = grouped.agents.iter().map(|(a, _)| a.pane).collect();
         let mut others = Vec::new();
@@ -229,8 +234,88 @@ impl WindowView {
             .into_any_element()
     }
 
+    /// Past conversations (not going on in a pane): one opens in the panel
+    /// beside the terminal, read-only, to ask a copy of or carry on.
+    fn grouped_past(&self, grouped: &Grouped, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        if self.past.list.is_empty() {
+            return Vec::new();
+        }
+        let folded = grouped.past_folded;
+        let mut rows = vec![
+            div()
+                .id("past-heading")
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .px_2()
+                .pt(px(10.))
+                .pb_1()
+                .text_size(px(10.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(ui(0xffffff70))
+                .hover(|d| d.text_color(ui(0xffffffb0)))
+                .child(if folded { "▸" } else { "▾" })
+                .child("PAST CONVERSATIONS")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(grouped) = this.grouped.as_mut() {
+                        grouped.past_folded = !grouped.past_folded;
+                    }
+                    cx.notify();
+                }))
+                .into_any_element(),
+        ];
+        if folded {
+            return rows;
+        }
+        let shown = self.thread_panel.as_ref().filter(|_| self.panel_shown());
+        let open = shown.and_then(|p| p.agents.past_shown()).map(|(s, h)| (s, h.session.clone()));
+        for (i, (server, hit)) in self.past.list.iter().enumerate() {
+            let chosen = open.as_ref().is_some_and(|(s, id)| s == server && *id == hit.session);
+            let (mark, color) = search_view::agent_mark(&hit.agent);
+            let (server, hit) = (*server, hit.clone());
+            rows.push(
+                div()
+                    .id(("grouped-past", i))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(26.))
+                    .px(px(8.))
+                    .rounded(px(7.))
+                    .when(chosen, |d| d.bg(ui(0xffffff1c)))
+                    .hover(|d| d.bg(ui(0xffffff10)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(ui(color << 8 | 0xb0))
+                            .child(mark),
+                    )
+                    .child(
+                        Self::one_line(hit.title.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(if chosen { ui(0xffffffee) } else { ui(0xffffff90) }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.showing_view() {
+                            this.show_terminals(cx);
+                        }
+                        this.show_past(agents_view::Shown::Panel, server, hit.clone(), cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
+        rows
+    }
+
     /// To an agent's terminal: here, or (another window's) there.
     pub(super) fn go_to_agent(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+        // (The panel, showing a past conversation, goes back to threads.)
+        if let Some(panel) = self.thread_panel.as_mut() {
+            panel.agents.close_past();
+        }
         if self.showing_view() {
             self.show_terminals(cx);
         }

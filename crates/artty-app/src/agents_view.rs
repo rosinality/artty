@@ -85,22 +85,41 @@ pub(super) struct Agents {
     pub(super) list: ThreadList,
     loading: bool,
     pub(super) loaded: bool,
-    /// Agents' past conversations on each machine (not going on in a
-    /// pane), newest first, and when they were last asked for.
-    past: Vec<(ServerId, SessionHit)>,
-    past_at: Option<Instant>,
-    /// Those of them that are copies (`artty new --fork`).
-    copies: HashSet<String>,
     /// The past conversation shown (instead of an agent's thread), and
     /// what was said in it once read.
     archived: Option<(ServerId, SessionHit)>,
     said: Option<Result<Vec<Said>, String>>,
 }
 
+/// Agents' past conversations on each machine (not going on in a pane),
+/// newest first, for Agents and the sidebar.
+#[derive(Default)]
+pub(super) struct Past {
+    pub(super) list: Vec<(ServerId, SessionHit)>,
+    /// Those of them that are copies (`artty new --fork`).
+    pub(super) copies: HashSet<String>,
+    /// When they were last asked for.
+    at: Option<Instant>,
+}
+
 impl Agents {
     /// A past conversation is shown, not an agent's thread.
     pub(super) fn showing_past(&self) -> bool {
         self.archived.is_some()
+    }
+
+    /// The past conversation shown, and its machine.
+    pub(super) fn past_shown(&self) -> Option<(ServerId, &SessionHit)> {
+        self.archived.as_ref().map(|(server, hit)| (*server, hit))
+    }
+
+    /// Back to the agent's thread.
+    pub(super) fn close_past(&mut self) {
+        if self.archived.take().is_some() {
+            self.said = None;
+            self.text_sel = None;
+            self.pieces.borrow_mut().clear();
+        }
     }
 }
 
@@ -709,10 +728,11 @@ impl WindowView {
             agents.selected.and_then(|p| self.drafts.get(&p)).is_some_and(|d| !d.text.is_empty());
         // The agents, then the past conversations, as the list has them.
         let panes: Vec<PaneId> = agents.agents.iter().map(|(a, _)| a.pane).collect();
-        let count = panes.len() + agents.past.len();
+        let count = panes.len() + self.past.list.len();
         let at = match &agents.archived {
-            Some((server, hit)) => agents
+            Some((server, hit)) => self
                 .past
+                .list
                 .iter()
                 .position(|(s, h)| s == server && h.session == hit.session)
                 .map(|i| panes.len() + i),
@@ -729,15 +749,15 @@ impl WindowView {
                 match panes.get(next) {
                     Some(&pane) => self.select_agent(pane, cx),
                     None => {
-                        let (server, hit) = agents.past[next - panes.len()].clone();
-                        self.show_past(server, hit, cx);
+                        let (server, hit) = self.past.list[next - panes.len()].clone();
+                        self.show_past(Shown::View, server, hit, cx);
                     },
                 }
             },
             // A past conversation: a copy of it asked.
             "enter" if agents.archived.is_some() => {
                 if agents.archived.as_ref().is_some_and(|(_, h)| h.agent == "claude") {
-                    self.ask_copy(None, cx);
+                    self.ask_copy(Shown::View, None, cx);
                 }
             },
             "enter" => {
@@ -777,14 +797,15 @@ impl WindowView {
             agents.agents.iter().map(|(_, server)| server).collect::<HashSet<_>>().len() > 1;
         if let Some((server, hit)) = agents.archived.as_ref() {
             let list = self.sidebar_hidden.then(|| self.folded_list(cx));
-            return div()
-                .size_full()
-                .flex()
-                .min_h_0()
-                .children(list)
-                .child(self.past_view(agents, *server, hit, cx));
+            return div().size_full().flex().min_h_0().children(list).child(self.past_view(
+                agents,
+                Shown::View,
+                *server,
+                hit,
+                cx,
+            ));
         }
-        if agents.loaded && agents.agents.is_empty() && agents.past.is_empty() {
+        if agents.loaded && agents.agents.is_empty() && self.past.list.is_empty() {
             return div().size_full().flex().items_center().justify_center().child(
                 div()
                     .max_w(px(420.))
@@ -840,12 +861,11 @@ impl WindowView {
 
     /// The past conversations asked for again (`now`, or once it's been a
     /// while), from each connected machine.
-    fn refresh_past(&mut self, now: bool, cx: &mut Context<Self>) {
-        let Some(agents) = self.agents.as_mut() else { return };
-        if !now && agents.past_at.is_some_and(|at| at.elapsed() < PAST_EVERY) {
+    pub(super) fn refresh_past(&mut self, now: bool, cx: &mut Context<Self>) {
+        if !now && self.past.at.is_some_and(|at| at.elapsed() < PAST_EVERY) {
             return;
         }
-        agents.past_at = Some(Instant::now());
+        self.past.at = Some(Instant::now());
         let asks: Vec<_> = app_state::servers(cx)
             .into_iter()
             .filter(|(_, _, status)| *status == app_state::Status::Connected)
@@ -868,20 +888,27 @@ impl WindowView {
             }
             past.sort_by_key(|(_, hit)| std::cmp::Reverse(hit.modified));
             let _ = this.update(cx, |this, cx| {
-                if let Some(agents) = this.agents.as_mut() {
-                    agents.past = past;
-                    agents.copies = copies;
-                    cx.notify();
-                }
+                this.past.list = past;
+                this.past.copies = copies;
+                cx.notify();
             });
         })
         .detach();
     }
 
-    /// Show a past conversation: what was said in it, read from its
-    /// machine.
-    fn show_past(&mut self, server: ServerId, hit: SessionHit, cx: &mut Context<Self>) {
-        let Some(agents) = self.agents.as_mut() else { return };
+    /// Show a past conversation (in Agents, or the panel beside the
+    /// terminal): what was said in it, read from its machine.
+    pub(super) fn show_past(
+        &mut self,
+        which: Shown,
+        server: ServerId,
+        hit: SessionHit,
+        cx: &mut Context<Self>,
+    ) {
+        if which == Shown::Panel && !self.panel_shown() {
+            self.open_thread_panel(cx);
+        }
+        let Some(agents) = self.agents_in_mut(which) else { return };
         let session = hit.session.clone();
         agents.archived = Some((server, hit));
         agents.said = None;
@@ -899,7 +926,7 @@ impl WindowView {
                 _ => Err("its machine didn't answer".to_owned()),
             };
             let _ = this.update(cx, |this, cx| {
-                let Some(agents) = this.agents.as_mut() else { return };
+                let Some(agents) = this.agents_in_mut(which) else { return };
                 if agents.archived.as_ref().is_some_and(|(_, h)| h.session == session) {
                     agents.said = Some(said);
                     cx.notify();
@@ -937,7 +964,7 @@ impl WindowView {
                 _ => None,
             };
             let text = selected.or_else(|| last.map(|s| s.text.clone())).unwrap_or_default();
-            return self.ask_copy(Some(text), cx);
+            return self.ask_copy(which, Some(text), cx);
         }
         let Some(agent) =
             agents.selected.and_then(|p| agents.agents.iter().find(|(a, _)| a.pane == p))
@@ -1062,8 +1089,8 @@ impl WindowView {
 
     /// The past conversation shown, sent on (`text`), or (none) a copy of
     /// it started.
-    fn ask_copy(&mut self, text: Option<String>, cx: &mut Context<Self>) {
-        let Some((server, hit)) = self.agents.as_ref().and_then(|a| a.archived.clone()) else {
+    fn ask_copy(&mut self, which: Shown, text: Option<String>, cx: &mut Context<Self>) {
+        let Some((server, hit)) = self.agents_in(which).and_then(|a| a.archived.clone()) else {
             return;
         };
         let sending = super::palette::Sending {
@@ -1078,9 +1105,10 @@ impl WindowView {
 
     /// A past conversation, read-only: what was said, and what can be done
     /// with it (a copy asked, or carried on in a tab).
-    fn past_view(
+    pub(super) fn past_view(
         &self,
         agents: &Agents,
+        which: Shown,
         server: ServerId,
         hit: &SessionHit,
         cx: &mut Context<Self>,
@@ -1088,13 +1116,19 @@ impl WindowView {
         let mut detail = vec![hit.agent.clone()];
         detail.extend(hit.cwd.as_deref().map(short_home));
         detail.push(super::search_view::ago(hit.modified));
-        if agents.copies.contains(&hit.session) {
+        if self.past.copies.contains(&hit.session) {
             detail.push("a copy".into());
         }
         let copyable = hit.agent == "claude";
         let ask_copy =
-            Self::small_button("past-copy".into(), "Ask a copy… ↩", 0xffffffee, 0x3d59a1ff)
-                .on_click(cx.listener(move |this, _, _, cx| this.ask_copy(None, cx)));
+            // (Enter asks one in Agents; in the panel it's the terminal's.)
+            Self::small_button(
+                "past-copy".into(),
+                if which == Shown::View { "Ask a copy… ↩" } else { "Ask a copy…" },
+                0xffffffee,
+                0x3d59a1ff,
+            )
+                .on_click(cx.listener(move |this, _, _, cx| this.ask_copy(which, None, cx)));
         let resume = hit.clone();
         let carry_on =
             Self::small_button("past-resume".into(), "Continue in a tab", 0xffffffd0, 0xffffff14)
@@ -1129,7 +1163,7 @@ impl WindowView {
                 .map(|(i, said)| {
                     let mine = said.role == "user";
                     let message =
-                        self.markdown(agents, &said.text, &format!("past-{i}"), Shown::View, cx);
+                        self.markdown(agents, &said.text, &format!("past-{i}"), which, cx);
                     div()
                         .flex()
                         .when(mine, |d| d.justify_end())
@@ -1138,17 +1172,20 @@ impl WindowView {
                 })
                 .collect(),
         };
-        // Typing (into the palette over it) comes here: it has no draft
-        // whose input handler would take it.
+        // Typing (into the palette over it) comes here: in Agents it has no
+        // draft whose input handler would take it (in the panel, the
+        // terminal's does).
         let (focus, entity) = (self.focus.clone(), cx.entity());
-        let typing = canvas(
-            |_, _, _| {},
-            move |bounds, _, window, cx| {
-                window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, entity), cx);
-            },
-        )
-        .absolute()
-        .size_full();
+        let typing = (which == Shown::View).then(|| {
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, cx| {
+                    window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, entity), cx);
+                },
+            )
+            .absolute()
+            .size_full()
+        });
         div()
             .relative()
             .flex_1()
@@ -1156,7 +1193,7 @@ impl WindowView {
             .flex()
             .flex_col()
             .min_h_0()
-            .child(typing)
+            .children(typing)
             .child(
                 div()
                     .flex()
@@ -1256,7 +1293,7 @@ impl WindowView {
             }
             rows.push(self.sidebar_agent(agents, agent, cx));
         }
-        if !agents.past.is_empty() {
+        if !self.past.list.is_empty() {
             rows.push(
                 div()
                     .px_2()
@@ -1269,7 +1306,7 @@ impl WindowView {
                     .into_any_element(),
             );
         }
-        for (i, (server, hit)) in agents.past.iter().enumerate() {
+        for (i, (server, hit)) in self.past.list.iter().enumerate() {
             let chosen = agents
                 .archived
                 .as_ref()
@@ -1301,13 +1338,13 @@ impl WindowView {
                             .min_w_0()
                             .text_color(if chosen { ui(0xffffffee) } else { ui(0xffffff90) }),
                     )
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.show_past(server, open.clone(), cx)),
-                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.show_past(Shown::View, server, open.clone(), cx)
+                    }))
                     .into_any_element(),
             );
         }
-        if !agents.past.is_empty() {
+        if !self.past.list.is_empty() {
             rows.push(
                 div()
                     .id("past-search")

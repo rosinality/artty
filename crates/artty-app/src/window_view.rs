@@ -435,6 +435,8 @@ pub struct WindowView {
     thread_panel: Option<thread_panel::ThreadPanel>,
     /// The sidebar grouped by agent (not by workspace), when it is.
     grouped: Option<agent_sidebar::Grouped>,
+    /// Agents' past conversations (Agents and the sidebar list them).
+    past: agents_view::Past,
     /// What's being written to each agent (in Agents or the panel).
     drafts: compose::Drafts,
     /// The pane whose screens a server sends for the Agents view, and over
@@ -594,6 +596,7 @@ impl WindowView {
             agents: None,
             thread_panel: None,
             grouped,
+            past: Default::default(),
             drafts: Default::default(),
             peeking: None,
             copy_mode: None,

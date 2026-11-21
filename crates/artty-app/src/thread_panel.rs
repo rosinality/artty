@@ -72,7 +72,7 @@ impl WindowView {
         }
     }
 
-    fn open_thread_panel(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn open_thread_panel(&mut self, cx: &mut Context<Self>) {
         // From Activity or Agents: back to the terminal, with it.
         if self.showing_agents() {
             self.agents = None;
@@ -110,6 +110,8 @@ impl WindowView {
         }
         if panel.agents.selected != focused {
             panel.agents.selected = focused;
+            // (A past conversation shown gives way to the new pane's thread.)
+            panel.agents.close_past();
             panel.agents.thread.clear();
             panel.agents.asks.clear();
             panel.agents.thread_of = None;
@@ -203,13 +205,16 @@ impl WindowView {
                     .child("✕")
                     .on_click(cx.listener(|this, _, _, cx| this.close_thread_panel(cx))),
             );
-        let body = match agent {
-            Some(agent) => self.agent_thread(agents, Some(agent), Shown::Panel, cx),
-            None if !agents.loaded => div().flex_1(),
-            None => div().flex_1().p(px(16.)).text_size(px(12.5)).text_color(ui(0xffffff90)).child(
-                "No agent in this pane. Start Claude Code, Codex or Gemini CLI here (with \
+        let body = match (agents.past_shown(), agent) {
+            (Some((server, hit)), _) => self.past_view(agents, Shown::Panel, server, hit, cx),
+            (None, Some(agent)) => self.agent_thread(agents, Some(agent), Shown::Panel, cx),
+            (None, None) if !agents.loaded => div().flex_1(),
+            (None, None) => {
+                div().flex_1().p(px(16.)).text_size(px(12.5)).text_color(ui(0xffffff90)).child(
+                    "No agent in this pane. Start Claude Code, Codex or Gemini CLI here (with \
                  artty's hooks installed: artty hooks install) and its thread shows here.",
-            ),
+                )
+            },
         };
         Some(
             div()
