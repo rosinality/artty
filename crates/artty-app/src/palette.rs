@@ -373,9 +373,8 @@ impl WindowView {
                     Err(_) => this.show_toast("Not sent: no answer from its server", cx),
                     Ok(Response::Started { id, .. }) | Ok(Response::Tab { id }) => {
                         this.show_toast(format!("Started {to}"), cx);
-                        if let Some(agents) = this.agents_in_mut(Shown::View) {
-                            agents.selected = Some(ids::tag(server, id));
-                        }
+                        // Shown (once listed: the next refresh).
+                        this.select_agent(ids::tag(server, id), cx);
                     },
                     Ok(_) => this.show_toast(format!("Sent to {to}"), cx),
                 }

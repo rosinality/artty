@@ -325,6 +325,10 @@ pub(crate) struct Server {
     /// The pane each agent was started from by another (`artty new
     /// --task` from inside a pane).
     parents: HashMap<PaneId, PaneId>,
+    /// The pane whose agent's conversation each copy started from outside
+    /// a pane copies (listed under it; not started by it, so not counted
+    /// in how deep agents start agents).
+    copied_from: HashMap<PaneId, PaneId>,
     /// The worktrees tabs were opened in (`artty new --worktree`), removed
     /// with them if they have no changes.
     worktrees: HashMap<PaneId, crate::worktrees::Worktree>,
@@ -619,6 +623,7 @@ impl Server {
             threads: crate::threads::Threads::new(crate::store::Store::open()),
             edits: crate::edits::Edits::default(),
             parents: HashMap::new(),
+            copied_from: HashMap::new(),
             rewinds: Vec::new(),
             worktrees: HashMap::new(),
             next_pane: 1,
@@ -1498,6 +1503,7 @@ impl Server {
         self.threads.pane_closed(pane);
         self.edits.pane_closed(pane);
         self.parents.remove(&pane);
+        self.copied_from.remove(&pane);
         if let Some(tree) = self.worktrees.remove(&pane) {
             crate::worktrees::remove(tree);
         }
@@ -2560,8 +2566,10 @@ impl Server {
                 .find(|&(&p, pane)| p != id && pane.agent_session() == Some(session))
                 .map(|(&p, _)| p)
         });
-        if let Some(parent) = asker.or(source) {
-            self.parents.insert(id, parent);
+        match (asker, source) {
+            (Some(asker), _) => _ = self.parents.insert(id, asker),
+            (None, Some(source)) => _ = self.copied_from.insert(id, source),
+            (None, None) => {},
         }
         let Some(task) = task else { return Ok(Response::Tab { id }) };
         let ask = self.add_ask(id, task, false, asker)?;
@@ -3378,6 +3386,7 @@ impl Server {
                             parent: self
                                 .parents
                                 .get(&id)
+                                .or(self.copied_from.get(&id))
                                 .copied()
                                 .filter(|p| self.panes.contains_key(p)),
                         })
@@ -4406,18 +4415,20 @@ impl Server {
         }
         // Which agent started which, by their threads' keys (panes' ids
         // change in a restart).
-        let mut parents: Vec<(PaneId, PaneId)> = self
+        // (`true`: a copy, listed under the agent it copies.)
+        let mut parents: Vec<(PaneId, PaneId, bool)> = self
             .parents
             .iter()
-            .filter(|(child, parent)| {
+            .map(|(&child, &parent)| (child, parent, false))
+            .chain(self.copied_from.iter().map(|(&child, &source)| (child, source, true)))
+            .filter(|(child, parent, _)| {
                 self.panes.contains_key(child) && self.panes.contains_key(parent)
             })
-            .map(|(&child, &parent)| (child, parent))
             .collect();
         parents.sort();
-        let parents: Vec<(u64, u64)> = parents
+        let parents: Vec<(u64, u64, bool)> = parents
             .into_iter()
-            .map(|(child, parent)| (self.threads.key(child), self.threads.key(parent)))
+            .map(|(child, parent, copy)| (self.threads.key(child), self.threads.key(parent), copy))
             .collect();
         let Ok(json) = serde_json::to_string(&parents) else { return };
         if self.last_kept_parents.as_ref() != Some(&json) {
@@ -4464,17 +4475,20 @@ impl Server {
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
         self.replies.restore(replies, |key| self.threads.pane_of(key));
-        let parents: Vec<(u64, u64)> = self
+        let parents: Vec<(u64, u64, bool)> = self
             .threads
             .store()
             .record("parents")
             .and_then(|json| serde_json::from_str(&json).ok())
             .unwrap_or_default();
-        for (child, parent) in parents {
+        for (child, parent, copy) in parents {
             if let (Some(child), Some(parent)) =
                 (self.threads.pane_of(child), self.threads.pane_of(parent))
             {
-                self.parents.insert(child, parent);
+                match copy {
+                    false => self.parents.insert(child, parent),
+                    true => self.copied_from.insert(child, parent),
+                };
             }
         }
         self.adopted.clear();

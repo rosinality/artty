@@ -173,7 +173,9 @@ impl WindowView {
     /// Where what's typed goes: the Agents view while shown, else the
     /// thread panel while it's being written in.
     pub(super) fn composing(&self) -> Option<Shown> {
-        if self.showing_agents() {
+        // (A past conversation shown has no draft: its agent's is hidden.)
+        let past = self.agents.as_ref().is_some_and(|a| a.showing_past());
+        if self.showing_agents() && !past {
             Some(Shown::View)
         } else if self.panel_typing() {
             Some(Shown::Panel)

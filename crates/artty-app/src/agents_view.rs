@@ -97,6 +97,18 @@ pub(super) struct Agents {
     said: Option<Result<Vec<Said>, String>>,
 }
 
+impl Agents {
+    /// A past conversation is shown, not an agent's thread.
+    pub(super) fn showing_past(&self) -> bool {
+        self.archived.is_some()
+    }
+}
+
+/// The conversation of `agent` a copy can be made of: Claude Code's.
+fn copyable(agent: &AgentInfo) -> Option<String> {
+    agent.session.clone().filter(|_| agent.agent == "claude" || agent.agent == "claude-acp")
+}
+
 /// Past conversations listed, at most (each machine's).
 const PAST: usize = 8;
 /// How often the list of past conversations is read again.
@@ -228,7 +240,7 @@ impl WindowView {
     ) -> gpui::Div {
         let text = text.to_owned();
         let send = from.map(|agent| {
-            let (pane, title, session) = (agent.pane, agent.title.clone(), agent.session.clone());
+            let (pane, title, session) = (agent.pane, agent.title.clone(), copyable(agent));
             let whole = text.clone();
             div()
                 .id(SharedString::from(format!("send-{seq}")))
@@ -664,7 +676,7 @@ impl WindowView {
         self.refresh_in(Shown::View, cx);
     }
 
-    fn select_agent(&mut self, pane: PaneId, cx: &mut Context<Self>) {
+    pub(super) fn select_agent(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         let Some(agents) = self.agents.as_mut() else { return };
         if agents.archived.take().is_some() {
             agents.text_sel = None;
@@ -719,7 +731,11 @@ impl WindowView {
                 }
             },
             // A past conversation: a copy of it asked.
-            "enter" if agents.archived.is_some() => self.ask_copy(None, cx),
+            "enter" if agents.archived.is_some() => {
+                if agents.archived.as_ref().is_some_and(|(_, h)| h.agent == "claude") {
+                    self.ask_copy(None, cx);
+                }
+            },
             "enter" => {
                 if let Some(pane) = agents.selected {
                     self.show_agent_terminal(pane, cx);
@@ -923,7 +939,7 @@ impl WindowView {
             from: Some(agent.pane),
             server: ids::server_of(agent.pane),
             title: agent.title.clone(),
-            session: agent.session.clone(),
+            session: copyable(agent),
             text,
         };
         self.open_send(sending, cx);
@@ -1007,12 +1023,25 @@ impl WindowView {
                 })
                 .collect(),
         };
+        // Typing (into the palette over it) comes here: it has no draft
+        // whose input handler would take it.
+        let (focus, entity) = (self.focus.clone(), cx.entity());
+        let typing = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, cx| {
+                window.handle_input(&focus, gpui::ElementInputHandler::new(bounds, entity), cx);
+            },
+        )
+        .absolute()
+        .size_full();
         div()
+            .relative()
             .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
             .min_h_0()
+            .child(typing)
             .child(
                 div()
                     .flex()
