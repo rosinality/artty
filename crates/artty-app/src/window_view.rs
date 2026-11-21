@@ -3706,10 +3706,19 @@ impl WindowView {
         &self,
         pane: Option<PaneId>,
         selection: bool,
+        in_terminal: bool,
+        cx: &App,
     ) -> Vec<Option<(SharedString, &'static str, bool, MenuCommand)>> {
         let Some(agent) = pane.and_then(|p| self.known_agent(p)) else { return Vec::new() };
         let pane = agent.pane;
-        let send = if selection { "Send Selection to…" } else { "Send Last Reply to…" };
+        // (In its terminal, nothing selected, and it takes the mouse: how
+        // to select is with Shift.)
+        let taken = self.mode(pane, cx).intersects(TermMode::MOUSE_MODE);
+        let send = match (selection, in_terminal && taken) {
+            (true, _) => "Send Selection to…",
+            (false, true) => "Send Last Reply to… (⇧-drag selects)",
+            (false, false) => "Send Last Reply to…",
+        };
         let mut items =
             vec![Some((SharedString::from(send), "⌥⌘S", true, MenuCommand::SendTo(pane)))];
         if agent.session.is_some() && agent.agent.starts_with("claude") {
@@ -3725,7 +3734,6 @@ impl WindowView {
         viewport: gpui::Size<Pixels>,
         cx: &mut Context<Self>,
     ) -> Option<gpui::Div> {
-        const WIDTH: f32 = 220.;
         const ITEM: f32 = 24.;
         const SEPARATOR: f32 = 9.;
         let menu = self.context_menu.as_ref()?;
@@ -3747,7 +3755,12 @@ impl WindowView {
                         None,
                     ]);
                 }
-                items.extend(self.agent_menu_items(pane_of(&menu.target), menu.has_selection));
+                items.extend(self.agent_menu_items(
+                    pane_of(&menu.target),
+                    menu.has_selection,
+                    true,
+                    cx,
+                ));
                 items.extend([
                     item("Split Right", "⌘D", true, MenuCommand::SplitRight),
                     item("Split Down", "⇧⌘D", true, MenuCommand::SplitDown),
@@ -3795,7 +3808,7 @@ impl WindowView {
                 let agent = self.tabs.get(index).and_then(|t| {
                     t.root.panes().into_iter().find(|&p| self.known_agent(p).is_some())
                 });
-                let mut items = self.agent_menu_items(agent, false);
+                let mut items = self.agent_menu_items(agent, false, false, cx);
                 items.extend([
                     item("Rename Tab…", "", true, MenuCommand::RenameTab),
                     item("Move to New Workspace", "", !alone, MenuCommand::TabToNewWorkspace),
@@ -3902,8 +3915,11 @@ impl WindowView {
             + items.iter().map(|i| if i.is_some() { ITEM } else { SEPARATOR }).sum::<f32>()
             + if color_row.is_some() { ITEM + SEPARATOR } else { 0. };
         let (mut x, mut y) = (f32::from(menu.position.x), f32::from(menu.position.y));
-        if x + WIDTH > f32::from(viewport.width) - 4. {
-            x = (x - WIDTH).max(4.);
+        // Wide enough for its longest label (a hint makes one long).
+        let longest = items.iter().flatten().map(|(label, ..)| label.chars().count()).max();
+        let width: f32 = if longest.unwrap_or(0) > 26 { 300. } else { 220. };
+        if x + width > f32::from(viewport.width) - 4. {
+            x = (x - width).max(4.);
         }
         if y + height > f32::from(viewport.height) - 4. {
             y = (f32::from(viewport.height) - height - 4.).max(4.);
@@ -3946,7 +3962,7 @@ impl WindowView {
             .absolute()
             .left(px(x))
             .top(px(y))
-            .w(px(WIDTH))
+            .w(px(width))
             .occlude()
             .flex()
             .flex_col()
