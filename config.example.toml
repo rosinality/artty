@@ -64,6 +64,10 @@ sidebar-by-agent = false
 # and fold them.
 sidebar-past-open = []
 
+# In the sidebar by workspace, list a workspace's agents' tabs first (each
+# with the tabs of agents it started under it), then its other tabs.
+sidebar-agents-first = false
+
 # Ask before pasting several lines into a program that would run them one by
 # one: one that hasn't turned on bracketed paste (shells and editors usually
 # have, so they get the paste whole).

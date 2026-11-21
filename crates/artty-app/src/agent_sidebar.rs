@@ -427,11 +427,15 @@ impl WindowView {
                 tab.root.panes().iter().filter_map(|p| tab_of(*parent_of.get(p)?)).find(|&t| t != i)
             })
             .collect();
-        // Agents' tabs first (each with those under it), then the rest.
+        // Agents' tabs first (each with those under it), then the rest
+        // (the setting's).
         let agents: HashSet<PaneId> = self.known.agents.iter().map(|(a, _)| a.pane).collect();
         let agent_tab: Vec<bool> =
             tabs.iter().map(|t| t.root.panes().iter().any(|p| agents.contains(p))).collect();
-        agents_first(nest_order(&parents), &agent_tab)
+        match self.config.sidebar_agents_first {
+            true => agents_first(nest_order(&parents), &agent_tab),
+            false => nest_order(&parents),
+        }
     }
 
     /// Past conversations on `server` (folded unless opened: kept, by

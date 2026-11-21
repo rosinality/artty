@@ -939,6 +939,16 @@ impl Render for Settings {
                     self.toggle("sidebar-by-agent", c.sidebar_by_agent, "sidebar-by-agent", cx),
                 ),
                 Self::row(
+                    "Agents' tabs first",
+                    Some("In each workspace, agents' tabs (with their workers) before the others"),
+                    self.toggle(
+                        "sidebar-agents-first",
+                        c.sidebar_agents_first,
+                        "sidebar-agents-first",
+                        cx,
+                    ),
+                ),
+                Self::row(
                     "Status icons in the sidebar",
                     Some("Working, needs you, done; off for a narrower line"),
                     self.toggle("sidebar-icons", c.sidebar_icons, "sidebar-icons", cx),
