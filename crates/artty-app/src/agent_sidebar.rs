@@ -427,7 +427,11 @@ impl WindowView {
                 tab.root.panes().iter().filter_map(|p| tab_of(*parent_of.get(p)?)).find(|&t| t != i)
             })
             .collect();
-        nest_order(&parents)
+        // Agents' tabs first (each with those under it), then the rest.
+        let agents: HashSet<PaneId> = self.known.agents.iter().map(|(a, _)| a.pane).collect();
+        let agent_tab: Vec<bool> =
+            tabs.iter().map(|t| t.root.panes().iter().any(|p| agents.contains(p))).collect();
+        agents_first(nest_order(&parents), &agent_tab)
     }
 
     /// Past conversations on `server` (folded unless opened: kept, by
@@ -605,6 +609,21 @@ fn nest_order(parents: &[Option<usize>]) -> Vec<(usize, usize)> {
     out
 }
 
+/// `order` (from [`nest_order`]) with the items whose root is an agent's
+/// (`agent[i]`) first, each root's together, otherwise as it was.
+fn agents_first(order: Vec<(usize, usize)>, agent: &[bool]) -> Vec<(usize, usize)> {
+    let mut blocks: Vec<Vec<(usize, usize)>> = Vec::new();
+    for item in order {
+        match blocks.last_mut() {
+            Some(block) if item.1 > 0 => block.push(item),
+            _ => blocks.push(vec![item]),
+        }
+    }
+    // (Stable: agents' in their order, then the rest in theirs.)
+    blocks.sort_by_key(|block| !agent.get(block[0].0).copied().unwrap_or(false));
+    blocks.into_iter().flatten().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use artty_core::control::AgentInfo;
@@ -615,6 +634,14 @@ mod tests {
             "pending": 0, "unread": 0, "parent": parent,
         });
         (serde_json::from_value(json).unwrap(), server.to_owned())
+    }
+
+    #[test]
+    fn agents_tabs_first() {
+        // Tabs: 0 shell, 1 agent (started 3), 2 shell, 3 worker, 4 agent.
+        let order = super::nest_order(&[None, None, None, Some(1), None]);
+        let agent = [false, true, false, true, true];
+        assert_eq!(super::agents_first(order, &agent), [(1, 0), (3, 1), (4, 0), (0, 0), (2, 0)]);
     }
 
     #[test]
