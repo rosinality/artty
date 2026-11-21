@@ -58,6 +58,9 @@ pub struct Config {
     /// The sidebar lists agents (each with those it started), then the
     /// tabs with none, instead of tabs by workspace.
     pub sidebar_by_agent: bool,
+    /// The servers whose past conversations are open in the sidebar (by
+    /// name; `""` for this Mac's): folded otherwise.
+    pub sidebar_past_open: Vec<String>,
     /// Ask before pasting several lines into a program that would run them
     /// one by one (one that hasn't turned on bracketed paste).
     pub confirm_multiline_paste: bool,
@@ -406,6 +409,7 @@ impl Default for Config {
             sidebar_width: 232,
             sidebar_icons: true,
             sidebar_by_agent: false,
+            sidebar_past_open: Vec::new(),
             confirm_multiline_paste: true,
             secure_keyboard_entry: false,
             local_echo: true,

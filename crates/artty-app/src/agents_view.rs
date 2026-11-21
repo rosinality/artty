@@ -727,9 +727,6 @@ impl WindowView {
         if self.showing_activity() {
             self.toggle_activity(cx);
         }
-        if self.grouped.is_none() {
-            self.toggle_grouping(cx);
-        }
         let shared = &cx.global::<Shared>().panes;
         let agent_here =
             self.focused_id().and_then(|p| shared.get(&p)).is_some_and(|s| s.agent.is_some());

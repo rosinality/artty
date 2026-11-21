@@ -436,6 +436,11 @@ pub struct WindowView {
     thread_panel: Option<thread_panel::ThreadPanel>,
     /// The sidebar grouped by agent (not by workspace), when it is.
     grouped: Option<agent_sidebar::Grouped>,
+    /// Every agent, as last heard (who started whom, for the sidebar).
+    known: agent_sidebar::Known,
+    /// The servers whose past conversations are open in the sidebar
+    /// (`sidebar-past-open`, by name; `""` this Mac).
+    past_open: HashSet<String>,
     /// Agents' past conversations (Agents and the sidebar list them).
     past: agents_view::Past,
     /// What's being written to each agent (in Agents or the panel).
@@ -543,6 +548,7 @@ impl WindowView {
         let metrics = Metrics::measure(window, &config, font_size);
         let sidebar = (config.sidebar_width as f32).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         let grouped = config.sidebar_by_agent.then(agent_sidebar::Grouped::default);
+        let past_open: HashSet<String> = config.sidebar_past_open.iter().cloned().collect();
         Self {
             focus,
             theme: Arc::new(config.theme()),
@@ -597,6 +603,8 @@ impl WindowView {
             agents: None,
             thread_panel: None,
             grouped,
+            known: Default::default(),
+            past_open,
             past: Default::default(),
             drafts: Default::default(),
             peeking: None,
@@ -1613,7 +1621,7 @@ impl WindowView {
             self.refresh_activity(cx);
         }
         self.refresh_agents(cx);
-        self.refresh_grouped(cx);
+        self.refresh_known(cx);
         if self.toast.as_ref().is_some_and(|(_, shown)| shown.elapsed() >= pane_actions::TOAST_TIME)
         {
             self.toast = None;
@@ -1653,6 +1661,7 @@ impl WindowView {
         if self.config.sidebar_by_agent != self.grouped.is_some() {
             self.grouped = self.config.sidebar_by_agent.then(Default::default);
         }
+        self.past_open = self.config.sidebar_past_open.iter().cloned().collect();
         // The active window follows the setting (inactive ones leave it be).
         if self.window_active {
             crate::secure_input::set(self.config.secure_keyboard_entry);
@@ -2218,6 +2227,26 @@ impl WindowView {
         // before the width is known, so `.truncate()` only clips. A one-line
         // clamp re-measures at the real width and ellipsizes.
         div().overflow_hidden().line_clamp(1).text_ellipsis().child(text.into())
+    }
+
+    /// A workspace's tab rows (its first tab being `first` of all), each
+    /// followed by those its agent started, indented under it.
+    fn nested_rows(
+        &self,
+        first: usize,
+        tabs: &[TabLayout],
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        self.nested_tabs(tabs)
+            .into_iter()
+            .map(|(i, depth)| {
+                let row = self.tab_row(first + i, &tabs[i], cx);
+                match depth {
+                    0 => row.into_any_element(),
+                    _ => div().pl(px(14. * depth as f32)).child(row).into_any_element(),
+                }
+            })
+            .collect()
     }
 
     fn tab_row(
@@ -3425,6 +3454,9 @@ impl WindowView {
             .into_iter()
             .filter(|_| several && style != artty_core::SidebarStyle::Switcher)
             .peekable();
+        // The server whose workspaces were last listed (its past
+        // conversations follow them).
+        let mut past_of: Option<ServerId> = None;
         if style == artty_core::SidebarStyle::Switcher {
             // The current workspace's tabs, under the way to the others.
             rows.push(self.switcher_button(cx).into_any_element());
@@ -3441,6 +3473,11 @@ impl WindowView {
                 continue;
             }
             let server = ids::server_of(workspace.id);
+            // (A server's past conversations after its workspaces.)
+            if past_of.is_some_and(|s| s != server) {
+                rows.extend(self.server_past(past_of.unwrap(), cx));
+            }
+            past_of = Some(server).filter(|s| !(several && self.folded_servers.contains(s)));
             while let Some((id, name, status)) = headers.next_if(|(id, _, _)| *id <= server) {
                 rows.push(self.server_header(id, name, status, cx).into_any_element());
             }
@@ -3451,23 +3488,28 @@ impl WindowView {
             }
             // The only one: no header (the heading stands for it), never folded.
             if self.lone_workspace(server).is_some() {
-                rows.extend(workspace.tabs.iter().map(|tab| {
-                    let row = self.tab_row(index, tab, cx).into_any_element();
-                    index += 1;
-                    row
-                }));
+                rows.extend(self.nested_rows(index, &workspace.tabs, cx));
+                index += workspace.tabs.len();
                 continue;
             }
             // An accordion has only the current workspace open.
             let folded =
                 workspace.collapsed || style == artty_core::SidebarStyle::Accordion && !current;
             rows.push(self.workspace_header(position, folded, cx).into_any_element());
-            for tab in &workspace.tabs {
-                if !folded || index == self.active {
-                    rows.push(self.tab_row(index, tab, cx).into_any_element());
+            if folded {
+                for tab in &workspace.tabs {
+                    if index == self.active {
+                        rows.push(self.tab_row(index, tab, cx).into_any_element());
+                    }
+                    index += 1;
                 }
-                index += 1;
+            } else {
+                rows.extend(self.nested_rows(index, &workspace.tabs, cx));
+                index += workspace.tabs.len();
             }
+        }
+        if let Some(server) = past_of {
+            rows.extend(self.server_past(server, cx));
         }
         for (id, name, status) in headers {
             rows.push(self.server_header(id, name, status, cx).into_any_element());

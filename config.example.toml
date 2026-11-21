@@ -59,6 +59,11 @@ sidebar-icons = true
 # switches it.
 sidebar-by-agent = false
 
+# The servers whose past conversations are open in the sidebar, by name (""
+# for this Mac's); the rest are folded. The sidebar keeps this as you open
+# and fold them.
+sidebar-past-open = []
+
 # Ask before pasting several lines into a program that would run them one by
 # one: one that hasn't turned on bracketed paste (shells and editors usually
 # have, so they get the paste whole).

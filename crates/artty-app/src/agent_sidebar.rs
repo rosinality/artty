@@ -5,23 +5,30 @@
 //! terminal is where you talk to an agent, this is where you see them all.
 
 use artty_core::control::{AgentInfo, AgentState};
+use artty_core::protocol::SessionHit;
 
 use super::*;
 
-/// The sidebar's agents, while it's grouped by them.
+/// Every agent, as last heard (for the sidebar, grouped by them or not:
+/// those an agent started go under it).
 #[derive(Default)]
-pub(super) struct Grouped {
+pub(super) struct Known {
     /// Every connected server's agents, pane ids tagged, in the order shown
     /// (each followed by those it started), with their server's name.
-    agents: Vec<(AgentInfo, String)>,
+    pub(super) agents: Vec<(AgentInfo, String)>,
     loading: bool,
+    /// Machines away (reconnecting): their agents as last heard, dimmed.
+    away: HashSet<String>,
+}
+
+/// The sidebar, grouped by agent: what's folded in it.
+#[derive(Default)]
+pub(super) struct Grouped {
     /// The tabs with no agent, folded away; the past conversations too;
     /// and the places (machine · workspace) folded.
     others_folded: bool,
     past_folded: bool,
     folded: HashSet<String>,
-    /// Machines away (reconnecting): their agents as last heard, dimmed.
-    away: HashSet<String>,
 }
 
 /// Where each agent is listed: before row `i`, the place (machine ·
@@ -71,17 +78,19 @@ impl WindowView {
         if let Err(err) = saved {
             self.show_toast(format!("Couldn't save the setting: {err}"), cx);
         }
-        self.refresh_grouped(cx);
+        self.refresh_known(cx);
         cx.notify();
     }
 
-    /// The agents asked for again (while the sidebar's grouped by them).
-    pub(super) fn refresh_grouped(&mut self, cx: &mut Context<Self>) {
-        if self.grouped.is_some() {
-            self.refresh_past(false, cx);
+    /// The agents asked for again (the sidebar shows who started whom),
+    /// and the past conversations when the sidebar shows them.
+    pub(super) fn refresh_known(&mut self, cx: &mut Context<Self>) {
+        self.refresh_past(false, cx);
+        let known = &mut self.known;
+        if known.loading {
+            return;
         }
-        let Some(grouped) = self.grouped.as_mut().filter(|g| !g.loading) else { return };
-        grouped.loading = true;
+        known.loading = true;
         let servers = app_state::servers(cx);
         // Those away: their agents stay, as last heard.
         let away: HashSet<String> = servers
@@ -90,7 +99,7 @@ impl WindowView {
             .map(|(_, name, _)| name.clone())
             .collect();
         let kept: Vec<(AgentInfo, String)> =
-            grouped.agents.iter().filter(|(_, s)| away.contains(s)).cloned().collect();
+            known.agents.iter().filter(|(_, s)| away.contains(s)).cloned().collect();
         let asks: Vec<_> = servers
             .into_iter()
             .filter(|(_, _, status)| *status == app_state::Status::Connected)
@@ -112,11 +121,11 @@ impl WindowView {
             let _ = this.update(cx, |this, cx| {
                 found.sort_by_cached_key(|(agent, server)| this.agent_order(agent, server));
                 let found = agents_view::nested(found);
-                let Some(grouped) = this.grouped.as_mut() else { return };
-                grouped.loading = false;
-                if grouped.agents != found || grouped.away != away {
-                    grouped.agents = found;
-                    grouped.away = away;
+                let known = &mut this.known;
+                known.loading = false;
+                if known.agents != found || known.away != away {
+                    known.agents = found;
+                    known.away = away;
                     cx.notify();
                 }
             });
@@ -126,7 +135,7 @@ impl WindowView {
 
     /// AGENTS (grouped) over the list, with the way back to tabs.
     pub(super) fn grouped_heading(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let count = self.grouped.as_ref().map_or(0, |g| g.agents.len());
+        let count = self.known.agents.len();
         div()
             .flex()
             .items_center()
@@ -152,21 +161,21 @@ impl WindowView {
     /// The sidebar's rows, grouped: the agents, then the tabs with none.
     pub(super) fn grouped_rows(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let Some(grouped) = self.grouped.as_ref() else { return Vec::new() };
-        let servers: HashSet<&String> = grouped.agents.iter().map(|(_, s)| s).collect();
-        let starts = places(&grouped.agents, servers.len());
+        let servers: HashSet<&String> = self.known.agents.iter().map(|(_, s)| s).collect();
+        let starts = places(&self.known.agents, servers.len());
         let mut rows: Vec<gpui::AnyElement> = Vec::new();
         let mut folded = false;
-        for (i, ((agent, server), start)) in grouped.agents.iter().zip(&starts).enumerate() {
+        for (i, ((agent, server), start)) in self.known.agents.iter().zip(&starts).enumerate() {
             if let Some(place) = start {
                 folded = grouped.folded.contains(place);
-                let away = grouped.away.contains(server);
+                let away = self.known.away.contains(server);
                 rows.push(self.place_header(i, place, folded, away, cx));
             }
             if !folded {
-                rows.push(self.grouped_agent(grouped, agent, grouped.away.contains(server), cx));
+                rows.push(self.grouped_agent(agent, self.known.away.contains(server), cx));
             }
         }
-        if grouped.agents.is_empty() {
+        if self.known.agents.is_empty() {
             rows.push(
                 div()
                     .px_2()
@@ -179,7 +188,7 @@ impl WindowView {
         }
         rows.extend(self.grouped_past(grouped, cx));
         // The tabs with no agent, in their workspaces' order.
-        let agent_panes: HashSet<PaneId> = grouped.agents.iter().map(|(a, _)| a.pane).collect();
+        let agent_panes: HashSet<PaneId> = self.known.agents.iter().map(|(a, _)| a.pane).collect();
         let mut others = Vec::new();
         let mut index = 0;
         for workspace in &self.layout.workspaces {
@@ -267,7 +276,6 @@ impl WindowView {
     /// machine `away`).
     fn grouped_agent(
         &self,
-        grouped: &Grouped,
         agent: &AgentInfo,
         away: bool,
         cx: &mut Context<Self>,
@@ -285,7 +293,7 @@ impl WindowView {
             (_, n) if n > 0 => ("reply".to_owned(), 0x9ece6aff),
             _ => (agent.agent.clone(), 0xffffff60),
         };
-        let depth = agents_view::depth(&grouped.agents, agent);
+        let depth = agents_view::depth(&self.known.agents, agent);
         let waiting = agent.state == AgentState::Waiting;
         // What it's doing, under its title, while it's at it.
         let doing = agent
@@ -406,6 +414,128 @@ impl WindowView {
         rows
     }
 
+    /// A workspace's tabs in the sidebar's order: each followed by those
+    /// whose agent its agent started (in this workspace), and how deep.
+    pub(super) fn nested_tabs(&self, tabs: &[TabLayout]) -> Vec<(usize, usize)> {
+        let parent_of: HashMap<PaneId, PaneId> =
+            self.known.agents.iter().filter_map(|(a, _)| Some((a.pane, a.parent?))).collect();
+        let tab_of = |pane: PaneId| tabs.iter().position(|t| t.root.panes().contains(&pane));
+        let parents: Vec<Option<usize>> = tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                tab.root.panes().iter().filter_map(|p| tab_of(*parent_of.get(p)?)).find(|&t| t != i)
+            })
+            .collect();
+        nest_order(&parents)
+    }
+
+    /// Past conversations on `server` (folded unless opened: kept, by
+    /// server, as `sidebar-past-open`): one opens in the panel beside the
+    /// terminal.
+    pub(super) fn server_past(
+        &self,
+        server: ServerId,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let key = match server {
+            LOCAL => String::new(),
+            _ => app_state::servers(cx)
+                .into_iter()
+                .find(|(id, _, _)| *id == server)
+                .map(|(_, name, _)| name)
+                .unwrap_or_default(),
+        };
+        let list: Vec<&(ServerId, SessionHit)> =
+            self.past.list.iter().filter(|(s, _)| *s == server).collect();
+        if list.is_empty() {
+            return Vec::new();
+        }
+        let open = self.past_open.contains(&key);
+        let toggle = key.clone();
+        let mut rows = vec![
+            div()
+                .id(("server-past", server as usize))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .h(px(24.))
+                .px_2()
+                .rounded(px(6.))
+                .text_size(px(11.5))
+                .text_color(ui(0xffffff60))
+                .hover(|d| d.bg(ui(0xffffff0a)).text_color(ui(0xffffffb0)))
+                .child(div().flex_none().text_size(px(9.)).child(if open { "▾" } else { "▸" }))
+                .child(format!("Past conversations · {}", list.len()))
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_past(&toggle, cx)))
+                .into_any_element(),
+        ];
+        if !open {
+            return rows;
+        }
+        let shown = self.thread_panel.as_ref().filter(|_| self.panel_shown());
+        let chosen = shown.and_then(|p| p.agents.past_shown()).map(|(s, h)| (s, h.session.clone()));
+        for (i, (server, hit)) in list.into_iter().enumerate() {
+            let here = chosen.as_ref().is_some_and(|(s, id)| s == server && *id == hit.session);
+            let (mark, color) = search_view::agent_mark(&hit.agent);
+            let (server, hit) = (*server, hit.clone());
+            rows.push(
+                div()
+                    .id(SharedString::from(format!("server-past-{server}-{i}")))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .h(px(26.))
+                    .pl(px(18.))
+                    .pr(px(8.))
+                    .rounded(px(7.))
+                    .when(here, |d| d.bg(ui(0xffffff1c)))
+                    .hover(|d| d.bg(ui(0xffffff10)))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(ui(color << 8 | 0xb0))
+                            .child(mark),
+                    )
+                    .child(
+                        Self::one_line(hit.title.clone()).flex_1().min_w_0().text_color(if here {
+                            ui(0xffffffee)
+                        } else {
+                            ui(0xffffff90)
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.showing_view() {
+                            this.show_terminals(cx);
+                        }
+                        this.show_past(agents_view::Shown::Panel, server, hit.clone(), cx)
+                    }))
+                    .into_any_element(),
+            );
+        }
+        rows
+    }
+
+    /// Open (or fold) a server's past conversations, kept as the setting.
+    fn toggle_past(&mut self, key: &str, cx: &mut Context<Self>) {
+        if !self.past_open.remove(key) {
+            self.past_open.insert(key.to_owned());
+        }
+        let mut open: Vec<String> = self.past_open.iter().cloned().collect();
+        open.sort();
+        let saved = artty_core::config_file::ConfigFile::open().and_then(|mut file| {
+            file.set_strings("sidebar-past-open", &open);
+            file.save()
+        });
+        if let Err(err) = saved {
+            self.show_toast(format!("Couldn't save the setting: {err}"), cx);
+        }
+        self.refresh_past(true, cx);
+        cx.notify();
+    }
+
     /// To an agent's terminal: here, or (another window's) there.
     pub(super) fn go_to_agent(&mut self, pane: PaneId, cx: &mut Context<Self>) {
         // (The panel, showing a past conversation, goes back to threads.)
@@ -425,6 +555,56 @@ impl WindowView {
     }
 }
 
+/// The order to show items whose parents are `parents` (by index): each
+/// followed by its own, at once; with how deep each is. A loop, or a
+/// parent that isn't there, leaves one where it is.
+fn nest_order(parents: &[Option<usize>]) -> Vec<(usize, usize)> {
+    let n = parents.len();
+    let parent = |i: usize| parents[i].filter(|&p| p < n && p != i);
+    // (A loop: its members are roots, in place.)
+    let rooted = |i: usize| {
+        let mut seen = HashSet::from([i]);
+        let mut at = i;
+        while let Some(p) = parent(at) {
+            if !seen.insert(p) {
+                return false;
+            }
+            at = p;
+        }
+        true
+    };
+    let mut out = Vec::with_capacity(n);
+    let mut placed = vec![false; n];
+    fn place(
+        i: usize,
+        depth: usize,
+        children: &[Vec<usize>],
+        placed: &mut [bool],
+        out: &mut Vec<(usize, usize)>,
+    ) {
+        if std::mem::replace(&mut placed[i], true) {
+            return;
+        }
+        out.push((i, depth));
+        for &c in &children[i] {
+            place(c, depth + 1, children, placed, out);
+        }
+    }
+    let mut children = vec![Vec::new(); n];
+    for i in 0..n {
+        if let Some(p) = parent(i).filter(|_| rooted(i)) {
+            children[p].push(i);
+        }
+    }
+    for i in 0..n {
+        let root = parent(i).is_none() || !rooted(i);
+        if root {
+            place(i, 0, &children, &mut placed, &mut out);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use artty_core::control::AgentInfo;
@@ -435,6 +615,16 @@ mod tests {
             "pending": 0, "unread": 0, "parent": parent,
         });
         (serde_json::from_value(json).unwrap(), server.to_owned())
+    }
+
+    #[test]
+    fn tabs_under_their_starters() {
+        // 0 started 3, which started 1; 2 alone.
+        let order = super::nest_order(&[None, Some(3), None, Some(0)]);
+        assert_eq!(order, [(0, 0), (3, 1), (1, 2), (2, 0)]);
+        // A loop doesn't lose anyone.
+        let order = super::nest_order(&[Some(1), Some(0), None]);
+        assert_eq!(order.len(), 3);
     }
 
     #[test]
