@@ -93,7 +93,7 @@ fn marked_line(text: String, marked: Vec<std::ops::Range<usize>>) -> gpui::Div {
 }
 
 /// "3 hours ago", for a time in seconds since the epoch.
-fn ago(secs: u64) -> String {
+pub(super) fn ago(secs: u64) -> String {
     let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     match now.saturating_sub(secs) {
         s if s < 3600 => format!("{} min ago", (s / 60).max(1)),

@@ -26,9 +26,11 @@ pub(super) struct Palette {
 
 /// A message from an agent's thread, to send on.
 pub(super) struct Sending {
-    /// The agent whose thread it's from, its tab's title, and its
-    /// conversation's id (a copy of it can be started).
-    pub from: PaneId,
+    /// The agent whose thread it's from (none: a past conversation's), its
+    /// machine, its title, and its conversation's id (a copy of it can be
+    /// started).
+    pub from: Option<PaneId>,
+    pub server: ServerId,
     pub title: String,
     pub session: Option<String>,
     pub text: String,
@@ -119,17 +121,20 @@ impl Palette {
 /// What an agent is given, sent on from another's thread: where from, and
 /// how to ask there for more.
 fn sent(sending: &Sending) -> String {
-    let from = ids::local_id(sending.from);
-    let mut out = format!(
-        "From {} (pane {from}), sent on by the user:\n\n{}\n\n",
-        sending.title,
-        sending.text.trim()
-    );
-    out.push_str(&format!("(To ask it more: `artty ask --tab {from} \"...\"`"));
+    let (title, text) = (&sending.title, sending.text.trim());
+    let mut out = match sending.from.map(ids::local_id) {
+        Some(from) => format!(
+            "From {title} (pane {from}), sent on by the user:\n\n{text}\n\n(To ask it more: \
+             `artty ask --tab {from} \"...\"`"
+        ),
+        None => format!(
+            "From a past conversation, {title}, sent on by the user:\n\n{text}\n\n(It's over"
+        ),
+    };
     if let Some(session) = &sending.session {
         out.push_str(&format!(
-            "; or a copy of its conversation, which leaves it as it is: `artty new --background \
-             --agent claude --fork {session} --task \"...\"`"
+            "; to ask a copy of its conversation, which leaves it as it is: `artty new \
+             --background --agent claude --fork {session} --task \"...\"`"
         ));
     }
     out.push_str(".)");
@@ -183,11 +188,16 @@ impl WindowView {
             self.finish_rename(true, cx);
         }
         self.picker = None;
-        let server = ids::server_of(sending.from);
         let places = self
             .palette_places(cx)
             .into_iter()
-            .filter(|p| p.agent && p.pane != sending.from && ids::server_of(p.pane) == server)
+            // (Nothing to send: only a copy.)
+            .filter(|p| {
+                p.agent
+                    && Some(p.pane) != sending.from
+                    && ids::server_of(p.pane) == sending.server
+                    && !sending.text.trim().is_empty()
+            })
             .collect();
         self.marked_text = None;
         self.palette = Some(Palette {
@@ -312,8 +322,8 @@ impl WindowView {
     fn choose_send(&mut self, cx: &mut Context<Self>) {
         let Some(palette) = self.palette.as_ref() else { return };
         let Some(sending) = palette.sending.as_ref() else { return };
-        let server = ids::server_of(sending.from);
-        let from = ids::local_id(sending.from);
+        let server = sending.server;
+        let from = sending.from.map(ids::local_id);
         let task = palette.query.trim().to_owned();
         let (request, to) = match palette.rows().get(palette.selected) {
             Some(Row::Place(place)) => (
@@ -323,7 +333,7 @@ impl WindowView {
                     raw: false,
                     wait: false,
                     timeout_secs: None,
-                    thread: Some(from),
+                    thread: from,
                     back: false,
                 },
                 place.title.clone(),
@@ -342,7 +352,7 @@ impl WindowView {
                     workspace: None,
                     worktree: None,
                     task: Some(task),
-                    thread: Some(from),
+                    thread: from,
                     back: false,
                     fork: sending.session.clone(),
                 },
@@ -431,7 +441,9 @@ impl WindowView {
             })
             .collect();
         let empty = items.is_empty();
-        let hint = if palette.sending.is_some() {
+        let hint = if palette.sending.as_ref().is_some_and(|s| s.text.trim().is_empty()) {
+            "What should the copy do? (Enter starts it)"
+        } else if palette.sending.is_some() {
             "Send to an agent… (or type a task for a copy)"
         } else if palette.commanding() {
             "Run a command…"
@@ -476,20 +488,24 @@ impl WindowView {
                         format!("{}{marked}▏", palette.query)
                     }),
             )
-            .when_some(palette.sending.as_ref(), |d, sending| {
-                let text: String = sending.text.split_whitespace().collect::<Vec<_>>().join(" ");
-                let text = match text.char_indices().nth(160) {
-                    Some((at, _)) => format!("{}…", &text[..at]),
-                    None => text,
-                };
-                d.child(
-                    Self::one_line(format!("From {}: {text}", sending.title))
-                        .px(px(10.))
-                        .pb(px(4.))
-                        .text_size(px(11.5))
-                        .text_color(ui(0xffffff80)),
-                )
-            })
+            .when_some(
+                palette.sending.as_ref().filter(|s| !s.text.trim().is_empty()),
+                |d, sending| {
+                    let text: String =
+                        sending.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    let text = match text.char_indices().nth(160) {
+                        Some((at, _)) => format!("{}…", &text[..at]),
+                        None => text,
+                    };
+                    d.child(
+                        Self::one_line(format!("From {}: {text}", sending.title))
+                            .px(px(10.))
+                            .pb(px(4.))
+                            .text_size(px(11.5))
+                            .text_color(ui(0xffffff80)),
+                    )
+                },
+            )
             .child(
                 div()
                     .id("palette-rows")
@@ -525,7 +541,8 @@ mod tests {
     #[test]
     fn what_is_sent_says_where_from() {
         let mut sending = super::Sending {
-            from: 7,
+            from: Some(7),
+            server: 0,
             title: "parser".into(),
             session: Some("abc-1".into()),
             text: "  the method  ".into(),
@@ -536,6 +553,8 @@ mod tests {
         assert!(text.contains("--fork abc-1"), "{text}");
         sending.session = None;
         assert!(!super::sent(&sending).contains("--fork"));
+        sending.from = None;
+        assert!(super::sent(&sending).starts_with("From a past conversation, parser,"));
     }
 
     #[test]

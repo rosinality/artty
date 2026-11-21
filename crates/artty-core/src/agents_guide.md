@@ -10,7 +10,8 @@ own pane's id is in `$ARTTY_SESSION_ID`.
 
 - `artty agents` lists the agents on this machine: pane id, agent, state
   (working, waiting, done, idle), and workspace · tab title. `--json` for
-  more (folder, unread replies, pending permission requests).
+  more (folder, unread replies, pending permission requests, its
+  conversation's `session` id, and the `parent` pane that started it).
 - `artty ask --tab N --timeout 100 "message"` gives agent N the message once
   its current turn ends, typed into its terminal as if the user typed it
   (it doesn't share your context), and prints its reply: its last message
@@ -48,6 +49,32 @@ own pane's id is in `$ARTTY_SESSION_ID`.
   Started with a task, Claude Code runs without its terminal UI (through
   its Agent Client Protocol adapter; the user's setting); asks and threads
   work the same.
+- `artty new --background --agent claude --fork SESSION --task "..."` starts
+  Claude Code on a copy of conversation SESSION (everything said in it so
+  far), in its folder: the conversation itself isn't changed, and its agent
+  isn't interrupted. The copy is a tab of its own (`artty close N` once
+  you're done with it).
+- `artty sessions` lists agents' past conversations on this machine (not
+  those going on in panes): id, agent, when, folder, title;
+  `--search TEXT` finds those mentioning TEXT. `artty sessions ID` shows
+  what was said in one.
+
+## Building on what other agents worked out
+
+Another agent may already have worked out what you need: a method, a fix,
+a decision. Look before working it out again (`artty thread --search`,
+`artty sessions --search`), then go to where it was worked out:
+
+- Its agent is running: ask it (`artty ask --tab N`).
+- It's over, or its agent is busy with something else: read it
+  (`artty sessions ID`); if what you need isn't written there, ask a copy
+  of it (`--fork ID --task "..."` above), which answers with the whole
+  conversation in mind. (A copy reads the whole conversation again: it
+  costs more than an ask.)
+- When you work out something others could use, say so in your reply. If
+  you write it down (a note, a skill), say which conversation it came from
+  (yours: the `session` of pane `$ARTTY_SESSION_ID` in
+  `artty agents --json`), so a reader can ask there for more.
 
 ## What to know
 

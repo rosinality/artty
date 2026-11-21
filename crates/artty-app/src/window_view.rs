@@ -72,6 +72,7 @@ actions!(
         OpenWorkspace,
         ShowActivity,
         ShowAgents,
+        SendTo,
         ToggleThread,
         NextWorkspace,
         PreviousWorkspace,
@@ -2131,6 +2132,9 @@ impl WindowView {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) else { return };
+        if self.palette.is_some() {
+            return self.palette_text(text.lines().next().unwrap_or_default(), cx);
+        }
         if self.composing().is_some() {
             return self.compose_text(&text, cx);
         }
@@ -4159,6 +4163,7 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
             .on_action(cx.listener(|this, _: &ShowAgents, _, cx| this.toggle_agents(cx)))
+            .on_action(cx.listener(|this, _: &SendTo, _, cx| this.send_to(cx)))
             .on_action(
                 cx.listener(|this, _: &ToggleThread, window, cx| this.thread_key(window, cx)),
             )
@@ -4525,16 +4530,17 @@ impl EntityInputHandler for WindowView {
             self.ask_text(text, cx);
             return;
         }
-        if self.composing().is_some() {
-            self.compose_text(text, cx);
-            return;
-        }
+        // (What's open over the view first: the palette over Agents' draft.)
         if self.palette.is_some() {
             self.palette_text(text, cx);
             return;
         }
         if self.search_all.is_some() {
             self.search_all_text(text, cx);
+            return;
+        }
+        if self.composing().is_some() {
+            self.compose_text(text, cx);
             return;
         }
         if let Some(picker) = self.picker.as_mut() {

@@ -2264,9 +2264,9 @@ impl Server {
                 let _ =
                     std::thread::Builder::new().name("artty-sessions".into()).spawn(move || {
                         let sessions = match text.as_deref().map(str::trim) {
-                            Some(text) if !text.is_empty() => crate::sessions::search(text)
+                            Some(text) if !text.is_empty() => crate::sessions::search_past(text)
                                 .into_iter()
-                                .filter(|hit| !live.contains(&hit.session))
+                                .filter(|past| !live.contains(&past.hit.session))
                                 .take(limit)
                                 .collect(),
                             _ => crate::sessions::recent(limit, &live),

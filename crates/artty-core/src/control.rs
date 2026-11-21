@@ -460,6 +460,16 @@ pub enum Request {
     },
 }
 
+/// A past conversation, as `Sessions` lists it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PastSession {
+    #[serde(flatten)]
+    pub hit: crate::protocol::SessionHit,
+    /// It's a copy of this one (`artty new --fork`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<String>,
+}
+
 /// A message in a conversation: `user` or `assistant`, and its text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Said {
@@ -877,7 +887,7 @@ pub enum Response {
         hits: Vec<ThreadHit>,
     },
     Sessions {
-        sessions: Vec<crate::protocol::SessionHit>,
+        sessions: Vec<PastSession>,
     },
     Conversation {
         messages: Vec<Said>,

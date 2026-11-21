@@ -871,13 +871,14 @@ fn print_response(response: Response, json: bool) -> Result<i32, String> {
         },
         Response::Sessions { sessions } => {
             let home = std::env::var("HOME").unwrap_or_default();
-            for hit in &sessions {
+            for past in &sessions {
+                let hit = &past.hit;
                 let cwd = hit.cwd.as_ref().map(|c| c.display().to_string()).unwrap_or_default();
                 let cwd = match cwd.strip_prefix(&home).filter(|_| !home.is_empty()) {
                     Some(rest) => format!("~{rest}"),
                     None => cwd,
                 };
-                let copy = if hit.forked_from.is_some() { " (a copy)" } else { "" };
+                let copy = if past.forked_from.is_some() { " (a copy)" } else { "" };
                 println!(
                     "{}  {:<6} {}  {cwd}  {}{copy}",
                     hit.session,

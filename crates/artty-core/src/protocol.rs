@@ -678,9 +678,6 @@ pub struct SessionHit {
     pub snippet: String,
     /// Last written, seconds since the epoch.
     pub modified: u64,
-    /// A copy of this conversation (`artty new --fork`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub forked_from: Option<String>,
 }
 
 /// Where a file sent to a pane's machine goes ([`Query::Upload`]).

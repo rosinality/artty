@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use artty_core::control::PastSession;
 use artty_core::protocol::SessionHit;
 use serde_json::Value;
 
@@ -18,6 +19,12 @@ const MAX_HITS: usize = 50;
 
 /// Conversations mentioning `text` (case ignored unless it has capitals).
 pub fn search(text: &str) -> Vec<SessionHit> {
+    search_past(text).into_iter().map(|past| past.hit).collect()
+}
+
+/// [`search`], each found as `Sessions` lists it (named as it is, and
+/// whether it's a copy).
+pub fn search_past(text: &str) -> Vec<PastSession> {
     let text = text.trim();
     if text.is_empty() {
         return Vec::new();
@@ -33,11 +40,12 @@ pub fn search(text: &str) -> Vec<SessionHit> {
         read += std::fs::metadata(&path).map_or(0, |m| m.len());
         if let Some(mut hit) = search_file(agent, &path, modified, text) {
             // Its title as it's named, if it is.
-            if let Some(head) = head(agent, &path, modified) {
-                hit.title = head.title;
-                hit.forked_from = head.forked_from;
+            let head = head(agent, &path, modified);
+            let forked_from = head.as_ref().and_then(|h| h.forked_from.clone());
+            if let Some(head) = head {
+                hit.title = head.hit.title;
             }
-            hits.push(hit);
+            hits.push(PastSession { hit, forked_from });
         }
     }
     hits
@@ -322,13 +330,12 @@ fn search_file(agent: &str, path: &Path, modified: u64, text: &str) -> Option<Se
         title: shorten(&title.unwrap_or_default(), 100),
         snippet,
         modified,
-        forked_from: None,
     })
 }
 
 /// The latest conversations, newest first, `limit` at most: those whose
 /// ids are in `skip` left out, and those with nothing asked in them.
-pub fn recent(limit: usize, skip: &std::collections::HashSet<String>) -> Vec<SessionHit> {
+pub fn recent(limit: usize, skip: &std::collections::HashSet<String>) -> Vec<PastSession> {
     let mut files = transcripts();
     files.sort_by_key(|(_, _, modified)| std::cmp::Reverse(*modified));
     let mut found = Vec::new();
@@ -336,7 +343,7 @@ pub fn recent(limit: usize, skip: &std::collections::HashSet<String>) -> Vec<Ses
         if found.len() >= limit {
             break;
         }
-        if let Some(hit) = head(agent, &path, modified).filter(|h| !skip.contains(&h.session)) {
+        if let Some(hit) = head(agent, &path, modified).filter(|h| !skip.contains(&h.hit.session)) {
             found.push(hit);
         }
     }
@@ -345,7 +352,7 @@ pub fn recent(limit: usize, skip: &std::collections::HashSet<String>) -> Vec<Ses
 
 /// A conversation as its transcript's beginning tells: where, what was
 /// asked first (or its title), whether it's a copy.
-fn head(agent: &str, path: &Path, modified: u64) -> Option<SessionHit> {
+fn head(agent: &str, path: &Path, modified: u64) -> Option<PastSession> {
     let file = std::fs::File::open(path).ok()?;
     let stem = path.file_stem()?.to_string_lossy().into_owned();
     let mut session = (agent == "claude").then(|| stem.clone());
@@ -365,7 +372,11 @@ fn head(agent: &str, path: &Path, modified: u64) -> Option<SessionHit> {
                 .map(PathBuf::from);
         }
         if session.is_none() && value.get("type").and_then(Value::as_str) == Some("session_meta") {
-            session = value.get("payload")?.get("id").and_then(Value::as_str).map(str::to_owned);
+            session = value
+                .get("payload")
+                .and_then(|p| p.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
         }
         if forked_from.is_none() {
             forked_from = value.get("forkedFrom").and_then(|f| {
@@ -388,7 +399,7 @@ fn head(agent: &str, path: &Path, modified: u64) -> Option<SessionHit> {
     let request_text = request_text?;
     let session = session
         .unwrap_or_else(|| stem.get(stem.len().saturating_sub(36)..).unwrap_or(&stem).to_owned());
-    Some(SessionHit {
+    let hit = SessionHit {
         agent: agent.to_owned(),
         session,
         cwd,
@@ -398,8 +409,8 @@ fn head(agent: &str, path: &Path, modified: u64) -> Option<SessionHit> {
         ),
         snippet: shorten(&request_text, 200),
         modified,
-        forked_from,
-    })
+    };
+    Some(PastSession { hit, forked_from })
 }
 
 /// What was said in a Claude Code conversation as it stands (a rewind's
@@ -636,14 +647,14 @@ mod tests {
         let all = recent(10, &Default::default());
         assert_eq!(all.len(), 2, "{all:?}");
         assert_eq!(
-            all.iter().find(|h| h.agent == "claude").unwrap().title,
+            all.iter().find(|h| h.hit.agent == "claude").unwrap().hit.title,
             "Fix the flaky login test"
         );
         let skip =
             std::collections::HashSet::from(["0b5f2a1e-1111-2222-3333-444455556666".to_owned()]);
         let left = recent(10, &skip);
         assert_eq!(left.len(), 1);
-        assert_eq!(left[0].agent, "codex");
+        assert_eq!(left[0].hit.agent, "codex");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -671,9 +682,9 @@ mod tests {
         assert!(conversation_in(&dir, "no-such", 10).is_none());
 
         let hit = head("claude", &project.join("sess-1.jsonl"), 0).unwrap();
-        assert_eq!(hit.title, "Parser plan");
+        assert_eq!(hit.hit.title, "Parser plan");
         assert_eq!(hit.forked_from.as_deref(), Some("orig-1"));
-        assert_eq!(hit.cwd.as_deref(), Some(Path::new("/src")));
+        assert_eq!(hit.hit.cwd.as_deref(), Some(Path::new("/src")));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
