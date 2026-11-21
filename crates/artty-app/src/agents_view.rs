@@ -78,7 +78,7 @@ pub(super) struct Agents {
     pub(super) peek_open: bool,
     /// An entry to scroll to once the thread's in (one searched for), and
     /// the one shown standing out, since when.
-    reveal: Option<u64>,
+    reveal: Option<(PaneId, u64)>,
     flash: Option<(u64, Instant)>,
     /// The thread as a list (its entries, then what's queued): only those
     /// in view are drawn.
@@ -655,7 +655,11 @@ impl WindowView {
                     agents.asks = asks;
                     // To the entry searched for, else (anything new) the end.
                     // (Once: one older than the entries shown isn't there.)
-                    let wanted = agents.reveal.take();
+                    // (Asked of this pane's thread: one for another waits.)
+                    let wanted = match agents.reveal {
+                        Some((p, seq)) if p == pane => agents.reveal.take().map(|_| seq),
+                        _ => None,
+                    };
                     let found = wanted.and_then(|seq| {
                         let index = agents.thread.iter().position(|e| e.seq == seq);
                         Some(seq).zip(index)
@@ -687,17 +691,75 @@ impl WindowView {
     }
 
     /// Show Agents with `pane`'s agent chosen, scrolled to its entry `seq`.
+    /// `pane`'s agent's thread, at its entry `seq`: in Agents when it's
+    /// shown, else in the panel beside the agent's terminal.
     pub(super) fn reveal_in_thread(&mut self, pane: PaneId, seq: u64, cx: &mut Context<Self>) {
-        if !self.showing_agents() {
-            self.toggle_agents(cx);
+        if self.showing_agents() {
+            self.select_agent(pane, cx);
+            if let Some(agents) = self.agents.as_mut() {
+                agents.reveal = Some((pane, seq));
+                // Already in: the next refresh scrolls there.
+                agents.thread_of = None;
+            }
+            return self.refresh_in(Shown::View, cx);
         }
-        self.select_agent(pane, cx);
-        if let Some(agents) = self.agents.as_mut() {
-            agents.reveal = Some(seq);
-            // Already in: the next refresh scrolls there.
-            agents.thread_of = None;
+        self.go_to_agent(pane, cx);
+        if !self.panel_shown() {
+            self.open_thread_panel(cx);
         }
-        self.refresh_in(Shown::View, cx);
+        // (The panel follows the focus there: the thread comes once it has.)
+        if let Some(panel) = self.thread_panel.as_mut() {
+            panel.agents.reveal = Some((pane, seq));
+            if panel.agents.selected == Some(pane) {
+                panel.agents.thread_of = None;
+            }
+        }
+        self.refresh_in(Shown::Panel, cx);
+    }
+
+    /// ⇧⌘K: agents where the terminals are: the sidebar grouped by agent
+    /// (kept so: the setting), the thread panel open, at an agent: the one
+    /// focused, else the one that most needs you.
+    pub(super) fn show_agents_here(&mut self, cx: &mut Context<Self>) {
+        if self.showing_agents() {
+            self.leave_agents(cx);
+        }
+        if self.showing_activity() {
+            self.toggle_activity(cx);
+        }
+        if self.grouped.is_none() {
+            self.toggle_grouping(cx);
+        }
+        let shared = &cx.global::<Shared>().panes;
+        let agent_here =
+            self.focused_id().and_then(|p| shared.get(&p)).is_some_and(|s| s.agent.is_some());
+        if !agent_here {
+            // Waiting for you, else finished, else any: this window's first.
+            let here: Vec<PaneId> = self.tabs.iter().flat_map(|t| t.root.panes()).collect();
+            let rank = |icon: &str| match icon {
+                "waiting" | "attention" => 0,
+                "done" => 1,
+                _ => 2,
+            };
+            let target = here
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| {
+                    Some((rank(&shared.get(p)?.icon), i, *p)).filter(|_| shared[p].agent.is_some())
+                })
+                .min()
+                .map(|(_, _, p)| p);
+            match target {
+                Some(pane) => self.go_to_agent(pane, cx),
+                None => {
+                    self.show_toast("No agent in this window (⇧⌘K shows them once one runs)", cx)
+                },
+            }
+        }
+        if !self.panel_shown() {
+            self.open_thread_panel(cx);
+        }
+        cx.notify();
     }
 
     pub(super) fn select_agent(&mut self, pane: PaneId, cx: &mut Context<Self>) {
@@ -947,8 +1009,7 @@ impl WindowView {
             (true, _) => Shown::View,
             (false, true) => Shown::Panel,
             (false, false) => {
-                return self
-                    .show_toast("Send to…: from a thread (Agents ⇧⌘K, or the panel ⇧⌘J)", cx);
+                return self.show_toast("Send to…: from an agent's thread (the panel, ⇧⌘J)", cx);
             },
         };
         self.send_from(which, cx);

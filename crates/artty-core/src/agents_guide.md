@@ -84,4 +84,5 @@ a decision. Look before working it out again (`artty thread --search`,
 - Permission requests are the user's to answer: `artty approval` is refused
   from inside artty's panes.
 - The user sees every ask, who it's from, and the files each agent changes,
-  in artty's Agents view; two agents changing one file are pointed out.
+  in artty (its sidebar and the thread panel beside each agent's terminal);
+  two agents changing one file are pointed out.

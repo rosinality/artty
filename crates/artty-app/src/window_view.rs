@@ -74,6 +74,7 @@ actions!(
         OpenWorkspace,
         ShowActivity,
         ShowAgents,
+        AgentsView,
         SendTo,
         GroupByAgent,
         ToggleThread,
@@ -3537,11 +3538,7 @@ impl WindowView {
             .child(self.nav_row("terminals", "❯", 0xc0caf5ff, "Terminals", "esc", !self.showing_view())
                 .on_click(cx.listener(|this, _, _, cx| this.show_terminals(cx))))
             .child(self.nav_row("agents", "◆", 0x9ece6aff, "Agents", "⇧⌘K", self.showing_agents())
-                .on_click(cx.listener(|this, _, _, cx| {
-                    if !this.showing_agents() {
-                        this.toggle_agents(cx);
-                    }
-                })))
+                .on_click(cx.listener(|this, _, _, cx| this.show_agents_here(cx))))
             .when_some(self.needs_you(cx), |d, section| d.child(section))
             // With Agents shown, the sidebar lists the agents instead of tabs.
             .when(self.showing_agents(), |d| d.child(self.agents_heading(cx)))
@@ -4187,7 +4184,9 @@ impl Render for WindowView {
             .on_action(cx.listener(|this, _: &NewWorkspace, _, cx| this.new_workspace(cx)))
             .on_action(cx.listener(|this, _: &OpenWorkspace, _, cx| this.open_picker(cx)))
             .on_action(cx.listener(|this, _: &ShowActivity, _, cx| this.toggle_activity(cx)))
-            .on_action(cx.listener(|this, _: &ShowAgents, _, cx| this.toggle_agents(cx)))
+            .on_action(cx.listener(|this, _: &ShowAgents, _, cx| this.show_agents_here(cx)))
+            // The full-screen Agents view, as it was (the palette's only).
+            .on_action(cx.listener(|this, _: &AgentsView, _, cx| this.toggle_agents(cx)))
             .on_action(cx.listener(|this, _: &SendTo, _, cx| this.send_to(cx)))
             .on_action(cx.listener(|this, _: &GroupByAgent, _, cx| this.toggle_grouping(cx)))
             .on_action(

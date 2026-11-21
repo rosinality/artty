@@ -2533,6 +2533,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// An agent known by its status (not its process's name: one run
+    /// through `artty acp`, or saying what it does) reaches the app as one:
+    /// Send To, ⇧⌘K and the palette go by that.
+    #[test]
+    fn an_agent_by_its_status() {
+        let Some((mut opened, dir)) = scratch_server("status") else { return };
+        let pane = attach_window(&mut opened);
+        let mut app = TestApp::on(opened);
+        let program = r#"python3 -c 'import sys,time; sys.stdout.write("\033]7501;state=working:app=claude-code\007"); sys.stdout.flush(); time.sleep(30)'"#;
+        app.send(&ClientMessage::Input { pane, bytes: format!("{program}\r").into_bytes() });
+        let agent = app.until(|message| match message {
+            ServerMessage::Panes { panes } => panes
+                .iter()
+                .find(|p| p.info.id == pane && p.agent.is_some())
+                .map(|p| p.agent.clone()),
+            _ => None,
+        });
+        assert_eq!(agent.as_deref(), Some("claude"));
+        let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
+        app.send(&stop);
+        let _ = app.child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Panes that never stop printing, in windows no app shows, don't hold
     /// back another window's screens, or answers.
     #[test]

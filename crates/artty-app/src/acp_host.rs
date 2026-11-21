@@ -704,7 +704,7 @@ impl Host {
             .unwrap_or_else(|| tool_name.clone());
         let options = params.get("options").and_then(Value::as_array).cloned().unwrap_or_default();
         self.show_reply(true);
-        self.say(&format!("\x1b[33m? {title}: allow? y / n (or in artty's Agents view)\x1b[0m"));
+        self.say(&format!("\x1b[33m? {title}: allow? y / n (or in artty, beside this tab)\x1b[0m"));
         // Put to artty, on a connection of its own (closed if answered here).
         let asked = self.report.as_ref().and_then(|_| {
             let path = crate::cli::socket().ok()?;
