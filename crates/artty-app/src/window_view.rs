@@ -3618,8 +3618,6 @@ impl WindowView {
                 .on_click(cx.listener(|this, _, _, cx| this.show_activity(cx))))
             .child(self.nav_row("terminals", "❯", 0xc0caf5ff, "Terminals", "esc", !self.showing_view())
                 .on_click(cx.listener(|this, _, _, cx| this.show_terminals(cx))))
-            .child(self.nav_row("agents", "◆", 0x9ece6aff, "Agents", "⇧⌘K", self.showing_agents())
-                .on_click(cx.listener(|this, _, _, cx| this.show_agents_here(cx))))
             .when_some(self.needs_you(cx), |d, section| d.child(section))
             // With Agents shown, the sidebar lists the agents instead of tabs.
             .when(self.showing_agents(), |d| d.child(self.agents_heading(cx)))
@@ -4501,6 +4499,34 @@ impl Render for WindowView {
                             // the sidebar's way back and what it would show.
                             .when(self.sidebar_hidden, |d| d.pl(px(170.)).pr(px(170.)))
                             .children(self.sidebar_hidden.then(|| self.folded_sidebar_bar(cx)))
+                            // The agent's thread beside the terminal (⇧⌘J).
+                            .child(
+                                div()
+                                    .id("show-thread")
+                                    .absolute()
+                                    .right(px(32.))
+                                    .top(px(7.))
+                                    .px(px(5.))
+                                    .rounded(px(4.))
+                                    .text_size(px(10.5))
+                                    .text_color(if self.panel_shown() {
+                                        ui(0x9ece6aff)
+                                    } else {
+                                        ui(0xffffff70)
+                                    })
+                                    .when(self.panel_shown(), |d| d.bg(ui(0xffffff14)))
+                                    .hover(|d| d.bg(ui(0xffffff14)).text_color(ui(0xffffffee)))
+                                    .child("◆")
+                                    .tooltip(|_, cx| {
+                                        cx.new(|_| Tooltip("Agent thread  ⇧⌘J".into())).into()
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        match this.panel_shown() {
+                                            true => this.close_thread_panel(cx),
+                                            false => this.open_thread_panel(cx),
+                                        }
+                                    })),
+                            )
                             // The files drawer's way in (⌘⇧E), as the sidebar's.
                             .child(
                                 div()
