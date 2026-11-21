@@ -687,8 +687,6 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
                 shared.server_mismatch = (version != artty_core::protocol::protocol_version()
                     || server_version != shared.build)
                     .then_some(server_version);
-            } else {
-                update_remote(server, cx);
             }
             cx.refresh_windows();
         },
@@ -1630,6 +1628,8 @@ fn remote_opened(
         return retry_later(server, err.to_string(), cx);
     }
     attach_remote(server, cx);
+    // (Its greeting comes here, not through `handle`.)
+    update_remote(server, cx);
     cx.refresh_windows();
 }
 
@@ -1796,7 +1796,7 @@ fn update_remote(server: ServerId, cx: &mut App) {
             Err(err) => Some(format!("couldn't update artty there: {err}")),
         };
         if let Some(note) = &note {
-            log::info!("{name}: {note}");
+            log::warn!("{name}: {note}");
         }
         let _ = cx.update(|cx| {
             if let Some(note) = note {
