@@ -48,6 +48,9 @@ pub struct Connection {
     attempt: u64,
     /// It said it's ending every session: don't reconnect by ourselves.
     stopped: bool,
+    /// Requests to it awaiting their answers: given up (their receivers
+    /// told) when the connection closes, so nothing waits on it forever.
+    controls: HashMap<u64, oneshot::Sender<Response>>,
     /// When it last sent anything, and the ping awaiting its answer.
     last_heard: Instant,
     ping: Option<(u64, Instant)>,
@@ -167,12 +170,14 @@ impl Connection {
             probe_until: None,
             traffic: Arc::default(),
             network: Network::default(),
+            controls: HashMap::new(),
         }
     }
 
     /// Let go of the connection and what carries it.
     fn close(&mut self) {
         self.outgoing = None;
+        self.controls.clear();
         self.attaching.clear();
         self.ping = None;
         self.latency = None;
@@ -195,7 +200,6 @@ pub struct Shared {
     pub connections: Vec<Connection>,
     next_request: u64,
     replies: HashMap<u64, oneshot::Sender<Reply>>,
-    controls: HashMap<u64, oneshot::Sender<Response>>,
     pub screens: HashMap<PaneId, Screen>,
     /// Images screens show, by id (decoded off the main thread).
     pub images: HashMap<u64, ShownImage>,
@@ -325,7 +329,6 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         connections,
         next_request: 1,
         replies: HashMap::new(),
-        controls: HashMap::new(),
         screens: HashMap::new(),
         panes: HashMap::new(),
         statuses: HashMap::new(),
@@ -826,7 +829,8 @@ fn handle(server: ServerId, message: ServerMessage, cx: &mut App) {
             }
         },
         ServerMessage::Control { id, response } => {
-            if let Some(waiter) = cx.global_mut::<Shared>().controls.remove(&id) {
+            let connection = cx.global_mut::<Shared>().connections.get_mut(server as usize);
+            if let Some(waiter) = connection.and_then(|c| c.controls.remove(&id)) {
                 let _ = waiter.send(decode_response(&response));
             }
         },
@@ -988,7 +992,11 @@ pub fn control(request: Request, cx: &mut App) -> oneshot::Receiver<Response> {
 pub fn control_on(server: ServerId, request: Request, cx: &mut App) -> oneshot::Receiver<Response> {
     let (waiter, answer) = oneshot::channel();
     let id = next_id(cx);
-    cx.global_mut::<Shared>().controls.insert(id, waiter);
+    // (Not connected: given up at once, the waiter dropped.)
+    let connection = cx.global_mut::<Shared>().connections.get_mut(server as usize);
+    if let Some(connection) = connection.filter(|c| c.outgoing.is_some()) {
+        connection.controls.insert(id, waiter);
+    }
     send_to(server, ClientMessage::Control { id, request: encode_request(&request) }, cx);
     answer
 }
