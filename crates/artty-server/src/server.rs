@@ -3912,9 +3912,9 @@ impl Server {
         // (What it says settles at once; a title is watched a while.)
         const SAID: Duration = Duration::from_secs(1);
         let at_rest = |pane: &Pane| match pane.program() {
-            Some((status, since)) => {
-                status.state == ProgramState::Idle && now.duration_since(since) >= SAID
-            },
+            // (Idle since this turn began: an idle from before it says
+            // nothing of it.)
+            Some(_) => pane.said_after_hooks(ProgramState::Idle).is_some_and(|d| d >= SAID),
             None => {
                 pane.title.as_deref().is_some_and(|t| t.starts_with('✳'))
                     && pane.title_since().is_none_or(|at| now.duration_since(at) >= SETTLED)

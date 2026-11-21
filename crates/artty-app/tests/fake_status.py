@@ -5,6 +5,10 @@ Asks whether the terminal knows the protocol, then (argument 2):
              idle with no Stop: cut short, as Esc does
   blocked    reports blocked (a login, which hooks say nothing of), then
              working
+  stale      a turn begins (its hooks say so) with nothing reported since
+             the idle before it: not cut short
+  nostop     a turn begins, it reports working then done, and no Stop
+             hook comes
 and stays up till killed.
 """
 
@@ -41,6 +45,15 @@ if case == "interrupt":
     print("ready", flush=True)
     sys.stdin.readline()
     report("state=idle:app=claude-code")
+elif case == "stale":
+    hook("working", "UserPromptSubmit")
+    print("ready", flush=True)
+elif case == "nostop":
+    hook("working", "UserPromptSubmit")
+    report("state=working:app=claude-code")
+    time.sleep(0.3)
+    report("state=done:app=claude-code")
+    print("ready", flush=True)
 elif case == "blocked":
     report("state=blocked:kind=auth:app=claude-code", "Login expired")
     print("ready", flush=True)

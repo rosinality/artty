@@ -33,7 +33,11 @@ fn started(case: &str) -> (Scratch, String) {
 fn agent(scratch: &Scratch, pane: &str) -> Option<Value> {
     let agents: Value =
         serde_json::from_str(&stdout(&scratch.artty(&["agents", "--json"]))).unwrap_or(Value::Null);
-    agents.as_array()?.iter().find(|a| a["pane"].as_u64().is_some_and(|p| p.to_string() == pane)).cloned()
+    agents
+        .as_array()?
+        .iter()
+        .find(|a| a["pane"].as_u64().is_some_and(|p| p.to_string() == pane))
+        .cloned()
 }
 
 #[test]
@@ -67,4 +71,26 @@ fn waiting_for_what_hooks_dont_tell() {
         agent(&scratch, &pane)
             .is_some_and(|a| a["state"] == "working" && a["message"] == "Thinking")
     });
+}
+
+#[test]
+fn an_idle_from_before_the_turn_cuts_nothing() {
+    let (scratch, pane) = started("stale");
+    wait_for("it listed", || agent(&scratch, &pane).is_some());
+    std::thread::sleep(Duration::from_secs(5));
+    let thread = stdout(&scratch.artty(&["thread", "--tab", &pane, "--json"]));
+    assert!(!thread.contains("Interrupted"), "{thread}");
+    assert_eq!(agent(&scratch, &pane).unwrap()["state"], "working");
+}
+
+#[test]
+fn done_by_its_words_when_no_stop_comes() {
+    let (scratch, pane) = started("nostop");
+    wait_for("it listed", || agent(&scratch, &pane).is_some());
+    assert_eq!(agent(&scratch, &pane).unwrap()["state"], "working");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while agent(&scratch, &pane).unwrap()["state"] != "done" {
+        assert!(Instant::now() < deadline, "still {}", agent(&scratch, &pane).unwrap());
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }

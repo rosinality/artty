@@ -130,6 +130,8 @@ pub struct Pane {
     /// the root record's state has been what it is.
     program: StatusRecords,
     program_since: Option<Instant>,
+    /// Since when its hooks have said what they last said.
+    reported_since: Option<Instant>,
 }
 
 /// How long to wait for a prompt before typing pending input anyway (for
@@ -190,6 +192,7 @@ impl Pane {
             reading: None,
             program: StatusRecords::default(),
             program_since: None,
+            reported_since: None,
         }
     }
 
@@ -220,6 +223,16 @@ impl Pane {
     /// doing), and since when its state is what it is.
     pub fn program(&self) -> Option<(&ProgramStatus, Instant)> {
         Some((self.program.root()?, self.program_since?))
+    }
+
+    /// The agent's turn ended in its own words (`state`: idle, cut short;
+    /// done) after its hooks said it was at work, this long ago: in this
+    /// turn, not one before it.
+    pub fn said_after_hooks(&self, state: ProgramState) -> Option<Duration> {
+        let (status, since) = self.program()?;
+        let hooks = self.reported_since?;
+        (status.state == state && self.agent_app(status).is_some() && since > hooks)
+            .then(|| since.elapsed())
     }
 
     /// The agent a status names, if it names one artty knows (its name as
@@ -331,6 +344,9 @@ impl Pane {
             self.message = message;
         } else if state == AgentState::Working {
             self.message = None;
+        }
+        if self.reported != Some(state) {
+            self.reported_since = Some(Instant::now());
         }
         self.reported = Some(state);
         self.refresh();
@@ -456,9 +472,17 @@ impl Pane {
     fn agent_state(&self) -> AgentState {
         let said = self.program.root().filter(|s| self.agent_app(s).is_some()).map(|s| s.state);
         // Waiting for the user, as it says: over whatever hooks said last
-        // (they say nothing of some prompts: a folder's trust, a login).
+        // (they may say nothing of a prompt, as of a login).
         if said == Some(ProgramState::Blocked) {
             return AgentState::Waiting;
+        }
+        // Its turn over by its own words, though no hook said so (a Stop
+        // lost): done after a while (hooks come well within it).
+        const NO_STOP: Duration = Duration::from_secs(10);
+        if self.reported == Some(AgentState::Working)
+            && self.said_after_hooks(ProgramState::Done).is_some_and(|d| d >= NO_STOP)
+        {
+            return AgentState::Done;
         }
         if let Some(reported) = self.reported {
             reported
