@@ -1790,13 +1790,11 @@ fn update_remote(server: ServerId, cx: &mut App) {
         use artty_core::remote::Updated;
         let note = match updating.await {
             Ok(Updated::UpToDate) => None,
-            Ok(Updated::Installed { server_moved: true }) => {
-                Some("updated artty there; its programs kept running".to_owned())
+            // (Done as it should be: said in the log only.)
+            Ok(updated @ (Updated::Installed { .. } | Updated::Restarted)) => {
+                log::warn!("{name}: artty brought up to this build ({updated:?})");
+                None
             },
-            Ok(Updated::Installed { server_moved: false }) => {
-                Some("updated artty there".to_owned())
-            },
-            Ok(Updated::Restarted) => Some("its server moved to the newer build".to_owned()),
             Ok(Updated::Skipped(why)) => {
                 log::info!("artty on {name} left as it is: {why}");
                 None

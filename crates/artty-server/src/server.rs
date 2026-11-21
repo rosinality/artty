@@ -3771,11 +3771,19 @@ impl Server {
             .collect();
         let pids: Vec<i32> = trees.values().flatten().map(|p| p.pid).collect();
         let mut ports = artty_core::listening_ports(&pids);
+        // (Not an agent's own: Claude Code listens for itself, for its IDE
+        // and helpers. What it starts, a dev server, is offered.)
+        let agents = self.agents.clone();
         self.ports = trees
             .iter()
             .map(|(&pane, tree)| {
-                let mut theirs: Vec<u16> =
-                    tree.iter().filter_map(|p| ports.get(&p.pid)).flatten().copied().collect();
+                let mut theirs: Vec<u16> = tree
+                    .iter()
+                    .filter(|p| !agents.contains(&p.name))
+                    .filter_map(|p| ports.get(&p.pid))
+                    .flatten()
+                    .copied()
+                    .collect();
                 theirs.sort_unstable();
                 theirs.dedup();
                 (pane, theirs)
