@@ -24,6 +24,7 @@ use artty_core::protocol::{
 use artty_core::vt::ansi::Progress;
 use artty_core::vt::event::Event;
 use artty_core::vt::index::Side;
+use artty_core::vt::program_status::ProgramState;
 use artty_core::vt::selection::SelectionType;
 use artty_core::vt::term::TermMode;
 use artty_core::{
@@ -1732,6 +1733,7 @@ impl Server {
             Notice::Progress(progress) => {
                 pane.progress = (progress != Progress::Remove).then_some(progress)
             },
+            Notice::ProgramStatus(report) => pane.program_status(report),
             Notice::CommandStarted(command) => pane.command_started(command),
             Notice::CommandFinished(record) => {
                 pane.command_finished(record.exit);
@@ -3902,10 +3904,22 @@ impl Server {
     }
 
     /// Claude Code turns cut short with no hook to say so (Esc fires no
-    /// `Stop`): at work by its hooks, for a while, and its title at rest
-    /// (`✳`, no spinner) for a while — not asking permission meanwhile.
+    /// `Stop`): at work by its hooks, for a while, and now idle — as it
+    /// says (OSC 7501: `idle`, not `done`), else as its title shows (`✳`,
+    /// no spinner) — for a while, not asking permission meanwhile.
     fn turns_cut_short(&mut self, now: Instant) {
         const SETTLED: Duration = Duration::from_secs(3);
+        // (What it says settles at once; a title is watched a while.)
+        const SAID: Duration = Duration::from_secs(1);
+        let at_rest = |pane: &Pane| match pane.program() {
+            Some((status, since)) => {
+                status.state == ProgramState::Idle && now.duration_since(since) >= SAID
+            },
+            None => {
+                pane.title.as_deref().is_some_and(|t| t.starts_with('✳'))
+                    && pane.title_since().is_none_or(|at| now.duration_since(at) >= SETTLED)
+            },
+        };
         let cut: Vec<PaneId> = self
             .panes
             .iter()
@@ -3915,8 +3929,7 @@ impl Server {
                     Status::Agent { name, state: AgentState::Working } if name == "claude"
                 )
             })
-            .filter(|(_, pane)| pane.title.as_deref().is_some_and(|t| t.starts_with('✳')))
-            .filter(|(_, pane)| pane.title_since().is_none_or(|at| now.duration_since(at) >= SETTLED))
+            .filter(|(_, pane)| at_rest(pane))
             // (Not known since when: one from before this build took over.)
             .filter(|&(&id, _)| {
                 self.asks.turn_open_since(id).is_none_or(|at| now.duration_since(at) >= SETTLED)

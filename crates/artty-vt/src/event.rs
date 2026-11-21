@@ -67,6 +67,9 @@ pub enum Event {
     /// Working directory reported by the shell, as a `file://` URL (artty).
     WorkingDirectory(String),
 
+    /// A program's status (OSC 7501), to keep (artty).
+    ProgramStatus(crate::program_status::StatusReport),
+
     /// Progress reported by the program (artty).
     Progress(Progress),
 }
@@ -93,6 +96,7 @@ impl Debug for Event {
             Event::Notification { title, body } => write!(f, "Notification({title:?}, {body})"),
             Event::WorkingDirectory(url) => write!(f, "WorkingDirectory({url})"),
             Event::Progress(progress) => write!(f, "Progress({progress:?})"),
+            Event::ProgramStatus(report) => write!(f, "ProgramStatus({report:?})"),
         }
     }
 }

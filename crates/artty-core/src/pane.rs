@@ -3,6 +3,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use artty_vt::program_status::{ProgramState, ProgramStatus, StatusRecords, StatusReport};
+
 use crate::control::{AgentState, TabInfo};
 use crate::{ProcessInfo, SavedAgent, SavedPane, Session, ShellPhase};
 use artty_vt::ansi::Progress;
@@ -124,6 +126,10 @@ pub struct Pane {
     pending_input: Option<(String, Instant)>,
     /// The foreground program, seen waiting for keys.
     reading: Option<Reading>,
+    /// What programs here said they're doing (OSC 7501), and since when
+    /// the root record's state has been what it is.
+    program: StatusRecords,
+    program_since: Option<Instant>,
 }
 
 /// How long to wait for a prompt before typing pending input anyway (for
@@ -182,6 +188,48 @@ impl Pane {
             reported_agent: None,
             pending_input: None,
             reading: None,
+            program: StatusRecords::default(),
+            program_since: None,
+        }
+    }
+
+    /// A program's status report (OSC 7501).
+    pub fn program_status(&mut self, report: StatusReport) {
+        let before = self.program.root().map(|s| s.state);
+        self.program.apply(report);
+        let root = self.program.root().cloned();
+        if root.as_ref().map(|s| s.state) != before {
+            self.program_since = Some(Instant::now());
+        }
+        // What it says it's doing, or waits for, is its message (as hooks'
+        // are).
+        if let Some(status) = root.filter(|s| self.agent_app(s).is_some()) {
+            if status.state == ProgramState::Blocked {
+                self.attention = true;
+            }
+            if matches!(status.state, ProgramState::Working | ProgramState::Blocked)
+                && status.msg.is_some()
+            {
+                self.message = status.msg;
+            }
+        }
+        self.refresh();
+    }
+
+    /// The root record (what the program in the foreground said it's
+    /// doing), and since when its state is what it is.
+    pub fn program(&self) -> Option<(&ProgramStatus, Instant)> {
+        Some((self.program.root()?, self.program_since?))
+    }
+
+    /// The agent a status names, if it names one artty knows (its name as
+    /// hooks give it).
+    fn agent_app(&self, status: &ProgramStatus) -> Option<&'static str> {
+        match status.app.as_deref()? {
+            "claude-code" | "claude" => Some("claude"),
+            "codex" => Some("codex"),
+            "gemini" | "gemini-cli" => Some("gemini"),
+            _ => None,
         }
     }
 
@@ -296,6 +344,8 @@ impl Pane {
     pub fn command_finished(&mut self, exit: Option<i32>) {
         self.running = None;
         self.last_exit = exit;
+        // Back at the prompt: what was at work or waiting is over.
+        self.program.program_ended();
     }
 
     /// The last command's exit code (none while one runs).
@@ -324,17 +374,24 @@ impl Pane {
         // name isn't on the list, until a shell is back in the foreground.
         let reporter = || {
             let name = self.process.foreground.clone().filter(|name| !is_shell(name))?;
-            self.reported?;
-            Some(self.reported_agent.clone().unwrap_or(name))
+            let says = self.program.root().and_then(|s| self.agent_app(s));
+            if self.reported.is_none() && says.is_none() {
+                return None;
+            }
+            Some(self.reported_agent.clone().or(says.map(str::to_owned)).unwrap_or(name))
         };
         let Some(agent) = self.agent_name().or_else(reporter) else {
             // What runs isn't known yet (a pane just taken over from an
             // earlier build, not yet looked at): nothing's exited.
-            if self.process.foreground.is_none() && self.reported.is_some() {
+            // (Nor one that's said what it's doing before it's looked at.)
+            if self.process.foreground.is_none()
+                && (self.reported.is_some() || self.program.root().is_some())
+            {
                 return;
             }
             // The agent exited: forget what it reported.
             self.reported = None;
+            self.program.program_ended();
             self.agent_session = None;
             self.reported_agent = None;
             self.session_title = None;
@@ -397,8 +454,21 @@ impl Pane {
     }
 
     fn agent_state(&self) -> AgentState {
+        let said = self.program.root().filter(|s| self.agent_app(s).is_some()).map(|s| s.state);
+        // Waiting for the user, as it says: over whatever hooks said last
+        // (they say nothing of some prompts: a folder's trust, a login).
+        if said == Some(ProgramState::Blocked) {
+            return AgentState::Waiting;
+        }
         if let Some(reported) = self.reported {
             reported
+        } else if let Some(said) = said {
+            match said {
+                ProgramState::Working => AgentState::Working,
+                ProgramState::Blocked => AgentState::Waiting,
+                ProgramState::Done | ProgramState::Error => AgentState::Done,
+                ProgramState::Idle => AgentState::Idle,
+            }
         } else {
             let now = Instant::now();
             let animating = self

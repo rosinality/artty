@@ -306,6 +306,8 @@ impl Plain {
                             _ => None,
                         };
                     },
+                    // (Kept by a server's panes only.)
+                    Some(Notice::ProgramStatus(_)) => {},
                     Some(Notice::CommandStarted(_)) => pane.busy = true,
                     Some(Notice::CommandFinished(_)) => pane.busy = false,
                     Some(Notice::Exited) => {

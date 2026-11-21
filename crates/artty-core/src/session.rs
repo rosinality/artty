@@ -108,6 +108,8 @@ pub enum Notice {
         body: String,
     },
     Progress(Progress),
+    /// A program's status (OSC 7501).
+    ProgramStatus(artty_vt::program_status::StatusReport),
     /// The shell started a command (shell integration).
     CommandStarted(Option<String>),
     /// The shell finished a command (shell integration).
@@ -818,6 +820,7 @@ impl Session {
                 None
             },
             Event::Progress(progress) => Some(Notice::Progress(progress)),
+            Event::ProgramStatus(report) => Some(Notice::ProgramStatus(report)),
         }
     }
 

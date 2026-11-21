@@ -522,6 +522,10 @@ pub trait Handler {
     /// OSC 9;4 progress report (artty).
     fn set_progress(&mut self, _: Progress) {}
 
+    /// OSC 7501: a program's status, or its asking whether the terminal
+    /// knows the protocol (artty).
+    fn program_status(&mut self, _: crate::program_status::Sequence, _terminator: &str) {}
+
     /// Set the cursor style.
     fn set_cursor_style(&mut self, _: Option<CursorStyle>) {}
 
@@ -1643,6 +1647,12 @@ where
                     let body = String::from_utf8_lossy(&params[1..].join(&b';')).into_owned();
                     self.handler.desktop_notification(None, body);
                 }
+            },
+
+            // Program status (artty): one body (`;` is no part of one).
+            b"7501" if params.len() == 2 => match crate::program_status::parse(params[1]) {
+                Some(sequence) => self.handler.program_status(sequence, terminator),
+                None => unhandled(params),
             },
 
             // `777;notify;title;body` (artty).

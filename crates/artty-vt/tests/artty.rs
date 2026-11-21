@@ -529,3 +529,37 @@ fn kitty_file_transfer_only_reads_regular_files() {
         assert_eq!(replies(&events), ["\x1b_Gi=4;EBADF:not a regular file\x1b\\"], "{path}");
     }
 }
+
+#[test]
+fn program_status_answered_and_reported() {
+    let recorder = Recorder::default();
+    let mut term = Term::new(Config::default(), &Size(20, 6), recorder.clone());
+    let mut parser = Processor::<StdSyncHandler>::new();
+    // As Claude Code asks: the answer before the device attributes'.
+    parser.advance(&mut term, b"\x1b]7501;?\x07\x1b[c");
+    let events: Vec<Event> = recorder.0.lock().unwrap().drain(..).collect();
+    let said = replies(&events);
+    assert_eq!(said.first().map(String::as_str), Some("\x1b]7501;?\x07"), "{said:?}");
+    assert!(said.get(1).is_some_and(|r| r.starts_with("\x1b[?")), "{said:?}");
+    // ESC \ answered as ESC \.
+    parser.advance(&mut term, b"\x1b]7501;?\x1b\\");
+    let events: Vec<Event> = recorder.0.lock().unwrap().drain(..).collect();
+    assert_eq!(replies(&events), ["\x1b]7501;?\x1b\\"]);
+
+    // A report goes on as an event; a malformed one doesn't.
+    parser.advance(&mut term, b"\x1b]7501;state=working:app=claude-code:msg=V3JpdGluZw==\x07");
+    parser.advance(&mut term, b"\x1b]7501;state=asleep\x07");
+    let events: Vec<Event> = recorder.0.lock().unwrap().drain(..).collect();
+    let reports: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::ProgramStatus(report) => Some(report.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports.len(), 1, "{events:?}");
+    let status = reports[0].status.as_ref().unwrap();
+    assert_eq!(status.msg.as_deref(), Some("Writing"));
+    // Nothing of it on the screen.
+    assert_eq!(term.grid()[artty_vt::index::Line(0)][artty_vt::index::Column(0)].c, ' ');
+}

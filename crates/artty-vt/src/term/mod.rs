@@ -2509,6 +2509,19 @@ impl<T: EventListener> Handler for Term<T> {
         self.event_proxy.send_event(Event::Progress(progress));
     }
 
+    fn program_status(&mut self, sequence: crate::program_status::Sequence, terminator: &str) {
+        match sequence {
+            // Known here: the answer goes before the program's next query's
+            // (device attributes, sent to tell "unknown" apart).
+            crate::program_status::Sequence::Query => {
+                self.event_proxy.send_event(Event::PtyWrite(format!("\x1b]7501;?{terminator}")))
+            },
+            crate::program_status::Sequence::Report(report) => {
+                self.event_proxy.send_event(Event::ProgramStatus(report))
+            },
+        }
+    }
+
     #[inline]
     fn push_title(&mut self) {
         trace!("Pushing '{:?}' onto title stack", self.title);
