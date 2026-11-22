@@ -163,11 +163,17 @@ pub fn paint(
         }
     }
 
-    for (index, line) in frame.lines.iter().enumerate() {
-        for run in &line.runs {
-            let cell = metrics.cell_bounds(origin, index, run.column, run.cells);
-            paint_text(cell, &run.text, run, faded(hsla(run.fg)), metrics, window, cx);
+    // Text in one layer too: glyphs don't overlap, and those of a line would
+    // otherwise each take a layer and a draw-order lookup (see `paint_glyphs`).
+    window.paint_layer(bounds, |window| {
+        for (index, line) in frame.lines.iter().enumerate() {
+            for run in &line.runs {
+                let cell = metrics.cell_bounds(origin, index, run.column, run.cells);
+                paint_text(cell, &run.text, run, faded(hsla(run.fg)), metrics, window, cx);
+            }
         }
+    });
+    for (index, line) in frame.lines.iter().enumerate() {
         for underline in &line.underlines {
             let cells = metrics.cell_bounds(origin, index, underline.column, underline.width);
             paint_underline(cells, underline.style, faded(hsla(underline.color)), metrics, window);
@@ -312,7 +318,58 @@ fn paint_text(
         // CJK glyphs are narrower than two cells; center them like other terminals.
         at.x += ((cells.size.width - shaped.width) / 2.).floor();
     }
-    let _ = shaped.paint(at, metrics.line_height, window, cx);
+    let _ = if run.strikeout {
+        shaped.paint(at, metrics.line_height, window, cx)
+    } else {
+        paint_glyphs(&shaped, at, metrics.line_height, color, window, cx)
+    };
+}
+
+/// [`gpui::ShapedLine::paint`] for a line with no underline or strikethrough,
+/// in one color, placing glyphs exactly as it does, without the layer it
+/// opens for each line: every layer is a draw-order lookup, which made up
+/// most of painting text. The caller paints in a layer of its own.
+fn paint_glyphs(
+    line: &gpui::ShapedLine,
+    origin: gpui::Point<Pixels>,
+    line_height: Pixels,
+    color: Hsla,
+    window: &mut Window,
+    cx: &mut App,
+) -> gpui::Result<()> {
+    let padding_top = (line_height - line.ascent - line.descent) / 2.;
+    let baseline_offset = point(px(0.), padding_top + line.ascent);
+    let text_system = cx.text_system().clone();
+    let mask = window.content_mask().bounds;
+    let mut glyph_origin = origin;
+    let mut previous = gpui::Point::default();
+    for run in &line.runs {
+        let glyph_size = text_system.bounding_box(run.font_id, line.font_size).size;
+        for glyph in &run.glyphs {
+            glyph_origin.x += glyph.position.x - previous.x;
+            previous = glyph.position;
+            if !Bounds::new(glyph_origin, glyph_size).intersects(&mask) {
+                continue;
+            }
+            if glyph.is_emoji {
+                window.paint_emoji(
+                    glyph_origin + baseline_offset,
+                    run.font_id,
+                    glyph.id,
+                    line.font_size,
+                )?;
+            } else {
+                window.paint_glyph(
+                    glyph_origin + baseline_offset,
+                    run.font_id,
+                    glyph.id,
+                    line.font_size,
+                    color,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The run and character drawn at `column`, if any.
