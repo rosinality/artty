@@ -2046,9 +2046,53 @@ mod tests {
     use super::*;
     use artty_core::protocol::{Existing, Listing, UploadError, UploadTo};
 
+    /// A scratch server's directory. Dropped (a failing test's too, as it
+    /// unwinds), it stops the server there, through that server's own
+    /// socket, and removes the directory: a test that failed before its
+    /// own cleanup left its server running for good, with what its panes
+    /// ran (`yes`, parsed at 100% of a core for hours).
+    struct Scratch(PathBuf);
+
+    impl std::ops::Deref for Scratch {
+        type Target = PathBuf;
+        fn deref(&self) -> &PathBuf {
+            &self.0
+        }
+    }
+
+    impl AsRef<Path> for Scratch {
+        fn as_ref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            use std::io::BufRead;
+            let socket = self.0.join("t/artty-server.sock");
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket) {
+                let mut line = serde_json::to_string(&Request::StopServer).unwrap();
+                line.push('\n');
+                let _ = stream.write_all(line.as_bytes());
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                let _ = std::io::BufReader::new(stream).read_line(&mut String::new());
+                // It saves its state as it goes: gone first, then removed.
+                for _ in 0..50 {
+                    if std::os::unix::net::UnixStream::connect(&socket).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.0);
+            std::thread::sleep(Duration::from_millis(200));
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A server of its own (in a directory of its own), reached through a
     /// command as through ssh. `None` without the app binary built.
-    fn scratch_server(tag: &str) -> Option<(artty_core::remote::Opened, PathBuf)> {
+    fn scratch_server(tag: &str) -> Option<(artty_core::remote::Opened, Scratch)> {
         // The app binary, built beside the tests.
         let exe = std::env::current_exe().unwrap();
         let artty = exe.parent().and_then(Path::parent).map(|dir| dir.join("artty"));
@@ -2069,7 +2113,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        Some((artty_core::remote::open(&config, Prompts::Never).unwrap(), dir))
+        Some((artty_core::remote::open(&config, Prompts::Never).unwrap(), Scratch(dir)))
     }
 
     /// Attach a new window; returns its first pane once laid out.
@@ -2096,7 +2140,7 @@ mod tests {
         panic!("no window");
     }
 
-    fn stop(mut opened: artty_core::remote::Opened, dir: PathBuf) {
+    fn stop(mut opened: artty_core::remote::Opened, dir: Scratch) {
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         write_message(&mut opened.writer, &stop).unwrap();
         while read_message::<ServerMessage>(&mut opened.reader).is_ok() {}
@@ -2670,7 +2714,8 @@ mod tests {
         let _ = busy.child.wait();
         std::thread::sleep(Duration::from_secs(1));
 
-        let (mut opened, _) = scratch_server("flood").unwrap();
+        // (The same server again: kept, not dropped, or it'd be stopped.)
+        let (mut opened, _same) = scratch_server("flood").unwrap();
         let pane = attach_window(&mut opened);
         let artty_core::remote::Opened { mut child, mut reader, mut writer, .. } = opened;
         let (tx, rx) = std::sync::mpsc::channel();
