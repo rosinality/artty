@@ -203,6 +203,10 @@ struct Client {
     sent: HashMap<PaneId, (Frame, Instant)>,
     dirty: HashSet<PaneId>,
     panes_sent: Vec<PaneState>,
+    /// Its windows' layouts as last sent, so a layout goes only when it
+    /// changes (this runs after every batch of events: under a flood of
+    /// output, thousands a second, which filled a slow link).
+    layouts_sent: HashMap<WindowId, WindowLayout>,
     /// Its windows' status lines as last sent (none: empty).
     status_sent: HashMap<WindowId, StatusLine>,
     /// Images it has (by id), so each is sent once.
@@ -1641,6 +1645,7 @@ impl Server {
                         sent: HashMap::new(),
                         dirty: HashSet::new(),
                         panes_sent: Vec::new(),
+                        layouts_sent: HashMap::new(),
                         status_sent: HashMap::new(),
                         images_sent: HashSet::new(),
                         batches_sent: 0,
@@ -1830,6 +1835,7 @@ impl Server {
                 self.send(client, ServerMessage::Attached { window, bounds });
                 if let Some(c) = self.clients.get_mut(&client) {
                     c.panes_sent.clear();
+                    c.layouts_sent.remove(&window);
                 }
             },
             ClientMessage::DetachWindow { window } => {
@@ -4361,10 +4367,18 @@ impl Server {
                     }
                 }
             }
-            let mut messages: Vec<ServerMessage> = windows
-                .into_iter()
-                .map(|(window, layout, _)| ServerMessage::Layout { window, layout })
-                .collect();
+            let mine: Vec<WindowId> = windows.iter().map(|(id, ..)| *id).collect();
+            let mut messages: Vec<ServerMessage> = Vec::new();
+            {
+                let client = self.clients.get_mut(&client_id).unwrap();
+                client.layouts_sent.retain(|window, _| mine.contains(window));
+                for (window, layout, _) in windows {
+                    if client.layouts_sent.get(&window) != Some(&layout) {
+                        client.layouts_sent.insert(window, layout.clone());
+                        messages.push(ServerMessage::Layout { window, layout });
+                    }
+                }
+            }
             for pane in frames {
                 let Some(state) = self.panes.get_mut(&pane) else { continue };
                 let frame = state.session.frame();
@@ -4399,13 +4413,6 @@ impl Server {
                 client.panes_sent = states.clone();
                 messages.push(ServerMessage::Panes { panes: states });
             }
-            let mine: Vec<WindowId> = messages
-                .iter()
-                .filter_map(|m| match m {
-                    ServerMessage::Layout { window, .. } => Some(*window),
-                    _ => None,
-                })
-                .collect();
             client.status_sent.retain(|window, _| mine.contains(window));
             let mine = if client.takes(extension::STATUS) { mine } else { Vec::new() };
             for window in mine {
