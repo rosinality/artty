@@ -42,7 +42,7 @@ use crate::{SavedWindow, TerminalSize};
 
 /// Bumped on incompatible changes that `protocol_version` can't see (new
 /// core messages); app and server must agree on `protocol_version()`.
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// The protocol version app and server compare: `PROTOCOL_VERSION` mixed
 /// with a fingerprint of how sample messages encode, every structure that
@@ -82,6 +82,7 @@ pub fn protocol_version() -> u32 {
     let update = FrameUpdate {
         columns: 31,
         line_count: 32,
+        shift: Some(LineShift { top: 47, count: 48, by: -49 }),
         lines: vec![(33, line)],
         cursor: Some(FrameCursor {
             line: 34,
@@ -881,6 +882,9 @@ impl PaneState {
 pub struct FrameUpdate {
     pub columns: usize,
     pub line_count: usize,
+    /// Lines that moved (output scrolling, the view scrolled into history),
+    /// applied before `lines`, so they needn't be sent again.
+    pub shift: Option<LineShift>,
     pub lines: Vec<(u32, FrameLine)>,
     pub cursor: Option<FrameCursor>,
     pub display_offset: usize,
@@ -890,19 +894,119 @@ pub struct FrameUpdate {
     pub mode: u32,
 }
 
+/// Lines `top..top + count` become those that were `by` lines below them
+/// (above them, for a negative `by`): a scroll of the screen, or of a region
+/// of it (a program's status lines staying put).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineShift {
+    pub top: u32,
+    pub count: u32,
+    pub by: i32,
+}
+
+impl LineShift {
+    /// Move `lines` as it says (the lines moved from are left as they were,
+    /// or with others' contents: the update's own lines say what they are).
+    fn apply<T>(self, lines: &mut [T]) {
+        let (top, count) = (self.top as usize, self.count as usize);
+        let by = self.by.unsigned_abs() as usize;
+        if self.by > 0 && top + count + by <= lines.len() {
+            lines[top..top + count + by].rotate_left(by);
+        } else if self.by < 0 && by <= top && top + count <= lines.len() {
+            lines[top - by..top + count].rotate_right(by);
+        }
+    }
+
+    /// How `frame`'s lines moved from `previous`'s, if enough did to be
+    /// worth saying. Each line that changed votes for where it was before
+    /// (found by a fingerprint, then compared); the shift most lines agree
+    /// on covers its first to its last line that it puts right.
+    fn find(previous: &[FrameLine], lines: &[FrameLine]) -> Option<Self> {
+        use std::collections::HashMap;
+        let n = lines.len();
+        if previous.len() != n || n < 3 {
+            return None;
+        }
+        let blank = FrameLine::default();
+        let mut was: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (j, line) in previous.iter().enumerate().filter(|(_, l)| **l != blank) {
+            was.entry(fingerprint(line)).or_default().push(j);
+        }
+        let mut votes: HashMap<i32, usize> = HashMap::new();
+        for (i, line) in lines.iter().enumerate() {
+            if *line == blank || previous[i] == *line {
+                continue;
+            }
+            // A line repeated all over the screen says little.
+            match was.get(&fingerprint(line)) {
+                Some(places) if places.len() <= 8 => {
+                    for &j in places {
+                        if previous[j] == *line {
+                            *votes.entry(j as i32 - i as i32).or_default() += 1;
+                        }
+                    }
+                },
+                _ => {},
+            }
+        }
+        let (&by, _) = votes
+            .iter()
+            .filter(|&(_, &count)| count >= 2)
+            .max_by_key(|&(&by, &count)| (count, std::cmp::Reverse(by.unsigned_abs())))?;
+        let right = |i: usize| {
+            let j = i as i32 + by;
+            (0..n as i32).contains(&j) && lines[i] != blank && previous[j as usize] == lines[i]
+        };
+        let first = (0..n).find(|&i| right(i))?;
+        let last = (0..n).rev().find(|&i| right(i))?;
+        Some(Self { top: first as u32, count: (last - first + 1) as u32, by })
+    }
+}
+
+/// A line's text and where it is, for finding it again (compared after).
+fn fingerprint(line: &FrameLine) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for run in &line.runs {
+        (run.column, &run.text, run.fg.r, run.fg.g, run.fg.b).hash(&mut hasher);
+    }
+    line.backgrounds.len().hash(&mut hasher);
+    hasher.finish()
+}
+
 impl FrameUpdate {
-    /// The update turning `previous` into `frame`.
+    /// The update turning `previous` into `frame`: lines that moved as a
+    /// shift, then those still different.
     pub fn diff(previous: Option<&Frame>, frame: &Frame, mode: u32) -> Self {
+        let mut before: Vec<Option<&FrameLine>> = match previous {
+            Some(p) => p.lines.iter().map(Some).collect(),
+            None => Vec::new(),
+        };
+        before.resize(frame.lines.len(), None);
+        let changed = |before: &[Option<&FrameLine>]| {
+            frame.lines.iter().zip(before).filter(|(line, was)| **was != Some(*line)).count()
+        };
+        // Only when it saves lines (a band can take in some that were right).
+        let shift =
+            previous.and_then(|p| LineShift::find(&p.lines, &frame.lines)).filter(|shift| {
+                let mut shifted = before.clone();
+                shift.apply(&mut shifted);
+                changed(&shifted) < changed(&before)
+            });
+        if let Some(shift) = shift {
+            shift.apply(&mut before);
+        }
         let lines = frame
             .lines
             .iter()
             .enumerate()
-            .filter(|(i, line)| previous.and_then(|p| p.lines.get(*i)) != Some(*line))
+            .filter(|(i, line)| before[*i] != Some(*line))
             .map(|(i, line)| (i as u32, line.clone()))
             .collect();
         Self {
             columns: frame.columns,
             line_count: frame.lines.len(),
+            shift,
             lines,
             cursor: frame.cursor,
             display_offset: frame.display_offset,
@@ -915,6 +1019,9 @@ impl FrameUpdate {
     /// Apply to the app's copy of the screen.
     pub fn apply(self, frame: &mut Frame) {
         frame.lines.resize_with(self.line_count, FrameLine::default);
+        if let Some(shift) = self.shift {
+            shift.apply(&mut frame.lines);
+        }
         for (index, line) in self.lines {
             if let Some(slot) = frame.lines.get_mut(index as usize) {
                 *slot = line;
@@ -1288,6 +1395,100 @@ mod tests {
 
         // A first update carries everything.
         assert_eq!(FrameUpdate::diff(None, &after, 0).lines.len(), 3);
+    }
+
+    fn screen(texts: &[&str]) -> Frame {
+        let lines = texts
+            .iter()
+            .map(|t| if t.is_empty() { FrameLine::default() } else { line(t) })
+            .collect();
+        Frame { columns: 10, lines, ..Default::default() }
+    }
+
+    /// `update` turns `before` into `after`; the lines it sends, by index.
+    fn sent(before: &Frame, after: &Frame) -> (Option<LineShift>, Vec<u32>) {
+        let update = FrameUpdate::diff(Some(before), after, 0);
+        let result = (update.shift, update.lines.iter().map(|(i, _)| *i).collect());
+        let mut copy = before.clone();
+        update.apply(&mut copy);
+        assert_eq!(&copy, after);
+        result
+    }
+
+    #[test]
+    fn scrolled_lines_move_instead_of_being_sent() {
+        let before = screen(&["a", "b", "c", "d", "e", "f"]);
+        // Output scrolling up a line: only the new one is sent.
+        let (shift, lines) = sent(&before, &screen(&["b", "c", "d", "e", "f", "g"]));
+        assert_eq!(shift, Some(LineShift { top: 0, count: 5, by: 1 }));
+        assert_eq!(lines, [5]);
+        // Three at once.
+        let (shift, lines) = sent(&before, &screen(&["d", "e", "f", "x", "y", "z"]));
+        assert_eq!(shift, Some(LineShift { top: 0, count: 3, by: 3 }));
+        assert_eq!(lines, [3, 4, 5]);
+        // The view scrolled back into history: lines move down.
+        let (shift, lines) = sent(&before, &screen(&["z", "a", "b", "c", "d", "e"]));
+        assert_eq!(shift, Some(LineShift { top: 1, count: 5, by: -1 }));
+        assert_eq!(lines, [0]);
+    }
+
+    #[test]
+    fn a_scroll_region_moves_between_lines_that_stay() {
+        // A program's title and status lines stay; what's between scrolls.
+        let before = screen(&["title", "a", "b", "c", "d", "e", "status"]);
+        let after = screen(&["title", "c", "d", "e", "f", "g", "status"]);
+        let (shift, lines) = sent(&before, &after);
+        assert_eq!(shift, Some(LineShift { top: 1, count: 3, by: 2 }));
+        assert_eq!(lines, [4, 5]);
+    }
+
+    #[test]
+    fn no_shift_without_moved_lines() {
+        let before = screen(&["a", "b", "c", "", "", ""]);
+        // A line typed at: no shift.
+        assert_eq!(sent(&before, &screen(&["a", "b", "cd", "", "", ""])), (None, vec![2]));
+        // Blank lines matching blank lines say nothing.
+        assert_eq!(sent(&screen(&["", "", "", ""]), &screen(&["", "x", "", ""])), (None, vec![1]));
+        // A single moved line isn't worth a shift.
+        assert_eq!(sent(&before, &screen(&["b", "x", "y", "", "", ""])).0, None);
+    }
+
+    #[test]
+    fn any_change_round_trips() {
+        // Random screens from few texts (so lines repeat), random scrolls of
+        // random regions and random edits: applying the diff always gives
+        // the new screen, and a shift never sends more than without one.
+        let texts = ["", "a", "b", "c", "d", "e", "f"];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for _ in 0..5000 {
+            let rows = 3 + next(10);
+            let before: Vec<&str> = (0..rows).map(|_| texts[next(texts.len())]).collect();
+            let mut after = before.clone();
+            if next(2) == 0 {
+                let top = next(rows);
+                let bottom = top + 1 + next(rows - top);
+                let by = 1 + next(bottom - top);
+                if next(2) == 0 {
+                    after[top..bottom].rotate_left(by % (bottom - top));
+                } else {
+                    after[top..bottom].rotate_right(by % (bottom - top));
+                }
+            }
+            for _ in 0..next(3) {
+                let i = next(rows);
+                after[i] = texts[next(texts.len())];
+            }
+            let (before, after) = (screen(&before), screen(&after));
+            let (_, lines) = sent(&before, &after);
+            let unshifted = before.lines.iter().zip(&after.lines).filter(|(a, b)| a != b).count();
+            assert!(lines.len() <= unshifted, "{before:?} -> {after:?}");
+        }
     }
 
     #[test]
