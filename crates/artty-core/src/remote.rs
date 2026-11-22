@@ -15,9 +15,28 @@ pub const NOT_INSTALLED: &str = "artty isn't installed there";
 /// A started connection: its process, its two ends, and the greeting.
 pub struct Opened {
     pub child: std::process::Child,
-    pub reader: std::io::BufReader<std::process::ChildStdout>,
+    /// The server's messages after its greeting (inflated, when it
+    /// deflates them: see `extension::DEFLATE`).
+    pub reader: Box<dyn std::io::Read + Send>,
     pub writer: std::process::ChildStdin,
     pub welcome: ServerMessage,
+    /// What it said it supports, after a `welcome` in this build's
+    /// protocol (`None` otherwise: it's not read).
+    pub extensions: Option<ServerMessage>,
+}
+
+/// Reading, and saying how much was read.
+struct CountingReader<R> {
+    inner: R,
+    read: Box<dyn Fn(usize) + Send>,
+}
+
+impl<R: std::io::Read> std::io::Read for CountingReader<R> {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(out)?;
+        (self.read)(read);
+        Ok(read)
+    }
 }
 
 /// How ssh may ask for what logging in needs (a password, a code, whether
@@ -212,6 +231,16 @@ struct Talk {
 /// Run the command reaching the server and wait for its greeting; ssh may
 /// ask for a login as `prompts` says.
 pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
+    open_counting(config, prompts, Box::new(|_| {}))
+}
+
+/// [`open`], telling `read` how many bytes come over the link as they do
+/// (before inflating).
+pub fn open_counting(
+    config: &ServerConfig,
+    prompts: Prompts,
+    read: Box<dyn Fn(usize) + Send>,
+) -> Result<Opened, String> {
     use std::io::BufRead;
     use std::process::Stdio;
     let command = config.connect_command().ok_or("set ssh (or command) for it in the settings")?;
@@ -320,20 +349,40 @@ pub fn open(config: &ServerConfig, prompts: Prompts) -> Result<Opened, String> {
         });
     }
     let mut writer = child.stdin.take().ok_or("no stdin")?;
-    let mut reader = std::io::BufReader::new(child.stdout.take().ok_or("no stdout")?);
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    let mut reader = std::io::BufReader::new(CountingReader { inner: stdout, read });
     let hello = serde_json::to_string(&Hello::Attach {
         version: crate::protocol::protocol_version(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        extensions: crate::protocol::ServerExtension::KINDS.iter().map(|&k| k.into()).collect(),
+        // And deflate: over a network, as not every sshd compresses.
+        extensions: crate::protocol::ServerExtension::KINDS
+            .iter()
+            .chain([&crate::protocol::extension::DEFLATE])
+            .map(|&k| k.into())
+            .collect(),
     })
     .map_err(|err| err.to_string())?;
     let welcome = writer
         .write_all(format!("{hello}\n").as_bytes())
         .and_then(|()| writer.flush())
         .and_then(|()| read_message::<ServerMessage>(&mut reader));
+    // In this protocol, what it supports comes next; and from there on,
+    // deflated when it said so (which it does only when asked).
+    let ours = |w: &ServerMessage| matches!(w, ServerMessage::Welcome { version, .. } if *version == crate::protocol::protocol_version());
+    let greeting = welcome.and_then(|welcome| match ours(&welcome) {
+        true => read_message::<ServerMessage>(&mut reader).map(|e| (welcome, Some(e))),
+        false => Ok((welcome, None)),
+    });
     greeted.store(true, std::sync::atomic::Ordering::SeqCst);
-    match welcome {
-        Ok(welcome) => Ok(Opened { child, reader, writer, welcome }),
+    match greeting {
+        Ok((welcome, extensions)) => {
+            let deflated = extensions.as_ref().is_some_and(crate::protocol::deflates_after);
+            let reader: Box<dyn std::io::Read + Send> = match deflated {
+                true => Box::new(crate::protocol::inflating(reader)),
+                false => Box::new(reader),
+            };
+            Ok(Opened { child, reader, writer, welcome, extensions })
+        },
         Err(err) => {
             let _ = child.kill();
             let _ = child.wait();

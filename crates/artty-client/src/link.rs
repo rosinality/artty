@@ -13,6 +13,9 @@ use std::sync::mpsc;
 pub struct Link {
     pub reader: Box<dyn Read + Send>,
     pub writer: Box<dyn Write + Send>,
+    /// Whether it may cross a network (ssh, or a command): then the
+    /// server's side is asked to deflate (see `Client::start_with`).
+    pub remote: bool,
     /// What it runs on (a process, an ssh session and its runtime): ended
     /// when dropped.
     pub(crate) keep: Box<dyn Send>,
@@ -35,6 +38,7 @@ impl Link {
         Ok(Link {
             reader: Box::new(reader),
             writer: Box::new(writer),
+            remote: true,
             keep: Box::new(Ended(child)),
         })
     }
@@ -47,6 +51,7 @@ impl Link {
         Ok(Link {
             reader: Box::new(stream.try_clone().map_err(|err| err.to_string())?),
             writer: Box::new(writer),
+            remote: false,
             keep: Box::new(Shut(stream)),
         })
     }

@@ -1659,11 +1659,17 @@ impl Server {
                     version: artty_core::protocol::protocol_version(),
                     server_version: build,
                 });
-                let kinds = ServerExtension::KINDS
+                let mut kinds: Vec<String> = ServerExtension::KINDS
                     .iter()
                     .chain(artty_core::protocol::CLIENT_KINDS)
                     .map(|&k| k.to_owned())
                     .collect();
+                // Deflated from here on, when it asked (its writer switches
+                // after sending this: see `serve_app`).
+                let deflate = artty_core::protocol::extension::DEFLATE;
+                if extensions.iter().any(|k| k == deflate) {
+                    kinds.push(deflate.to_owned());
+                }
                 let _ = tx.send(ServerMessage::Extensions { kinds });
                 self.clients.insert(
                     id,

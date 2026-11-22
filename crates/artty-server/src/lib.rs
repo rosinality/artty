@@ -32,7 +32,7 @@ use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
 use artty_core::control::{Request, Response, server_socket_path};
-use artty_core::protocol::{ClientMessage, Hello, ServerMessage, read_message, write_message};
+use artty_core::protocol::{ClientMessage, Hello, ServerMessage, read_message};
 
 use inbox::{Inbox, Next};
 use server::Server;
@@ -311,7 +311,7 @@ fn hung_up(stream: &UnixStream) -> bool {
 /// An attached app: binary messages both ways until it disconnects.
 fn serve_app(
     mut reader: BufReader<UnixStream>,
-    mut writer: UnixStream,
+    writer: UnixStream,
     id: ClientId,
     extensions: Vec<String>,
     tx: Arc<Inbox>,
@@ -323,12 +323,11 @@ fn serve_app(
     }
     WRITERS.fetch_add(1, Ordering::Relaxed);
     let spawned = std::thread::Builder::new().name("artty-client-writer".into()).spawn(move || {
-        for message in messages {
-            if write_message(&mut writer, &message).is_err() {
-                break;
-            }
+        let stream = writer.try_clone();
+        let _ = send_to_app(writer, messages);
+        if let Ok(stream) = stream {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
         }
-        let _ = writer.shutdown(std::net::Shutdown::Both);
         WRITERS.fetch_sub(1, Ordering::Relaxed);
     });
     if spawned.is_err() {
@@ -340,6 +339,29 @@ fn serve_app(
         }
     }
     let _ = tx.send(Input::Disconnected(id));
+}
+
+/// Write `messages` to an app as they come, flushing when none are
+/// waiting; after an `Extensions` turning on deflate (which it asked for),
+/// through deflate.
+fn send_to_app(writer: UnixStream, messages: mpsc::Receiver<ServerMessage>) -> io::Result<()> {
+    use artty_core::protocol::{deflates_after, deflating, write_message_unflushed};
+    let mut out: Box<dyn Write> = Box::new(writer.try_clone()?);
+    let mut plain = true;
+    while let Ok(first) = messages.recv() {
+        let mut next = Some(first);
+        while let Some(message) = next.take() {
+            write_message_unflushed(&mut out, &message)?;
+            if plain && deflates_after(&message) {
+                out.flush()?;
+                out = Box::new(deflating(writer.try_clone()?));
+                plain = false;
+            }
+            next = messages.try_recv().ok();
+        }
+        out.flush()?;
+    }
+    Ok(())
 }
 
 /// One JSON control request to the running server.
@@ -536,4 +558,75 @@ pub fn log_path() -> Option<PathBuf> {
         home.join(".local/state/artty")
     };
     Some(dir.join("server.log"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use artty_core::protocol::{ServerMessage, deflates_after, extension, inflating, read_message};
+
+    use super::*;
+
+    /// What an app reads: messages as sent, the ones after an `Extensions`
+    /// turning on deflate through it, however they're batched.
+    #[test]
+    fn messages_after_deflate_is_on_come_deflated() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || send_to_app(ours, rx));
+        let big = ServerMessage::Notify {
+            title: "t".into(),
+            body: "screen ".repeat(20_000),
+            window: None,
+            pane: None,
+        };
+        let sent = vec![
+            ServerMessage::Pong { id: 1 },
+            ServerMessage::Extensions { kinds: vec!["status".into(), extension::DEFLATE.into()] },
+            ServerMessage::Pong { id: 2 },
+            big.clone(),
+            ServerMessage::Sync { seq: 3 },
+        ];
+        for message in &sent {
+            tx.send(message.clone()).unwrap();
+        }
+        // Later, one at a time: each must arrive without the next (flushed).
+        let mut reader: Box<dyn Read + Send> = Box::new(theirs.try_clone().unwrap());
+        let mut got = Vec::new();
+        for _ in 0..sent.len() {
+            let message: ServerMessage = read_message(&mut reader).unwrap();
+            if deflates_after(&message) {
+                reader = Box::new(inflating(reader));
+            }
+            got.push(format!("{message:?}"));
+        }
+        tx.send(ServerMessage::Pong { id: 4 }).unwrap();
+        let last: ServerMessage = read_message(&mut reader).unwrap();
+        assert_eq!(format!("{last:?}"), format!("{:?}", ServerMessage::Pong { id: 4 }));
+        assert_eq!(got, sent.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>());
+        drop(tx);
+        writer.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn deflated_screens_are_smaller() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let writer = std::thread::spawn(move || send_to_app(ours, rx));
+        tx.send(ServerMessage::Extensions { kinds: vec![extension::DEFLATE.into()] }).unwrap();
+        let body = "the quick brown fox jumps over the lazy dog ".repeat(2_000);
+        tx.send(ServerMessage::Notify {
+            title: "t".into(),
+            body: body.clone(),
+            window: None,
+            pane: None,
+        })
+        .unwrap();
+        drop(tx);
+        writer.join().unwrap().unwrap();
+        let mut raw = Vec::new();
+        theirs.read_to_end(&mut raw).unwrap();
+        assert!(raw.len() < body.len() / 10, "{} bytes for {}", raw.len(), body.len());
+    }
 }

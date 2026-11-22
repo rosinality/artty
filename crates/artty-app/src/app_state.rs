@@ -494,15 +494,18 @@ fn connect_once(cx: &mut App, may_restart: bool, retries: u32) -> std::io::Resul
         handle(LOCAL, welcome, cx);
     }
 
-    start_io(LOCAL, reader, writer, cx)
+    start_io(LOCAL, reader, writer, true, cx)
 }
 
 /// Carry a connection: a writer thread sends what goes to `server`, a
 /// reader thread receives what comes, and the main thread handles it.
+/// (`count_reads`: false for a remote, counted below its inflating by
+/// `remote::open_counting`.)
 fn start_io(
     server: ServerId,
     reader: impl std::io::Read + Send + 'static,
     writer: impl Write + Send + 'static,
+    count_reads: bool,
     cx: &mut App,
 ) -> std::io::Result<()> {
     let traffic = cx
@@ -511,7 +514,11 @@ fn start_io(
         .get(server as usize)
         .map(|c| c.traffic.clone())
         .unwrap_or_default();
-    let mut reader = Counted { inner: reader, count: traffic.clone(), sent: false };
+    let reads = match count_reads {
+        true => traffic.clone(),
+        false => Arc::default(),
+    };
+    let mut reader = Counted { inner: reader, count: reads, sent: false };
     let mut writer = Counted { inner: writer, count: traffic, sent: true };
     let (outgoing, to_send) = std::sync::mpsc::channel::<ClientMessage>();
     std::thread::Builder::new().name(format!("artty-server-{server}-writer")).spawn(move || {
@@ -1404,9 +1411,14 @@ pub fn connect_remote(server: ServerId, cx: &mut App) {
         }
     })
     .detach();
+    // What comes over the link, counted as it comes (before inflating).
+    let traffic = cx.global::<Shared>().connections[server as usize].traffic.clone();
+    let read = Box::new(move |n: usize| {
+        traffic.0.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+    });
     let opening = cx.background_spawn(async move {
         let prompts = askpass.as_ref().map_or(Prompts::Never, Prompts::Helper);
-        artty_core::remote::open(&config, prompts)
+        artty_core::remote::open_counting(&config, prompts, read)
     });
     cx.spawn(async move |cx| {
         let opened = opening.await;
@@ -1614,7 +1626,7 @@ fn remote_opened(
             return retry_later(server, error, cx);
         },
     };
-    let artty_core::remote::Opened { mut child, reader, writer, welcome } = opened;
+    let artty_core::remote::Opened { mut child, reader, writer, welcome, extensions } = opened;
     let version = artty_core::protocol::protocol_version();
     match welcome {
         ServerMessage::Welcome { version: theirs, .. } if theirs == version => {},
@@ -1633,8 +1645,12 @@ fn remote_opened(
         _ => return retry_later(server, "unexpected greeting".to_owned(), cx),
     }
     cx.global_mut::<Shared>().connections[server as usize].child = Some(child);
-    if let Err(err) = start_io(server, reader, writer, cx) {
+    if let Err(err) = start_io(server, reader, writer, false, cx) {
         return retry_later(server, err.to_string(), cx);
+    }
+    // (Read with its greeting, by `remote::open`.)
+    if let Some(extensions) = extensions {
+        handle(server, extensions, cx);
     }
     attach_remote(server, cx);
     // (Its greeting comes here, not through `handle`.)

@@ -177,11 +177,13 @@ impl Client {
         app_version: &str,
         extensions: &[&str],
     ) -> Result<(Client, mpsc::Receiver<Event>), StartError> {
-        let Link { mut reader, mut writer, keep } = link;
+        let Link { mut reader, mut writer, remote, keep } = link;
+        // Over a network, deflated too (not every sshd compresses).
+        let deflate = remote.then_some(artty_core::protocol::extension::DEFLATE);
         let hello = Hello::Attach {
             version: protocol_version(),
             app_version: app_version.to_owned(),
-            extensions: extensions.iter().map(|&k| k.to_owned()).collect(),
+            extensions: extensions.iter().copied().chain(deflate).map(str::to_owned).collect(),
         };
         let hello = serde_json::to_string(&hello).map_err(|err| err.to_string())?;
         writer
@@ -199,7 +201,13 @@ impl Client {
             Err(err) => return Err(format!("no answer: {err}").into()),
         };
         let server_extensions = match read_message::<ServerMessage>(&mut reader) {
-            Ok(ServerMessage::Extensions { kinds }) => kinds,
+            Ok(message @ ServerMessage::Extensions { .. }) => {
+                if artty_core::protocol::deflates_after(&message) {
+                    reader = Box::new(artty_core::protocol::inflating(reader));
+                }
+                let ServerMessage::Extensions { kinds } = message else { unreachable!() };
+                kinds
+            },
             Ok(_) => return Err("it didn't say what it supports".to_owned().into()),
             Err(err) => return Err(format!("no answer: {err}").into()),
         };

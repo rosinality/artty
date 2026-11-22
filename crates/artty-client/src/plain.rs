@@ -128,7 +128,13 @@ pub fn serve(shells: Box<dyn Shells>, name: String, scrollback: usize) -> Result
         .spawn(move || plain.run(inputs))
         .map_err(|err| err.to_string())?;
     let writer = theirs.try_clone().map_err(|err| err.to_string())?;
-    Ok(Link { reader: Box::new(theirs), writer: Box::new(writer), keep: Box::new(()) })
+    // (A stand-in here, not a server across the network.)
+    Ok(Link {
+        reader: Box::new(theirs),
+        writer: Box::new(writer),
+        remote: false,
+        keep: Box::new(()),
+    })
 }
 
 /// What the stand-in reacts to.

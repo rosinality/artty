@@ -224,6 +224,7 @@ pub fn connect(
     let link = Link {
         reader: Box::new(ChunkReader::new(chunks)),
         writer: Box::new(ChunkWriter(writer)),
+        remote: true,
         keep: Box::new(connection),
     };
     Ok((link, forwards))

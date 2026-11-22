@@ -1152,6 +1152,78 @@ pub mod extension {
     pub const QUEUE: &str = "queue";
     /// App → server: [`super::Peek`].
     pub const PEEK: &str = "peek";
+    /// Server → app, the connection itself: what the server sends after
+    /// an `Extensions` listing this is one deflate stream (flushed as it
+    /// sends), until the connection ends. Apps ask for it over a network,
+    /// as not every sshd compresses (screens shrink 4-30x); see
+    /// [`super::deflates_after`].
+    pub const DEFLATE: &str = "deflate";
+}
+
+/// Whether, having read `message` from a server, the rest comes deflated
+/// ([`extension::DEFLATE`]): then read it through [`inflating`].
+pub fn deflates_after(message: &ServerMessage) -> bool {
+    matches!(message, ServerMessage::Extensions { kinds } if kinds.iter().any(|k| k == extension::DEFLATE))
+}
+
+/// A server's messages after [`deflates_after`], from `reader`.
+pub fn inflating<R: Read>(reader: R) -> Inflating<R> {
+    Inflating {
+        inner: reader,
+        inflate: flate2::Decompress::new(false),
+        input: vec![0; 32 * 1024],
+        start: 0,
+        end: 0,
+    }
+}
+
+/// Reading a deflate stream that's flushed as it's sent, as a connection
+/// is: what's decompressed already is given before waiting for more.
+/// (flate2's own readers wait for more input first, so the end of a
+/// message could sit until the next one came.)
+pub struct Inflating<R> {
+    inner: R,
+    inflate: flate2::Decompress,
+    /// Read and not yet decompressed: `input[start..end]`.
+    input: Vec<u8>,
+    start: usize,
+    end: usize,
+}
+
+impl<R: Read> Read for Inflating<R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let (read_before, written_before) = (self.inflate.total_in(), self.inflate.total_out());
+            let status = self
+                .inflate
+                .decompress(&self.input[self.start..self.end], out, flate2::FlushDecompress::None)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            self.start += (self.inflate.total_in() - read_before) as usize;
+            let written = (self.inflate.total_out() - written_before) as usize;
+            if written > 0 || status == flate2::Status::StreamEnd {
+                return Ok(written);
+            }
+            // It needs more than there is: keep what's left, read more.
+            self.input.copy_within(self.start..self.end, 0);
+            self.end -= self.start;
+            self.start = 0;
+            if self.end == self.input.len() {
+                self.input.resize(self.input.len() * 2, 0);
+            }
+            match self.inner.read(&mut self.input[self.end..])? {
+                0 => return Ok(0),
+                read => self.end += read,
+            }
+        }
+    }
+}
+
+/// The stream an app reads, deflated from here on ([`extension::DEFLATE`]).
+pub fn deflating<W: Write>(writer: W) -> flate2::write::DeflateEncoder<W> {
+    flate2::write::DeflateEncoder::new(writer, flate2::Compression::default())
 }
 
 /// The kinds a server reads from apps (it lists them, with those it sends,
@@ -1324,10 +1396,19 @@ pub fn decode_response(response: &str) -> Response {
 
 /// Write one length-prefixed message.
 pub fn write_message<T: Serialize>(writer: &mut impl Write, message: &T) -> io::Result<()> {
+    write_message_unflushed(writer, message)?;
+    writer.flush()
+}
+
+/// [`write_message`] without flushing: for several at once, then a flush
+/// (on a deflated stream, each flush costs bytes).
+pub fn write_message_unflushed<T: Serialize>(
+    writer: &mut impl Write,
+    message: &T,
+) -> io::Result<()> {
     let bytes = postcard::to_stdvec(message).map_err(io::Error::other)?;
     writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    writer.write_all(&bytes)?;
-    writer.flush()
+    writer.write_all(&bytes)
 }
 
 /// Read one length-prefixed message.
@@ -1682,5 +1763,65 @@ mod tests {
         let new = r#"{"cmd":"attach","version":1,"app_version":"0","extensions":["status"]}"#;
         let Hello::Attach { extensions, .. } = serde_json::from_str(new).unwrap();
         assert_eq!(extensions, ["status"]);
+    }
+}
+
+#[cfg(test)]
+mod deflate_tests {
+    use std::io::Write;
+
+    use super::*;
+
+    /// What a connection gives: what was sent so far, and no more. Asked
+    /// for more, it fails the test: a reader that has a message's bytes
+    /// must give them without waiting for the next.
+    struct Sent {
+        flushes: std::collections::VecDeque<Vec<u8>>,
+        chunk: usize,
+    }
+
+    impl Read for Sent {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let Some(front) = self.flushes.front_mut() else {
+                panic!("waited for more, with a message's bytes in hand")
+            };
+            let n = front.len().min(out.len()).min(self.chunk);
+            out[..n].copy_from_slice(&front[..n]);
+            front.drain(..n);
+            if front.is_empty() {
+                self.flushes.pop_front();
+            }
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn each_message_arrives_without_waiting_for_the_next() {
+        let messages = [
+            ServerMessage::Pong { id: 1 },
+            ServerMessage::Notify {
+                title: "t".into(),
+                body: "screen ".repeat(30_000),
+                window: None,
+                pane: None,
+            },
+            ServerMessage::Sync { seq: 2 },
+            ServerMessage::Pong { id: 3 },
+        ];
+        for chunk in [1, 7, 64 * 1024] {
+            // Each message flushed on its own, as the server does when none wait.
+            let mut flushes = std::collections::VecDeque::new();
+            let mut out = deflating(Vec::new());
+            for message in &messages {
+                write_message_unflushed(&mut out, message).unwrap();
+                out.flush().unwrap();
+                flushes.push_back(std::mem::take(out.get_mut()));
+            }
+            let mut reader = inflating(Sent { flushes, chunk });
+            for message in &messages {
+                let got: ServerMessage = read_message(&mut reader).unwrap();
+                assert_eq!(format!("{got:?}"), format!("{message:?}"), "chunk {chunk}");
+            }
+        }
     }
 }

@@ -228,6 +228,7 @@ name = "artty-core"
 version = "0.1.0"
 dependencies = [
  "artty-vt",
+ "flate2",
  "libc",
  "log",
  "postcard",
