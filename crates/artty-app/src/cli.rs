@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use artty_core::SessionId;
 use artty_core::control::{
     AgentState, ApprovalInfo, AskInfo, AskState, HookEvent, ReadSource, Request, Response,
-    SESSION_ENV, SOCKET_ENV, SplitDirection, ThreadEntry, ThreadItem, live_sockets,
+    SESSION_ENV, SOCKET_ENV, SplitDirection, ThreadEntry, ThreadItem,
 };
 use artty_core::protocol::QueueKind;
 use serde_json::{Value, json};
@@ -808,7 +808,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 return artty_server::run().map(|()| 0).map_err(|err| format!("server: {err}"));
             },
             Some("status") => Request::ServerStatus,
-            Some("stop") => Request::StopServer,
+            Some("stop") => return stop_server(),
             Some("restart") => {
                 let exe = std::env::current_exe().map_err(|err| err.to_string())?;
                 let keep = switches.contains("keep-running");
@@ -1591,12 +1591,13 @@ pub(crate) fn socket() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os(SOCKET_ENV) {
         return Ok(PathBuf::from(path));
     }
+    // This server only, never another found running: a command meant for
+    // one (`server stop`) mustn't reach a different one.
     let path = artty_core::control::server_socket_path();
-    if UnixStream::connect(&path).is_ok() {
-        return Ok(path);
+    match UnixStream::connect(&path) {
+        Ok(_) => Ok(path),
+        Err(_) => Err(format!("artty is not running (no server at {})", path.display())),
     }
-    // An app from before the server existed.
-    live_sockets().into_iter().next().ok_or_else(|| "artty is not running".to_owned())
 }
 
 /// Wait for an ask's reply, for at most `timeout_secs`.
@@ -1753,6 +1754,33 @@ pub(crate) fn send(request: &Request, timeout: Option<Duration>) -> Result<Respo
         return Err(format!("{CLOSED} (stopped, or restarted)"));
     }
     serde_json::from_str(&reply).map_err(|err| format!("bad reply: {err}"))
+}
+
+/// `artty server stop`: says which server it stopped, and what ended with it.
+fn stop_server() -> Result<i32, String> {
+    let path = socket()?;
+    let info = match send(&Request::ServerStatus, Some(Duration::from_secs(10)))? {
+        Response::Server { info } => info,
+        Response::Error { message } => return Err(message),
+        _ => return Err("unexpected answer".to_owned()),
+    };
+    match send(&Request::StopServer, Some(Duration::from_secs(10)))? {
+        Response::Ok => {
+            let panes = match info.panes {
+                1 => "1 pane".to_owned(),
+                n => format!("{n} panes"),
+            };
+            println!(
+                "Stopped the artty server at {} (pid {}, up {}): its {panes} ended.",
+                path.display(),
+                info.pid,
+                duration(info.uptime_secs),
+            );
+            Ok(0)
+        },
+        Response::Error { message } => Err(message),
+        _ => Err("unexpected answer".to_owned()),
+    }
 }
 
 /// `artty guide`: the guide for agents working with other agents; `install`

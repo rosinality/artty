@@ -17,14 +17,6 @@ pub const SESSION_ENV: &str = "ARTTY_SESSION_ID";
 /// Longest socket path macOS accepts (`sun_path` is 104 bytes with the NUL).
 const MAX_SOCKET_PATH: usize = 103;
 
-/// Directories that may hold artty sockets: the user's temp directory, or
-/// `/tmp` when that path would be too long for a socket.
-fn socket_dirs() -> Vec<PathBuf> {
-    let temp = std::env::temp_dir();
-    let fallback = PathBuf::from("/tmp");
-    if temp == fallback { vec![temp] } else { vec![temp, fallback] }
-}
-
 /// A directory only this user can use, for the server's socket and what
 /// panes run (the `artty` command, shell integration). macOS's temporary
 /// directory is the user's own; elsewhere `/tmp` is everyone's, so it's
@@ -100,36 +92,6 @@ pub fn server_socket_path() -> PathBuf {
     } else {
         PathBuf::from(format!("/tmp/artty-server-{uid}.sock"))
     }
-}
-
-/// Socket path for the app process `pid`.
-pub fn socket_path(pid: u32) -> PathBuf {
-    let name = format!("artty-{pid}.sock");
-    let path = std::env::temp_dir().join(&name);
-    if path.as_os_str().len() <= MAX_SOCKET_PATH { path } else { PathBuf::from("/tmp").join(name) }
-}
-
-/// Sockets of running artty instances, most recently started first.
-pub fn live_sockets() -> Vec<PathBuf> {
-    let mut sockets: Vec<_> = socket_dirs()
-        .into_iter()
-        .filter_map(|dir| std::fs::read_dir(dir).ok())
-        .flatten()
-        .flatten()
-        .filter(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("artty-") && name.ends_with(".sock")
-        })
-        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.path())))
-        .collect();
-    sockets.sort();
-    sockets
-        .into_iter()
-        .rev()
-        .map(|(_, path)| path)
-        .filter(|path| std::os::unix::net::UnixStream::connect(path).is_ok())
-        .collect()
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1075,11 +1037,6 @@ pub struct TabInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn socket_paths_fit() {
-        assert!(socket_path(u32::MAX).as_os_str().len() <= MAX_SOCKET_PATH);
-    }
 
     #[test]
     fn wire_format() {
