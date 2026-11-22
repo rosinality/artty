@@ -15,8 +15,8 @@ pub const NOT_INSTALLED: &str = "artty isn't installed there";
 /// A started connection: its process, its two ends, and the greeting.
 pub struct Opened {
     pub child: std::process::Child,
-    /// The server's messages after its greeting (inflated, when it
-    /// deflates them: see `extension::DEFLATE`).
+    /// The server's messages after its greeting (decompressed, when it
+    /// compresses them: see `protocol::Compression`).
     pub reader: Box<dyn std::io::Read + Send>,
     pub writer: std::process::ChildStdin,
     pub welcome: ServerMessage,
@@ -354,10 +354,10 @@ pub fn open_counting(
     let hello = serde_json::to_string(&Hello::Attach {
         version: crate::protocol::protocol_version(),
         app_version: env!("CARGO_PKG_VERSION").to_owned(),
-        // And deflate: over a network, as not every sshd compresses.
+        // And compression: over a network, as not every sshd compresses.
         extensions: crate::protocol::ServerExtension::KINDS
             .iter()
-            .chain([&crate::protocol::extension::DEFLATE])
+            .chain(crate::protocol::Compression::ASK)
             .map(|&k| k.into())
             .collect(),
     })
@@ -367,7 +367,7 @@ pub fn open_counting(
         .and_then(|()| writer.flush())
         .and_then(|()| read_message::<ServerMessage>(&mut reader));
     // In this protocol, what it supports comes next; and from there on,
-    // deflated when it said so (which it does only when asked).
+    // compressed when it said so (which it does only when asked).
     let ours = |w: &ServerMessage| matches!(w, ServerMessage::Welcome { version, .. } if *version == crate::protocol::protocol_version());
     let greeting = welcome.and_then(|welcome| match ours(&welcome) {
         true => read_message::<ServerMessage>(&mut reader).map(|e| (welcome, Some(e))),
@@ -376,10 +376,15 @@ pub fn open_counting(
     greeted.store(true, std::sync::atomic::Ordering::SeqCst);
     match greeting {
         Ok((welcome, extensions)) => {
-            let deflated = extensions.as_ref().is_some_and(crate::protocol::deflates_after);
-            let reader: Box<dyn std::io::Read + Send> = match deflated {
-                true => Box::new(crate::protocol::inflating(reader)),
-                false => Box::new(reader),
+            let reader: Box<dyn std::io::Read + Send> = match extensions
+                .as_ref()
+                .and_then(crate::protocol::compression_after)
+            {
+                Some(compression) => match crate::protocol::decompressing(reader, compression) {
+                    Ok(reader) => reader,
+                    Err(err) => return Err(format!("couldn't decompress: {err}")),
+                },
+                None => Box::new(reader),
             };
             Ok(Opened { child, reader, writer, welcome, extensions })
         },

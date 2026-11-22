@@ -1155,18 +1155,82 @@ pub mod extension {
     /// Server → app, the connection itself: what the server sends after
     /// an `Extensions` listing this is one deflate stream (flushed as it
     /// sends), until the connection ends. Apps ask for it over a network,
-    /// as not every sshd compresses (screens shrink 4-30x); see
-    /// [`super::deflates_after`].
+    /// as not every sshd compresses (screens shrink about 4x); see
+    /// [`super::Compression`].
     pub const DEFLATE: &str = "deflate";
+    /// As [`DEFLATE`], in zstd (level 3): about 30% smaller on floods of
+    /// text, and far cheaper for the server. Chosen over deflate when an
+    /// app asks for both.
+    pub const ZSTD: &str = "zstd";
 }
 
-/// Whether, having read `message` from a server, the rest comes deflated
-/// ([`extension::DEFLATE`]): then read it through [`inflating`].
-pub fn deflates_after(message: &ServerMessage) -> bool {
-    matches!(message, ServerMessage::Extensions { kinds } if kinds.iter().any(|k| k == extension::DEFLATE))
+/// How a server's messages come after its `Extensions`, when it says so
+/// there ([`extension::DEFLATE`], [`extension::ZSTD`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compression {
+    Zstd,
+    Deflate,
 }
 
-/// A server's messages after [`deflates_after`], from `reader`.
+impl Compression {
+    /// What an app reaching a server over a network asks for (in its
+    /// `Hello`), the best first.
+    pub const ASK: &[&str] = &[extension::ZSTD, extension::DEFLATE];
+
+    /// The server's choice: the best of what the app asked for.
+    pub fn choose(asked: &[String]) -> Option<Self> {
+        let has = |kind: &str| asked.iter().any(|k| k == kind);
+        if has(extension::ZSTD) {
+            Some(Self::Zstd)
+        } else if has(extension::DEFLATE) {
+            Some(Self::Deflate)
+        } else {
+            None
+        }
+    }
+
+    /// Its kind, as listed.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::Zstd => extension::ZSTD,
+            Self::Deflate => extension::DEFLATE,
+        }
+    }
+}
+
+/// Having read `message` from a server: how the rest comes, if
+/// compressed (then read it through [`decompressing`]).
+pub fn compression_after(message: &ServerMessage) -> Option<Compression> {
+    let ServerMessage::Extensions { kinds } = message else { return None };
+    Compression::choose(kinds)
+}
+
+/// A server's messages after [`compression_after`] said `compression`.
+pub fn decompressing<R: Read + Send + 'static>(
+    reader: R,
+    compression: Compression,
+) -> io::Result<Box<dyn Read + Send>> {
+    Ok(match compression {
+        // (zstd's reader gives what it has decompressed before reading
+        // more, as a live stream needs; see `Inflating` for deflate.)
+        Compression::Zstd => Box::new(zstd::stream::read::Decoder::new(reader)?),
+        Compression::Deflate => Box::new(inflating(reader)),
+    })
+}
+
+/// The stream an app reads, compressed from here on, flushed when the
+/// writer is.
+pub fn compressing<W: Write + Send + 'static>(
+    writer: W,
+    compression: Compression,
+) -> io::Result<Box<dyn Write + Send>> {
+    Ok(match compression {
+        Compression::Zstd => Box::new(zstd::stream::write::Encoder::new(writer, 3)?.auto_finish()),
+        Compression::Deflate => Box::new(deflating(writer)),
+    })
+}
+
+/// A deflate stream, from `reader` (see [`decompressing`]).
 pub fn inflating<R: Read>(reader: R) -> Inflating<R> {
     Inflating {
         inner: reader,
@@ -1221,7 +1285,7 @@ impl<R: Read> Read for Inflating<R> {
     }
 }
 
-/// The stream an app reads, deflated from here on ([`extension::DEFLATE`]).
+/// A deflate stream, to `writer` (see [`compressing`]).
 pub fn deflating<W: Write>(writer: W) -> flate2::write::DeflateEncoder<W> {
     flate2::write::DeflateEncoder::new(writer, flate2::Compression::default())
 }
@@ -1767,7 +1831,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod deflate_tests {
+mod compression_tests {
     use std::io::Write;
 
     use super::*;
@@ -1808,20 +1872,54 @@ mod deflate_tests {
             ServerMessage::Sync { seq: 2 },
             ServerMessage::Pong { id: 3 },
         ];
-        for chunk in [1, 7, 64 * 1024] {
-            // Each message flushed on its own, as the server does when none wait.
-            let mut flushes = std::collections::VecDeque::new();
-            let mut out = deflating(Vec::new());
-            for message in &messages {
-                write_message_unflushed(&mut out, message).unwrap();
-                out.flush().unwrap();
-                flushes.push_back(std::mem::take(out.get_mut()));
-            }
-            let mut reader = inflating(Sent { flushes, chunk });
-            for message in &messages {
-                let got: ServerMessage = read_message(&mut reader).unwrap();
-                assert_eq!(format!("{got:?}"), format!("{message:?}"), "chunk {chunk}");
+        for compression in [Compression::Deflate, Compression::Zstd] {
+            for chunk in [1, 7, 64 * 1024] {
+                // Each message flushed on its own, as the server does when
+                // none wait: what each flush wrote, kept apart.
+                let flushed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+                let mut out = compressing(Shared(flushed.clone()), compression).unwrap();
+                let mut flushes = std::collections::VecDeque::new();
+                for message in &messages {
+                    write_message_unflushed(&mut out, message).unwrap();
+                    out.flush().unwrap();
+                    flushes.push_back(std::mem::take(&mut *flushed.lock().unwrap()));
+                }
+                let mut reader = decompressing(Sent { flushes, chunk }, compression).unwrap();
+                for message in &messages {
+                    let got: ServerMessage = read_message(&mut reader).unwrap();
+                    assert_eq!(
+                        format!("{got:?}"),
+                        format!("{message:?}"),
+                        "{compression:?} {chunk}"
+                    );
+                }
             }
         }
+    }
+
+    /// A writer whose bytes a test can take as they come.
+    struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_best_compression_asked_for_is_chosen() {
+        let kinds = |k: &[&str]| k.iter().map(|&k| k.to_owned()).collect::<Vec<_>>();
+        assert_eq!(Compression::choose(&kinds(Compression::ASK)), Some(Compression::Zstd));
+        assert_eq!(Compression::choose(&kinds(&["status", "deflate"])), Some(Compression::Deflate));
+        assert_eq!(Compression::choose(&kinds(&["status"])), None);
+        // What a server says it chose, read back.
+        let told = ServerMessage::Extensions { kinds: kinds(&["status", "zstd"]) };
+        assert_eq!(compression_after(&told), Some(Compression::Zstd));
+        assert_eq!(compression_after(&ServerMessage::Pong { id: 1 }), None);
     }
 }

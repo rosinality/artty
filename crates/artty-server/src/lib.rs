@@ -342,19 +342,19 @@ fn serve_app(
 }
 
 /// Write `messages` to an app as they come, flushing when none are
-/// waiting; after an `Extensions` turning on deflate (which it asked for),
-/// through deflate.
+/// waiting; after an `Extensions` turning on compression (which it asked
+/// for), compressed.
 fn send_to_app(writer: UnixStream, messages: mpsc::Receiver<ServerMessage>) -> io::Result<()> {
-    use artty_core::protocol::{deflates_after, deflating, write_message_unflushed};
+    use artty_core::protocol::{compressing, compression_after, write_message_unflushed};
     let mut out: Box<dyn Write> = Box::new(writer.try_clone()?);
     let mut plain = true;
     while let Ok(first) = messages.recv() {
         let mut next = Some(first);
         while let Some(message) = next.take() {
             write_message_unflushed(&mut out, &message)?;
-            if plain && deflates_after(&message) {
+            if plain && let Some(compression) = compression_after(&message) {
                 out.flush()?;
-                out = Box::new(deflating(writer.try_clone()?));
+                out = compressing(writer.try_clone()?, compression)?;
                 plain = false;
             }
             next = messages.try_recv().ok();
@@ -564,69 +564,82 @@ pub fn log_path() -> Option<PathBuf> {
 mod tests {
     use std::io::Read;
 
-    use artty_core::protocol::{ServerMessage, deflates_after, extension, inflating, read_message};
+    use artty_core::protocol::{
+        Compression, ServerMessage, compression_after, decompressing, read_message,
+    };
 
     use super::*;
 
     /// What an app reads: messages as sent, the ones after an `Extensions`
-    /// turning on deflate through it, however they're batched.
+    /// turning on compression through it, however they're batched.
     #[test]
-    fn messages_after_deflate_is_on_come_deflated() {
-        let (ours, theirs) = UnixStream::pair().unwrap();
-        let (tx, rx) = mpsc::channel();
-        let writer = std::thread::spawn(move || send_to_app(ours, rx));
-        let big = ServerMessage::Notify {
-            title: "t".into(),
-            body: "screen ".repeat(20_000),
-            window: None,
-            pane: None,
-        };
-        let sent = vec![
-            ServerMessage::Pong { id: 1 },
-            ServerMessage::Extensions { kinds: vec!["status".into(), extension::DEFLATE.into()] },
-            ServerMessage::Pong { id: 2 },
-            big.clone(),
-            ServerMessage::Sync { seq: 3 },
-        ];
-        for message in &sent {
-            tx.send(message.clone()).unwrap();
-        }
-        // Later, one at a time: each must arrive without the next (flushed).
-        let mut reader: Box<dyn Read + Send> = Box::new(theirs.try_clone().unwrap());
-        let mut got = Vec::new();
-        for _ in 0..sent.len() {
-            let message: ServerMessage = read_message(&mut reader).unwrap();
-            if deflates_after(&message) {
-                reader = Box::new(inflating(reader));
+    fn messages_after_compression_is_on_come_compressed() {
+        for compression in [Compression::Zstd, Compression::Deflate] {
+            let (ours, theirs) = UnixStream::pair().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let writer = std::thread::spawn(move || send_to_app(ours, rx));
+            let big = ServerMessage::Notify {
+                title: "t".into(),
+                body: "screen ".repeat(20_000),
+                window: None,
+                pane: None,
+            };
+            let sent = vec![
+                ServerMessage::Pong { id: 1 },
+                ServerMessage::Extensions {
+                    kinds: vec!["status".into(), compression.kind().into()],
+                },
+                ServerMessage::Pong { id: 2 },
+                big.clone(),
+                ServerMessage::Sync { seq: 3 },
+            ];
+            for message in &sent {
+                tx.send(message.clone()).unwrap();
             }
-            got.push(format!("{message:?}"));
+            let mut reader: Box<dyn Read + Send> = Box::new(theirs.try_clone().unwrap());
+            let mut got = Vec::new();
+            for _ in 0..sent.len() {
+                let message: ServerMessage = read_message(&mut reader).unwrap();
+                if let Some(compression) = compression_after(&message) {
+                    reader = decompressing(reader, compression).unwrap();
+                }
+                got.push(format!("{message:?}"));
+            }
+            // Later, one at a time: each arrives without the next (flushed).
+            tx.send(ServerMessage::Pong { id: 4 }).unwrap();
+            let last: ServerMessage = read_message(&mut reader).unwrap();
+            assert_eq!(format!("{last:?}"), format!("{:?}", ServerMessage::Pong { id: 4 }));
+            assert_eq!(got, sent.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>());
+            drop(tx);
+            writer.join().unwrap().unwrap();
         }
-        tx.send(ServerMessage::Pong { id: 4 }).unwrap();
-        let last: ServerMessage = read_message(&mut reader).unwrap();
-        assert_eq!(format!("{last:?}"), format!("{:?}", ServerMessage::Pong { id: 4 }));
-        assert_eq!(got, sent.iter().map(|m| format!("{m:?}")).collect::<Vec<_>>());
-        drop(tx);
-        writer.join().unwrap().unwrap();
     }
 
     #[test]
-    fn deflated_screens_are_smaller() {
-        let (ours, mut theirs) = UnixStream::pair().unwrap();
-        let (tx, rx) = mpsc::channel();
-        let writer = std::thread::spawn(move || send_to_app(ours, rx));
-        tx.send(ServerMessage::Extensions { kinds: vec![extension::DEFLATE.into()] }).unwrap();
-        let body = "the quick brown fox jumps over the lazy dog ".repeat(2_000);
-        tx.send(ServerMessage::Notify {
-            title: "t".into(),
-            body: body.clone(),
-            window: None,
-            pane: None,
-        })
-        .unwrap();
-        drop(tx);
-        writer.join().unwrap().unwrap();
-        let mut raw = Vec::new();
-        theirs.read_to_end(&mut raw).unwrap();
-        assert!(raw.len() < body.len() / 10, "{} bytes for {}", raw.len(), body.len());
+    fn compressed_screens_are_smaller() {
+        for compression in [Compression::Zstd, Compression::Deflate] {
+            let (ours, mut theirs) = UnixStream::pair().unwrap();
+            let (tx, rx) = mpsc::channel();
+            let writer = std::thread::spawn(move || send_to_app(ours, rx));
+            tx.send(ServerMessage::Extensions { kinds: vec![compression.kind().into()] }).unwrap();
+            let body = "the quick brown fox jumps over the lazy dog ".repeat(2_000);
+            let notify = ServerMessage::Notify {
+                title: "t".into(),
+                body: body.clone(),
+                window: None,
+                pane: None,
+            };
+            tx.send(notify).unwrap();
+            drop(tx);
+            writer.join().unwrap().unwrap();
+            let mut raw = Vec::new();
+            theirs.read_to_end(&mut raw).unwrap();
+            assert!(
+                raw.len() < body.len() / 10,
+                "{compression:?}: {} bytes for {}",
+                raw.len(),
+                body.len()
+            );
+        }
     }
 }

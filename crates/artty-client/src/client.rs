@@ -178,12 +178,12 @@ impl Client {
         extensions: &[&str],
     ) -> Result<(Client, mpsc::Receiver<Event>), StartError> {
         let Link { mut reader, mut writer, remote, keep } = link;
-        // Over a network, deflated too (not every sshd compresses).
-        let deflate = remote.then_some(artty_core::protocol::extension::DEFLATE);
+        // Over a network, compressed too (not every sshd compresses).
+        let compress = if remote { artty_core::protocol::Compression::ASK } else { &[] };
         let hello = Hello::Attach {
             version: protocol_version(),
             app_version: app_version.to_owned(),
-            extensions: extensions.iter().copied().chain(deflate).map(str::to_owned).collect(),
+            extensions: extensions.iter().chain(compress).map(|&k| k.to_owned()).collect(),
         };
         let hello = serde_json::to_string(&hello).map_err(|err| err.to_string())?;
         writer
@@ -202,8 +202,9 @@ impl Client {
         };
         let server_extensions = match read_message::<ServerMessage>(&mut reader) {
             Ok(message @ ServerMessage::Extensions { .. }) => {
-                if artty_core::protocol::deflates_after(&message) {
-                    reader = Box::new(artty_core::protocol::inflating(reader));
+                if let Some(compression) = artty_core::protocol::compression_after(&message) {
+                    reader = artty_core::protocol::decompressing(reader, compression)
+                        .map_err(|err| format!("couldn't decompress: {err}"))?;
                 }
                 let ServerMessage::Extensions { kinds } = message else { unreachable!() };
                 kinds

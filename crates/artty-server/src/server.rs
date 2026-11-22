@@ -1664,11 +1664,10 @@ impl Server {
                     .chain(artty_core::protocol::CLIENT_KINDS)
                     .map(|&k| k.to_owned())
                     .collect();
-                // Deflated from here on, when it asked (its writer switches
-                // after sending this: see `serve_app`).
-                let deflate = artty_core::protocol::extension::DEFLATE;
-                if extensions.iter().any(|k| k == deflate) {
-                    kinds.push(deflate.to_owned());
+                // Compressed from here on, the best way it asked for (its
+                // writer switches after sending this: see `send_to_app`).
+                if let Some(compression) = artty_core::protocol::Compression::choose(&extensions) {
+                    kinds.push(compression.kind().to_owned());
                 }
                 let _ = tx.send(ServerMessage::Extensions { kinds });
                 self.clients.insert(
