@@ -139,14 +139,20 @@ pub fn paint(
     let PaintState { focused, cursor_visible, marked_text, fade, link, flash } = state;
     let faded = |color: Hsla| Hsla { a: color.a * (1. - fade), ..color };
 
-    for (index, line) in frame.lines.iter().enumerate() {
-        for rect in line.backgrounds.iter().chain(&line.matches) {
-            window.paint_quad(fill(
-                metrics.cell_bounds(origin, index, rect.column, rect.width),
-                faded(hsla(rect.color)),
-            ));
+    // In a layer, quads skip GPUI's per-primitive ordering, which with one
+    // per cell (a full-screen color animation) was most of the frame. They
+    // share one order, so they're drawn as painted (the scene's sort is
+    // stable): search matches over backgrounds; all that follows is above.
+    window.paint_layer(bounds, |window| {
+        for (index, line) in frame.lines.iter().enumerate() {
+            for rect in line.backgrounds.iter().chain(&line.matches) {
+                window.paint_quad(fill(
+                    metrics.cell_bounds(origin, index, rect.column, rect.width),
+                    faded(hsla(rect.color)),
+                ));
+            }
         }
-    }
+    });
     paint_images(origin, frame, metrics, window, cx);
     for (index, line) in frame.lines.iter().enumerate() {
         for rect in &line.selection {

@@ -496,6 +496,12 @@ pub struct WindowView {
     folded_servers: HashSet<ServerId>,
     _tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
+    /// The sidebar, a view of its own so a frame that only changes a
+    /// terminal reuses it (see [`SidebarView`]).
+    sidebar_view: gpui::Entity<SidebarView>,
+    /// Notified when panes shown here have new output: redraws the window
+    /// without notifying this view, so the sidebar stays as it was.
+    repaint: gpui::Entity<Repaint>,
 }
 
 fn config_modified() -> Option<SystemTime> {
@@ -565,7 +571,16 @@ impl WindowView {
         let sidebar = (config.sidebar_width as f32).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         let grouped = config.sidebar_by_agent.then(agent_sidebar::Grouped::default);
         let past_open: HashSet<String> = config.sidebar_past_open.iter().cloned().collect();
+        let this = cx.entity();
+        let sidebar_view = cx.new(|cx| SidebarView {
+            parent: this.downgrade(),
+            // Anything that notifies the window may change the sidebar.
+            _parent_changed: cx.observe(&this, |_, _, cx| cx.notify()),
+        });
+        let repaint = cx.new(|_| Repaint);
         Self {
+            sidebar_view,
+            repaint,
             focus,
             theme: Arc::new(config.theme()),
             metrics,
@@ -4189,9 +4204,41 @@ struct PaneView {
     flash: f32,
 }
 
+/// The sidebar of a [`WindowView`], built by it. Cached: GPUI reuses its
+/// last layout and paint until it's notified, which it is whenever the window
+/// view is, but not when only a pane's output changed (that notifies
+/// [`Repaint`]). With many tabs, laying it out again every frame of a
+/// running command was most of the frame.
+pub struct SidebarView {
+    parent: gpui::WeakEntity<WindowView>,
+    _parent_changed: Subscription,
+}
+
+impl Render for SidebarView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        match self.parent.upgrade() {
+            Some(parent) => parent.update(cx, |view, cx| view.sidebar(cx).into_any_element()),
+            None => div().into_any_element(),
+        }
+    }
+}
+
+/// See [`WindowView::repaint`].
+pub struct Repaint;
+
+impl WindowView {
+    /// To notify when panes shown here have new output: the window draws
+    /// again, its sidebar as it was.
+    pub fn repaint(&self) -> gpui::Entity<Repaint> {
+        self.repaint.clone()
+    }
+}
+
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         flush_detached(cx);
+        // Read so that notifying it redraws this window.
+        self.repaint.read(cx);
         // A light theme: the app's own colors too.
         crate::chrome::follow(self.theme.background);
         if self.reload_config {
@@ -4494,7 +4541,13 @@ impl Render for WindowView {
             .size_full()
             .bg(tint)
             .font_family(".SystemUIFont")
-            .when(!self.sidebar_hidden, |d| d.child(self.sidebar(cx)))
+            .when(!self.sidebar_hidden, |d| {
+                let size = gpui::StyleRefinement::default()
+                    .w(px(self.sidebar_open_width()))
+                    .h_full()
+                    .flex_none();
+                d.child(gpui::AnyView::from(self.sidebar_view.clone()).cached(size))
+            })
             .child(
                 div()
                     .flex()

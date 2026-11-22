@@ -868,7 +868,8 @@ fn refresh_pane(pane: PaneId, cx: &mut App) {
         cx.global::<Shared>().windows.values().filter_map(WeakEntity::upgrade).collect();
     for view in windows {
         if view.read(cx).shows(pane) {
-            view.update(cx, |_, cx| cx.notify());
+            // Not the view itself: its sidebar is kept (see `SidebarView`).
+            view.read(cx).repaint().update(cx, |_, cx| cx.notify());
         }
     }
 }
