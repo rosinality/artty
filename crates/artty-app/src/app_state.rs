@@ -2724,15 +2724,24 @@ mod tests {
             .iter()
             .filter_map(|m| if let ServerMessage::Sync { seq } = m { Some(*seq) } else { None })
             .collect();
-        assert_eq!(syncs, [1, 2], "two batches, then it waits");
+        // `yes` prints all it can: batches go until the window (bytes not
+        // yet acknowledged) is full, then it waits.
+        assert!(!syncs.is_empty() && syncs.iter().copied().eq(1..=syncs.len() as u64), "{syncs:?}");
         let after_last = got.iter().rposition(|m| matches!(m, ServerMessage::Sync { .. })).unwrap();
         assert!(!got[after_last..].iter().any(|m| matches!(m, ServerMessage::Frame { .. })));
+        let bytes: usize = got
+            .iter()
+            .filter(|m| matches!(m, ServerMessage::Frame { .. }))
+            .map(|m| postcard::to_stdvec(m).unwrap().len())
+            .sum();
+        assert!(bytes < 256 * 1024, "{bytes} bytes unacknowledged");
 
-        write_message(&mut writer, &ClientMessage::Ack { seq: 1 }).unwrap();
+        let last = *syncs.last().unwrap();
+        write_message(&mut writer, &ClientMessage::Ack { seq: last }).unwrap();
         write_message(&mut writer, &ClientMessage::Ping { id: 7 }).unwrap();
         let got = collect(Duration::from_millis(500));
         assert!(got.iter().any(|m| matches!(m, ServerMessage::Frame { .. })), "more after the Ack");
-        assert!(got.iter().any(|m| matches!(m, ServerMessage::Sync { seq: 3 })));
+        assert!(got.iter().any(|m| matches!(m, ServerMessage::Sync { seq } if *seq == last + 1)));
         assert!(got.iter().any(|m| matches!(m, ServerMessage::Pong { id: 7 })));
 
         write_message(&mut writer, &ClientMessage::Input { pane, bytes: vec![3] }).unwrap();

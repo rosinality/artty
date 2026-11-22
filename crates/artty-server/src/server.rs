@@ -39,9 +39,10 @@ use crate::{ClientId, Input, Peer};
 
 /// Each visible pane gets at most one screen update per frame at 120 Hz.
 const FRAME_INTERVAL: Duration = Duration::from_millis(8);
-/// Batches of screen updates an app may have unacknowledged; more wait, and
-/// it gets the newest screens once it catches up.
-const FRAMES_IN_FLIGHT: u64 = 2;
+/// Typed into within this long, a pane's screen updates go to that app even
+/// when its others wait for its link (see [`crate::flow`]): what was typed
+/// comes back first.
+const TYPED: Duration = Duration::from_secs(1);
 /// Used within this long, an app is the one its user is at: notifications go to it alone.
 const IN_USE: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -211,9 +212,12 @@ struct Client {
     status_sent: HashMap<WindowId, StatusLine>,
     /// Images it has (by id), so each is sent once.
     images_sent: HashSet<u64>,
-    /// Batches of screen updates sent, and acknowledged.
+    /// Batches of screen updates sent; and how many more may go before it
+    /// acknowledges those (more wait, and it gets the newest screens).
     batches_sent: u64,
-    batches_acked: u64,
+    flow: crate::flow::Flow,
+    /// The pane it last typed into, and when.
+    typed: Option<(PaneId, Instant)>,
     /// When it last said anything; and whether it pings (apps do, every
     /// few seconds), so its silence means it's gone.
     last_heard: Instant,
@@ -233,9 +237,34 @@ impl Client {
         self.extensions.iter().any(|k| k == kind)
     }
 
-    /// It's behind on screen updates: send it no more for now.
-    fn behind(&self) -> bool {
-        self.batches_sent - self.batches_acked >= FRAMES_IN_FLIGHT
+    /// Whether `pane`'s next screen update may go now: its link isn't full,
+    /// or it was just typed into there.
+    fn may_send(&self, pane: PaneId, now: Instant) -> bool {
+        self.flow.open()
+            || (self.flow.open_for_typed()
+                && self
+                    .typed
+                    .is_some_and(|(typed, at)| typed == pane && now.duration_since(at) < TYPED))
+    }
+}
+
+/// About how many bytes `message` takes on the wire, for the window of
+/// screen updates (see [`crate::flow`]); not encoding it twice.
+fn approx_size(message: &ServerMessage) -> usize {
+    match message {
+        ServerMessage::Frame { update, .. } => {
+            64 + update
+                .lines
+                .iter()
+                .map(|(_, line)| {
+                    let runs: usize = line.runs.iter().map(|run| 12 + run.text.len()).sum();
+                    let rects = line.backgrounds.len() + line.selection.len() + line.matches.len();
+                    8 + runs + 8 * rects + 12 * (line.images.len() + line.underlines.len())
+                })
+                .sum::<usize>()
+        },
+        ServerMessage::Image(image) => 64 + image.data.len(),
+        _ => 64,
     }
 }
 
@@ -1649,7 +1678,8 @@ impl Server {
                         status_sent: HashMap::new(),
                         images_sent: HashSet::new(),
                         batches_sent: 0,
-                        batches_acked: 0,
+                        flow: crate::flow::Flow::default(),
+                        typed: None,
                         last_heard: Instant::now(),
                         last_used: None,
                         pings: false,
@@ -1984,6 +2014,9 @@ impl Server {
             ClientMessage::Input { pane, bytes } => {
                 // Typed here: this app's user is at it.
                 self.drive_pane(client, pane);
+                if let Some(c) = self.clients.get_mut(&client) {
+                    c.typed = Some((pane, Instant::now()));
+                }
                 // A broadcasting tab gets it in every pane.
                 let targets = self
                     .place_of(pane)
@@ -2106,7 +2139,7 @@ impl Server {
             ClientMessage::ReopenClosedTab { window } => self.reopen_closed_tab(window),
             ClientMessage::Ack { seq } => {
                 if let Some(client) = self.clients.get_mut(&client) {
-                    client.batches_acked = seq.min(client.batches_sent);
+                    client.flow.acked(seq, Instant::now());
                 }
             },
             ClientMessage::Ping { id } => self.send(client, ServerMessage::Pong { id }),
@@ -3987,8 +4020,8 @@ impl Server {
             deadline = deadline.min(due);
         }
         // (One that's behind wakes the loop when its acknowledgment comes.)
-        for client in self.clients.values().filter(|c| !c.behind()) {
-            for pane in &client.dirty {
+        for client in self.clients.values() {
+            for pane in client.dirty.iter().filter(|&&pane| client.may_send(pane, now)) {
                 if let Some((_, sent)) = client.sent.get(pane) {
                     deadline = deadline.min(*sent + FRAME_INTERVAL);
                 }
@@ -4353,8 +4386,7 @@ impl Server {
                 // Forget panes no longer shown, so they get a full update if
                 // they come back.
                 client.sent.retain(|pane, _| visible.contains(pane));
-                let behind = client.behind();
-                for &pane in visible.iter().filter(|_| !behind) {
+                for &pane in visible.iter().filter(|&&pane| client.may_send(pane, now)) {
                     let due = match client.sent.get(&pane) {
                         None => true,
                         Some((_, at)) => {
@@ -4365,6 +4397,10 @@ impl Server {
                     if due {
                         frames.push(pane);
                     }
+                }
+                // What was typed comes back first.
+                if let Some((typed, _)) = client.typed {
+                    frames.sort_by_key(|&pane| pane != typed);
                 }
             }
             let mine: Vec<WindowId> = windows.iter().map(|(id, ..)| *id).collect();
@@ -4407,6 +4443,8 @@ impl Server {
             let client = self.clients.get_mut(&client_id).unwrap();
             if messages.iter().any(|m| matches!(m, ServerMessage::Frame { .. })) {
                 client.batches_sent += 1;
+                let bytes = messages.iter().map(approx_size).sum();
+                client.flow.sent(client.batches_sent, bytes, now);
                 messages.push(ServerMessage::Sync { seq: client.batches_sent });
             }
             if client.panes_sent != states {
