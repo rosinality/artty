@@ -38,6 +38,8 @@ mod agent_sidebar;
 mod agents_view;
 #[path = "ask_sheet.rs"]
 mod ask_sheet;
+#[path = "close_sheet.rs"]
+mod close_sheet;
 #[path = "compose.rs"]
 mod compose;
 #[path = "copy_mode.rs"]
@@ -443,6 +445,10 @@ pub struct WindowView {
     naming_new_workspace: bool,
     /// A workspace whose close button was clicked once; a second click closes it.
     closing_workspace: Option<WorkspaceId>,
+    /// A tab whose close button was clicked while something runs in it: by
+    /// its place in the sidebar and a pane of it (so a tab that moved meanwhile
+    /// isn't taken for it). It asks Yes or No in the button's place.
+    closing_tab: Option<(usize, PaneId)>,
     picker: Option<Picker>,
     /// The Activity view, when it's shown instead of the active tab.
     activity: Option<activity::Activity>,
@@ -476,6 +482,8 @@ pub struct WindowView {
     asks: Vec<ask_sheet::AskSheet>,
     /// A machine's login needing you, or why it couldn't connect.
     login: Option<login_sheet::Sheet>,
+    /// Asking before closing a tab or pane where something runs.
+    close_sheet: Option<close_sheet::CloseSheet>,
     /// The files drawer (⌘⇧E), when open.
     files: Option<files_drawer::Files>,
     /// The sidebar folded away (⌘B): the terminal takes its width.
@@ -629,6 +637,7 @@ impl WindowView {
             renaming: None,
             naming_new_workspace: false,
             closing_workspace: None,
+            closing_tab: None,
             picker: None,
             activity: None,
             agents: None,
@@ -645,6 +654,7 @@ impl WindowView {
             queue_always: None,
             asks: Vec::new(),
             login: None,
+            close_sheet: None,
             files: None,
             sidebar_hidden: false,
             sidebar_drag: None,
@@ -986,6 +996,37 @@ impl WindowView {
 
     fn pane_state<'a>(&self, pane: PaneId, cx: &'a App) -> Option<&'a PaneState> {
         cx.global::<Shared>().panes.get(&pane)
+    }
+
+    /// The panes of the tab at `index` in the sidebar.
+    fn tab_panes(&self, index: usize) -> Vec<PaneId> {
+        let Some(&(workspace, tab)) = self.places.get(index) else { return Vec::new() };
+        self.layout
+            .workspaces
+            .iter()
+            .find(|w| w.id == workspace)
+            .and_then(|w| w.tabs.get(tab))
+            .map_or_else(Vec::new, |tab| tab.root.panes())
+    }
+
+    /// Whether closing the tab at `index` would end something running.
+    fn tab_running(&self, index: usize, cx: &App) -> bool {
+        self.tab_panes(index)
+            .iter()
+            .any(|&pane| self.pane_state(pane, cx).is_some_and(PaneState::running))
+    }
+
+    /// Whether the tab at `index` asks Yes or No about closing.
+    fn tab_closing(&self, index: usize) -> bool {
+        self.closing_tab
+            .is_some_and(|(at, pane)| at == index && self.tab_panes(index).contains(&pane))
+    }
+
+    fn close_tab_at(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.closing_tab = None;
+        if let Some(&(workspace, tab)) = self.places.get(index) {
+            self.send(ClientMessage::CloseTab { workspace, tab }, cx);
+        }
     }
 
     /// A tab's name: what the user called it, or its focused pane's title.
@@ -1506,9 +1547,7 @@ impl WindowView {
             MenuTarget::Tab(index) => {
                 match (command, place(index)) {
                     (MenuCommand::RenameTab, _) => self.start_rename(index, cx),
-                    (MenuCommand::CloseTab, Some((workspace, tab))) => {
-                        self.send(ClientMessage::CloseTab { workspace, tab }, cx)
-                    },
+                    (MenuCommand::CloseTab, Some(_)) => self.close_tab_asking(index, cx),
                     (MenuCommand::TabToNewWorkspace, Some((workspace, tab))) => {
                         self.send(ClientMessage::TabToNewWorkspace { workspace, tab }, cx)
                     },
@@ -1590,7 +1629,7 @@ impl WindowView {
                 }
             },
             MenuCommand::ClearBuffer => self.send(ClientMessage::ClearBuffer { pane }, cx),
-            MenuCommand::ClosePane => self.send(ClientMessage::ClosePane { pane }, cx),
+            MenuCommand::ClosePane => self.close_pane_asking(pane, cx),
             _ => {},
         }
         cx.notify();
@@ -1775,6 +1814,9 @@ impl WindowView {
         }
         if self.asking() {
             self.ask_key(event, cx);
+            return;
+        }
+        if self.close_key(event, cx) {
             return;
         }
         if self.login_key(event, cx) {
@@ -2436,6 +2478,13 @@ impl WindowView {
         div()
             .id(("tab", index))
             .group(group)
+            // Moving away takes back a pending close.
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if !hovered && this.closing_tab.is_some_and(|(at, _)| at == index) {
+                    this.closing_tab = None;
+                    cx.notify();
+                }
+            }))
             // Its height, however many there are.
             .flex_none()
             .flex()
@@ -2589,6 +2638,7 @@ impl WindowView {
         cx: &Context<Self>,
     ) -> gpui::Div {
         let controls = label.is_some();
+        let closing = controls && self.tab_closing(index);
         div()
             .relative()
             .when(controls, |d| d.min_w(px(TAB_LABEL_WIDTH)))
@@ -2602,7 +2652,7 @@ impl WindowView {
             .text_color(ui(0xffffff70))
             .when_some(detail, |d, detail| {
                 d.child(Self::one_line(detail).min_w_0().pr(px(4.)).when(controls, |d| {
-                    d.opacity(if self.command_held { 0. } else { 1. })
+                    d.opacity(if self.command_held || closing { 0. } else { 1. })
                         .group_hover(group.clone(), |s| s.opacity(0.))
                 }))
             })
@@ -2617,36 +2667,91 @@ impl WindowView {
                         .items_center()
                         .text_xs()
                         .text_color(ui(0xffffff80))
-                        .opacity(if self.command_held { 1. } else { 0. })
+                        .opacity(if self.command_held && !closing { 1. } else { 0. })
                         .group_hover(group.clone(), |s| s.opacity(0.))
                         .child(label),
                 )
-                .child(
-                    // Spans the slot's height, so the button sits at its center.
-                    div().absolute().top_0().bottom_0().right_0().flex().items_center().child(
-                        div()
-                            .id(("close-tab", index))
-                            .opacity(0.)
-                            .group_hover(group.clone(), |s| s.opacity(1.))
-                            .flex()
-                            .size(px(18.))
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(4.))
-                            .text_size(px(13.))
-                            .line_height(px(18.))
-                            .text_color(ui(0xffffffa0))
-                            .hover(|d| d.bg(ui(0xffffff1f)).text_color(ui(0xffffffee)))
-                            .child("×")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(&(workspace, tab)) = this.places.get(index) {
-                                    this.send(ClientMessage::CloseTab { workspace, tab }, cx);
-                                }
-                                cx.stop_propagation();
-                            })),
-                    ),
-                )
+                .when(closing, |d| d.child(self.close_tab_question(index, cx)))
+                .when(!closing, |d| {
+                    d.child(
+                        // Spans the slot's height, so the button sits at its center.
+                        div().absolute().top_0().bottom_0().right_0().flex().items_center().child(
+                            div()
+                                .id(("close-tab", index))
+                                .opacity(0.)
+                                .group_hover(group.clone(), |s| s.opacity(1.))
+                                .flex()
+                                .size(px(18.))
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(4.))
+                                .text_size(px(13.))
+                                .line_height(px(18.))
+                                .text_color(ui(0xffffffa0))
+                                .hover(|d| d.bg(ui(0xffffff1f)).text_color(ui(0xffffffee)))
+                                .child("×")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    // Something running there: asked first.
+                                    match this.tab_panes(index).first() {
+                                        Some(&pane) if this.tab_running(index, cx) => {
+                                            this.closing_tab = Some((index, pane));
+                                            cx.notify();
+                                        },
+                                        _ => this.close_tab_at(index, cx),
+                                    }
+                                })),
+                        ),
+                    )
+                })
             })
+    }
+
+    /// In a tab's close button's place, while something runs in it: close
+    /// it (ending that), or not.
+    fn close_tab_question(&self, index: usize, cx: &Context<Self>) -> gpui::Div {
+        let button = |id: &'static str, text: &'static str| {
+            div()
+                .id((id, index))
+                .px(px(6.))
+                .h(px(18.))
+                .flex()
+                .items_center()
+                .rounded(px(4.))
+                .text_size(px(11.))
+                .line_height(px(18.))
+                .child(text)
+        };
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
+            .flex()
+            .items_center()
+            .gap(px(3.))
+            .child(
+                button("close-tab-yes", "Yes")
+                    .bg(ui(0xf7768eff))
+                    .text_color(gpui::white())
+                    .hover(|d| d.bg(ui(0xff8fa3ff)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.close_tab_at(index, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                button("close-tab-no", "No")
+                    .bg(ui(0xffffff24))
+                    .text_color(ui(0xffffffd0))
+                    .hover(|d| d.bg(ui(0xffffff38)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.closing_tab = None;
+                        cx.notify();
+                    })),
+            )
     }
 
     /// A server's header, with other machines' servers: its name, how its
@@ -4397,15 +4502,14 @@ impl Render for WindowView {
             .on_action(
                 cx.listener(|this, _: &PreviousWorkspace, _, cx| this.cycle_workspace(-1, cx)),
             )
+            // (Asking first when something runs there.)
             .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
                 if let Some(pane) = this.focused_id() {
-                    this.send(ClientMessage::ClosePane { pane }, cx);
+                    this.close_pane_asking(pane, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
-                if let Some(&(workspace, tab)) = this.places.get(this.active) {
-                    this.send(ClientMessage::CloseTab { workspace, tab }, cx);
-                }
+                this.close_tab_asking(this.active, cx);
             }))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| {
                 let next = (this.active + 1) % this.tabs.len().max(1);
@@ -4720,6 +4824,7 @@ impl Render for WindowView {
             .children(self.switcher_overlay(cx))
             .children(self.login_overlay(cx))
             .children(self.ask_overlay(cx))
+            .children(self.close_overlay(cx))
     }
 }
 

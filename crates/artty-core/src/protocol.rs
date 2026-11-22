@@ -849,6 +849,13 @@ pub struct PaneState {
 }
 
 impl PaneState {
+    /// Whether closing it would end something running: a command (a
+    /// build, an editor, ssh) or an agent; not a shell at its prompt.
+    pub fn running(&self) -> bool {
+        self.agent.is_some()
+            || matches!(self.info.status.as_str(), "running" | "working" | "waiting")
+    }
+
     /// What a sidebar row shows beside a tab's title: the command or agent
     /// (not its time or state; the icon tells that), an exit code, progress.
     /// Not what the title already says: shells put the running command in it.
@@ -1634,6 +1641,41 @@ mod tests {
             let unshifted = before.lines.iter().zip(&after.lines).filter(|(a, b)| a != b).count();
             assert!(lines.len() <= unshifted, "{before:?} -> {after:?}");
         }
+    }
+
+    #[test]
+    fn running_is_a_command_or_an_agent_not_a_shell() {
+        let state = |status: &str, agent: Option<&str>| PaneState {
+            info: TabInfo {
+                id: 1,
+                window: 1,
+                workspace: 1,
+                workspace_name: None,
+                tab: 1,
+                title: "t".into(),
+                active: true,
+                focused: true,
+                cwd: None,
+                process: Some("x".into()),
+                status: status.into(),
+                detail: None,
+                needs_attention: false,
+                shell_integration: true,
+                kitty_keyboard: false,
+            },
+            icon: String::new(),
+            progress: None,
+            agent: agent.map(str::to_owned),
+            ports: vec![],
+        };
+        // A shell at its prompt, after a command or not: nothing to end.
+        assert!(!state("idle", None).running());
+        assert!(!state("failed", None).running());
+        // A command, or an agent at any point (at its own prompt too).
+        assert!(state("running", None).running());
+        assert!(state("working", Some("claude")).running());
+        assert!(state("idle", Some("claude")).running());
+        assert!(state("done", Some("codex")).running());
     }
 
     #[test]
