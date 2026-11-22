@@ -348,7 +348,7 @@ fn client_config(resolved: &Resolved) -> Result<client::Config, String> {
 
 /// The algorithms to offer: russh's, as `Ciphers`, `KexAlgorithms`,
 /// `HostKeyAlgorithms` and `MACs` change them (a list; `+` to add, `-` to
-/// take away, `^` to put first), and compression if asked for.
+/// take away, `^` to put first), and compression unless told not to.
 fn preferred(resolved: &Resolved) -> Result<Preferred, String> {
     use russh::{cipher, compression, kex, mac};
     let defaults = Preferred::DEFAULT;
@@ -388,8 +388,12 @@ fn preferred(resolved: &Resolved) -> Result<Preferred, String> {
         |a| a.as_str(),
         "HostKeyAlgorithms",
     )?;
-    let compression: Vec<compression::Name> = if resolved.compression {
-        compression::ALL_COMPRESSION_ALGORITHMS.iter().map(|n| **n).collect()
+    // Unless told not to: screens are text and colors, and shrink 4-30x
+    // (OpenSSH's default is off; artty's own `ssh` asks for it too).
+    // The client's first that the server has is taken: zlib first (russh's
+    // list starts with none, which would always win), none when there's no zlib.
+    let compression: Vec<compression::Name> = if resolved.compression || !resolved.compression_set {
+        vec![compression::ZLIB_LEGACY, compression::ZLIB, compression::NONE]
     } else {
         vec![compression::NONE]
     };
@@ -822,5 +826,23 @@ mod tests {
         assert_eq!(p.cipher.iter().map(|c| c.as_ref()).collect::<Vec<_>>(), ["aes256-ctr"]);
         assert!(p.kex.iter().all(|k| !k.as_ref().starts_with("mlkem")));
         assert!(p.kex.iter().any(|k| k.as_ref().starts_with("ext-info")));
+    }
+
+    #[test]
+    fn compression_unless_told_not_to() {
+        let offered = |text: &str| {
+            let r = config(text).resolve("x", &Local::default());
+            preferred(&r)
+                .unwrap()
+                .compression
+                .iter()
+                .map(|c| c.as_ref().to_owned())
+                .collect::<Vec<_>>()
+        };
+        // zlib first: the first the server has is taken.
+        let zlib = ["zlib@openssh.com", "zlib", "none"];
+        assert_eq!(offered("Host x\n  User u\n"), zlib);
+        assert_eq!(offered("Host x\n  Compression yes\n"), zlib);
+        assert_eq!(offered("Host x\n  Compression no\n"), ["none"]);
     }
 }

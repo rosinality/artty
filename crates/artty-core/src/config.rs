@@ -206,10 +206,7 @@ impl ServerConfig {
         let destination = self.ssh.as_ref()?;
         let mut command = vec!["ssh".to_owned(), "-T".to_owned()];
         command.extend(shared_options());
-        command.extend(
-            // Screens are text and colors: they shrink well.
-            ["-o", "Compression=yes", "-o", "ConnectTimeout=10"].map(str::to_owned),
-        );
+        command.extend(["-o", "ConnectTimeout=10"].map(str::to_owned));
         command.extend([destination.clone(), remote.to_owned()]);
         Some(command)
     }
@@ -254,8 +251,11 @@ impl ServerConfig {
 
 /// Options for every ssh artty runs, besides where the shared connection's
 /// socket is.
-const SHARED: [&str; 5] = [
+const SHARED: [&str; 6] = [
     "BatchMode=yes",
+    // Screens are text and colors: they shrink well (4-30x). On the
+    // shared connection, as whichever command starts it sets it for all.
+    "Compression=yes",
     "ServerAliveInterval=15",
     "ServerAliveCountMax=3",
     "ControlMaster=auto",

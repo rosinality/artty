@@ -93,6 +93,9 @@ pub struct Resolved {
     /// Seconds.
     pub connect_timeout: Option<u32>,
     pub compression: bool,
+    /// Whether `Compression` was written at all (artty's own connections
+    /// compress unless it says no: see `ssh::login`).
+    pub compression_set: bool,
     /// As written: a list, or one starting with `+`, `-` or `^` (changing the defaults).
     pub ciphers: Option<String>,
     pub kex_algorithms: Option<String>,
@@ -664,6 +667,7 @@ impl Found {
             server_alive_count_max: self.number("serveralivecountmax").unwrap_or(3),
             connect_timeout: self.number("connecttimeout"),
             compression: self.flag("compression", false),
+            compression_set: self.first("compression").is_some(),
             ciphers: self.first("ciphers").map(str::to_owned),
             kex_algorithms: self.first("kexalgorithms").map(str::to_owned),
             host_key_algorithms: self.first("hostkeyalgorithms").map(str::to_owned),
