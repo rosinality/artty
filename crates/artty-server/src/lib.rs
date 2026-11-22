@@ -496,7 +496,7 @@ pub fn spawn(executable: &Path, env: &[(String, String)]) -> io::Result<()> {
         std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
     });
     let mut command = std::process::Command::new(&executable);
-    command
+    artty_core::remote::without_askpass(&mut command)
         .arg("server")
         .envs(env.iter().cloned())
         .current_dir(std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into()))

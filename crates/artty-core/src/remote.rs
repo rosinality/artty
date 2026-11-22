@@ -118,6 +118,24 @@ const ASKPASS_TOKEN: &str = "ARTTY_ASKPASS_TOKEN";
 const ASKPASS_NAME: &str = "ARTTY_ASKPASS_NAME";
 const ASKPASS_KEY: &str = "ARTTY_ASKPASS_KEY";
 
+/// Leave out of `command` what makes `artty` an askpass helper. A server
+/// started by a connection's command (`artty server --stdio` with none
+/// running) would otherwise take its one argument, `server`, for ssh's
+/// question, and ask it instead of starting; and pass it to every pane.
+pub fn without_askpass(command: &mut std::process::Command) -> &mut std::process::Command {
+    for name in [
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        ASKPASS_SOCKET,
+        ASKPASS_TOKEN,
+        ASKPASS_NAME,
+        ASKPASS_KEY,
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
 /// A question ssh asks, as the helper passes it to the app.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AskpassRequest {
