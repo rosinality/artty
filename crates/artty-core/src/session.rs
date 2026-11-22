@@ -176,6 +176,9 @@ impl Session {
             ("TERM_PROGRAM".to_owned(), "artty".to_owned()),
             ("TERM_PROGRAM_VERSION".to_owned(), env!("CARGO_PKG_VERSION").to_owned()),
         ]);
+        if let Some((name, locale)) = crate::locale::pane_env() {
+            env.insert(name.to_owned(), locale);
+        }
         env.extend(options.env);
         let pty_options = tty::Options {
             shell: options.command.map(|(program, args)| tty::Shell::new(program, args)),

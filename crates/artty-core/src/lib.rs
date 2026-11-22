@@ -12,6 +12,7 @@ pub mod guide;
 pub mod integration;
 pub mod keys;
 pub mod layout;
+mod locale;
 pub mod logging;
 pub mod mouse;
 pub mod pane;
