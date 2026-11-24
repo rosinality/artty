@@ -21,6 +21,7 @@ pub mod protocol;
 pub mod remote;
 mod session;
 mod shell;
+pub mod socket;
 mod state;
 pub mod status;
 mod theme;

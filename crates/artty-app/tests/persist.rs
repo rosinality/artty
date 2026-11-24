@@ -61,7 +61,8 @@ fn agent_panes(scratch: &Scratch) -> Vec<String> {
 #[test]
 fn a_hand_over_keeps_threads_and_asks_going() {
     let scratch = Scratch::new();
-    let pane = scratch.agent("8");
+    // Only the slow one is: the hand-over happens during it.
+    let pane = scratch.agent("8:slow");
     // Someone waiting for the reply: its connection goes with the old build.
     scratch.ask(&["--tab", &pane, "--timeout", "20", "warm up"]);
     let waiting = scratch
@@ -197,6 +198,14 @@ fn resumable(delay: &str) -> String {
     format!("[resume.fake]\nlatest = \"python3 {AGENT} {ARTTY} {delay}\"\n")
 }
 
+/// Wait for the server to have saved its tabs with `text` in them.
+fn saved(scratch: &Scratch, text: &str) {
+    let state = scratch.dir.join("state/artty/state.json");
+    wait_for("the tabs to be saved", || {
+        std::fs::read_to_string(&state).is_ok_and(|saved| saved.contains(text))
+    });
+}
+
 /// The one agent's pane, once it's (re)started.
 fn the_agent(scratch: &Scratch) -> String {
     wait_for("an agent", || agent_panes(scratch).len() == 1);
@@ -231,8 +240,8 @@ fn a_permission_request_keeps_its_answer() {
 fn a_crash_doesnt_send_an_ask_twice() {
     let mut scratch = Scratch::with_config(&resumable("0.3"));
     let pane = scratch.agent("6");
-    // The tabs are saved every few seconds.
-    std::thread::sleep(Duration::from_secs(6));
+    // The tabs are saved every few seconds: once its agent is.
+    saved(&scratch, "fake-session");
     let ask = stdout(&scratch.ask(&["--tab", &pane, "--no-wait", "only once"]));
     wait_for("the agent to take it", || ask_state(&scratch, &ask) == "running");
 

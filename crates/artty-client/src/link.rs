@@ -49,7 +49,9 @@ impl Link {
     pub fn socket(stream: UnixStream) -> Result<Link, String> {
         let writer = stream.try_clone().map_err(|err| err.to_string())?;
         Ok(Link {
-            reader: Box::new(stream.try_clone().map_err(|err| err.to_string())?),
+            reader: Box::new(artty_core::socket::Reader(
+                stream.try_clone().map_err(|err| err.to_string())?,
+            )),
             writer: Box::new(writer),
             remote: false,
             keep: Box::new(Shut(stream)),

@@ -197,7 +197,7 @@ impl Drop for RemoveOnDrop {
 /// One connection: a JSON control request, or an attached app.
 fn serve(stream: UnixStream, id: ClientId, tx: Arc<Inbox>) {
     let Ok(mut writer) = stream.try_clone() else { return };
-    let mut reader = BufReader::new(stream);
+    let mut reader = BufReader::new(artty_core::socket::Reader(stream));
     let mut line = String::new();
     loop {
         line.clear();
@@ -214,7 +214,7 @@ fn serve(stream: UnixStream, id: ClientId, tx: Arc<Inbox>) {
         let response = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
                 let (reply, answer) = mpsc::channel();
-                let peer = Peer { conn: id, pid: peer_pid(reader.get_ref()) };
+                let peer = Peer { conn: id, pid: peer_pid(reader.get_ref().get_ref()) };
                 if tx.send(Input::Control(peer, Box::new(request), reply)).is_err() {
                     return;
                 }
@@ -228,7 +228,7 @@ fn serve(stream: UnixStream, id: ClientId, tx: Arc<Inbox>) {
                             break Response::error("the server stopped");
                         },
                         Err(mpsc::RecvTimeoutError::Timeout) => {
-                            if !told && hung_up(reader.get_ref()) {
+                            if !told && hung_up(reader.get_ref().get_ref()) {
                                 told = true;
                                 let _ = tx.send(Input::ControlClosed(id));
                             }
@@ -310,14 +310,14 @@ fn hung_up(stream: &UnixStream) -> bool {
 
 /// An attached app: binary messages both ways until it disconnects.
 fn serve_app(
-    mut reader: BufReader<UnixStream>,
+    mut reader: BufReader<artty_core::socket::Reader>,
     writer: UnixStream,
     id: ClientId,
     extensions: Vec<String>,
     tx: Arc<Inbox>,
 ) {
     let (outgoing, messages) = mpsc::channel::<ServerMessage>();
-    let pid = peer_pid(reader.get_ref());
+    let pid = peer_pid(reader.get_ref().get_ref());
     if tx.send(Input::Connected(id, pid, outgoing, extensions)).is_err() {
         return;
     }
@@ -447,7 +447,7 @@ pub fn stdio_relay(executable: &Path) -> io::Result<()> {
     }
     let stream = UnixStream::connect(server_socket_path())?;
     let mut to_server = stream.try_clone()?;
-    let mut from_server = stream;
+    let mut from_server = artty_core::socket::Reader(stream);
     std::thread::spawn(move || {
         let _ = io::copy(&mut io::stdin().lock(), &mut to_server);
         // The app went away: let the server see it.

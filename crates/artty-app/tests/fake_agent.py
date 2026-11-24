@@ -9,7 +9,8 @@ prompt. The hook's decision answers it; so does "1" (yes: the hook is left
 running, and PostToolUse is reported) or "4" (no: the hook is ended, and the
 turn stops with no Stop, as Claude Code's does) typed at the prompt.
 
-Usage: fake_agent.py ARTTY [DELAY [TURNS]]  (DELAY: seconds a turn takes;
+Usage: fake_agent.py ARTTY [DELAY [TURNS]]  (DELAY: seconds a turn takes,
+or DELAY:PREFIX for only the messages starting with PREFIX, the rest 0.3;
 TURNS: quit after that many)
 """
 
@@ -25,7 +26,8 @@ import tty
 import uuid
 
 ARTTY = sys.argv[1]
-DELAY = float(sys.argv[2]) if len(sys.argv) > 2 else 0.3
+DELAY, _, SLOW = (sys.argv[2] if len(sys.argv) > 2 else "0.3").partition(":")
+DELAY = float(DELAY)
 TURNS = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
 
@@ -152,7 +154,7 @@ def turn(prompt):
             {"hook_event_name": "Stop", "prompt_id": prompt_id, "last_assistant_message": reply},
         )
         return
-    time.sleep(DELAY)
+    time.sleep(DELAY if prompt.startswith(SLOW) else 0.3)
     reply = "echo: " + prompt
     out(reply.replace("\n", "\r\n") + "\r\nfake> ")
     hook(

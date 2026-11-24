@@ -1,0 +1,5 @@
+# `cargo nextest run --workspace`: every test binary at once (most tests wait
+# on scratch servers, not the CPU). A test still going after a minute is
+# flagged, and ended after two, so a hang fails instead of stalling the run.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 2 }
