@@ -1841,6 +1841,7 @@ impl Server {
         if let Some(c) = self.clients.get_mut(&client) {
             c.last_heard = Instant::now();
             c.pings |= matches!(message, ClientMessage::Ping { .. });
+            c.flow.heard(matches!(message, ClientMessage::Ping { .. }), c.last_heard);
         }
         match message {
             ClientMessage::AttachWindow { window, spec, bounds, share } => {

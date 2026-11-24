@@ -9,6 +9,14 @@
 //! later, updates are queueing, and it shrinks (as LEDBAT does). One batch may
 //! always be on its way, however large.
 //!
+//! A stall is not queueing: this machine, or one in between, stops for
+//! seconds (out of memory, say), then everything comes back at once. Each of
+//! those acknowledgments is late by the stall, and counting them would close
+//! the window just as the link is back. A queue never silences the app,
+//! whose pings come up the other way, unqueued; a stall does. So hearing
+//! nothing at all for a while (longer than between its pings) marks one, and
+//! batches sent before it don't count either way.
+//!
 //! On a fast link the window stays wide open. On a slow one it keeps the
 //! queue short, so that when updates wait, they wait here, where a newer
 //! screen replaces them, and not on the link, where everything behind them
@@ -23,6 +31,10 @@ const TARGET: Duration = Duration::from_millis(30);
 /// (as LEDBAT keeps it): a busy link's longer delays never stand for it
 /// for less than this long.
 const BUCKET: Duration = Duration::from_secs(30);
+/// Silence over this many of the app's ping intervals, with batches on
+/// their way: a stall. Its interval unknown yet, over `STALL_UNKNOWN`.
+const STALL_PINGS: f32 = 1.5;
+const STALL_UNKNOWN: Duration = Duration::from_millis(7500);
 const MIN_WINDOW: usize = 4 * 1024;
 const MAX_WINDOW: usize = 4 * 1024 * 1024;
 const START_WINDOW: usize = 64 * 1024;
@@ -37,11 +49,27 @@ pub(crate) struct Flow {
     /// The least acknowledgment delay in each of the last two buckets
     /// (when the bucket began, its least).
     delays: VecDeque<(Instant, Duration)>,
+    /// When the app was last heard from, and last pinged.
+    last_heard: Option<Instant>,
+    last_ping: Option<Instant>,
+    /// The app's ping interval, as seen lately (the least of the last few).
+    ping_every: VecDeque<Duration>,
+    /// When the latest stall ended: batches sent before then say nothing
+    /// of the link.
+    stalled_until: Option<Instant>,
 }
 
 impl Default for Flow {
     fn default() -> Self {
-        Self { in_flight: VecDeque::new(), window: START_WINDOW, delays: VecDeque::new() }
+        Self {
+            in_flight: VecDeque::new(),
+            window: START_WINDOW,
+            delays: VecDeque::new(),
+            last_heard: None,
+            last_ping: None,
+            ping_every: VecDeque::new(),
+            stalled_until: None,
+        }
     }
 }
 
@@ -68,6 +96,34 @@ impl Flow {
     }
 
     /// The app has every batch up to `seq`.
+    /// Anything from the app (`ping`: a ping). After a silence longer
+    /// than its pings leave, with batches on their way: a stall ends now.
+    pub(crate) fn heard(&mut self, ping: bool, now: Instant) {
+        let stall = match self.ping_every.iter().min() {
+            Some(every) => every.mul_f32(STALL_PINGS),
+            None => STALL_UNKNOWN,
+        };
+        if let Some(last) = self.last_heard
+            && now.saturating_duration_since(last) > stall
+            && !self.in_flight.is_empty()
+        {
+            self.stalled_until = Some(now);
+        }
+        self.last_heard = Some(now);
+        if ping {
+            // (Not across a stall: that's no interval of its.)
+            if let Some(last) = self.last_ping
+                && self.stalled_until != Some(now)
+            {
+                self.ping_every.push_back(now.saturating_duration_since(last));
+                if self.ping_every.len() > 4 {
+                    self.ping_every.pop_front();
+                }
+            }
+            self.last_ping = Some(now);
+        }
+    }
+
     pub(crate) fn acked(&mut self, seq: u64, now: Instant) {
         let mut newest = None;
         let mut bytes = 0;
@@ -80,6 +136,9 @@ impl Flow {
             newest = Some(at);
         }
         let Some(sent) = newest else { return };
+        if self.stalled_until.is_some_and(|until| sent < until) {
+            return;
+        }
         let delay = now.saturating_duration_since(sent);
         match self.delays.back_mut() {
             Some((began, least)) if now.saturating_duration_since(*began) < BUCKET => {
@@ -160,6 +219,70 @@ mod tests {
         // So a second flood batch waits for the first.
         flow.sent(seq + 1, 16 * 1024, t);
         assert!(!flow.open());
+    }
+
+    /// The far end stops for seconds with batches on their way, then
+    /// answers them all at once: the window stays as it was.
+    #[test]
+    fn a_stall_leaves_the_window_open() {
+        let mut flow = Flow::default();
+        let mut t = Instant::now();
+        // A 100 ms link, open well past where it started.
+        for seq in 1..=20 {
+            flow.sent(seq, 16 * 1024, t);
+            t += ms(100);
+            flow.acked(seq, t);
+        }
+        let window = flow.window();
+        assert!(window > START_WINDOW, "{window}");
+        // The app pings every second.
+        for _ in 0..3 {
+            flow.heard(true, t);
+            t += ms(1000);
+        }
+        // Eight batches go; nothing comes back for 5 s; then everything.
+        for seq in 21..=28 {
+            flow.sent(seq, 8 * 1024, t + ms(seq - 20));
+        }
+        t += ms(5000);
+        flow.heard(true, t);
+        for seq in 21..=28 {
+            flow.heard(false, t + ms(seq - 20));
+            flow.acked(seq, t + ms(seq - 20));
+        }
+        assert!(flow.window() >= window, "{} < {window}", flow.window());
+        // And the link after it counts again, as before.
+        t += ms(50);
+        flow.sent(29, 16 * 1024, t);
+        flow.heard(false, t + ms(100));
+        flow.acked(29, t + ms(100));
+        assert!(flow.window() > window);
+        flow.sent(30, 16 * 1024, t);
+        flow.heard(true, t + ms(900));
+        flow.acked(30, t + ms(900));
+        assert!(flow.window() < window + 32 * 1024, "late again: queueing");
+    }
+
+    /// A link so slow each batch takes 2 s: answers far apart, but the
+    /// app's pings keep coming. A queue, not a stall: the window closes.
+    #[test]
+    fn a_very_slow_link_is_no_stall() {
+        let mut flow = Flow::default();
+        let mut t = Instant::now();
+        flow.sent(1, 100, t);
+        flow.heard(true, t + ms(300));
+        flow.acked(1, t + ms(300));
+        let mut seq = 1;
+        for _ in 0..20 {
+            seq += 1;
+            flow.sent(seq, 16 * 1024, t);
+            for _ in 0..2 {
+                t += ms(1000);
+                flow.heard(true, t);
+            }
+            flow.acked(seq, t);
+        }
+        assert_eq!(flow.window(), MIN_WINDOW);
     }
 
     #[test]

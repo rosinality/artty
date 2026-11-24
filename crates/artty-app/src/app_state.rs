@@ -54,6 +54,9 @@ pub struct Connection {
     /// When it last sent anything, and the ping awaiting its answer.
     last_heard: Instant,
     ping: Option<(u64, Instant)>,
+    /// When the oldest ping not answered (nor anything else heard since)
+    /// went: how long the server has said nothing, though asked.
+    unanswered_since: Option<Instant>,
     /// How long its last ping took to come back.
     pub latency: Option<Duration>,
     /// Checking it's still there (after a wake or a network change): lost
@@ -166,6 +169,7 @@ impl Connection {
             last_heard: Instant::now(),
             output: Vec::new(),
             ping: None,
+            unanswered_since: None,
             latency: None,
             probe_until: None,
             traffic: Arc::default(),
@@ -180,6 +184,7 @@ impl Connection {
         self.controls.clear();
         self.attaching.clear();
         self.ping = None;
+        self.unanswered_since = None;
         self.latency = None;
         self.probe_until = None;
         if let Some(mut child) = self.child.take() {
@@ -229,6 +234,11 @@ pub struct Shared {
     /// and what came of it, to show.
     updates_checked: std::collections::HashSet<ServerId>,
     update_notes: HashMap<ServerId, String>,
+    /// Notes hidden with a click ("server\tbuild\tnote"), kept across runs:
+    /// each is shown once by a build.
+    dismissed_notes: Option<std::collections::HashSet<String>>,
+    /// Servers whose "no reply" line was hidden, till they answer again.
+    quiet_dismissed: std::collections::HashSet<ServerId>,
     /// This app's build, as of when it started.
     build: String,
     /// This Mac's server said it's ending every session: quit instead of
@@ -347,6 +357,8 @@ pub fn init(spec: PaneSpec, cx: &mut App) {
         server_mismatch: None,
         updates_checked: std::collections::HashSet::new(),
         update_notes: HashMap::new(),
+        dismissed_notes: None,
+        quiet_dismissed: std::collections::HashSet::new(),
         build: std::env::current_exe()
             .map(|exe| artty_core::protocol::build_id(&exe))
             .unwrap_or_default(),
@@ -587,7 +599,9 @@ fn start_io(
                 {
                     connection.last_heard = Instant::now();
                     connection.probe_until = None;
+                    connection.unanswered_since = None;
                 }
+                cx.global_mut::<Shared>().quiet_dismissed.remove(&server);
                 for mut message in batch.into_iter().flatten() {
                     ids::incoming(server, &mut message);
                     handle(server, message, cx);
@@ -1203,11 +1217,21 @@ fn sync_appearance(cx: &mut App) {
 /// (ssh can take minutes to notice a dead network). After a wake or a
 /// network change, remotes are checked at once: one waiting reconnects now,
 /// one connected must answer within seconds.
+///
+/// Otherwise silence is mostly the machine there stalling (out of memory,
+/// say: seconds at a time with nothing back, then everything at once), not
+/// the connection gone: it's waited out, a minute, and said in the sidebar
+/// ([`no_reply_for`]). Reconnecting then would only queue a new session
+/// behind the stall and send every screen again; ssh's own keepalive (45 s)
+/// ends a connection really gone sooner.
 fn heartbeat(cx: &mut App) {
     crate::forward::tick(cx);
     crate::edits::tick(cx);
     const PING_EVERY: Duration = Duration::from_secs(5);
-    const SILENCE: Duration = Duration::from_secs(15);
+    /// Remotes more often, to see a stall soon (here, and by the server's
+    /// flow window: see `flow.rs`).
+    const PING_REMOTE: Duration = Duration::from_secs(1);
+    const SILENCE: Duration = Duration::from_secs(60);
     const PROBE: Duration = Duration::from_secs(4);
     let now = Instant::now();
     let changed = network_changed(cx);
@@ -1243,29 +1267,101 @@ fn heartbeat(cx: &mut App) {
             lost.push(server as ServerId);
             continue;
         }
-        let due = connection.ping.is_none_or(|(_, sent)| now.duration_since(sent) >= PING_EVERY);
+        let every = if remote { PING_REMOTE } else { PING_EVERY };
+        let due = connection.ping.is_none_or(|(_, sent)| now.duration_since(sent) >= every);
         if due {
             connection.ping = Some((next_ping + server as u64, now));
+            connection.unanswered_since.get_or_insert(now);
             send_to(server as ServerId, ClientMessage::Ping { id: next_ping + server as u64 }, cx);
         }
     }
     cx.global_mut::<Shared>().next_request += count as u64;
     for server in lost {
         log::warn!("server {server}: no answer; reconnecting");
-        // Its shared ssh connection is likely dead too, and new sessions
-        // would wait on it: end it.
-        if let Some(exit) = remote_config(server, cx).and_then(|r| r.shared("exit", None)) {
-            std::thread::spawn(move || artty_core::remote::ssh_process(&exit).output());
-        }
-        // Ending what carries it ends the connection: `remote_lost` follows.
-        if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize)
-            && let Some(child) = connection.child.as_mut()
-        {
-            let _ = child.kill();
-        }
+        reconnect_now(server, cx);
     }
     for server in retry {
         connect_remote(server, cx);
+    }
+}
+
+/// Drop `server`'s connection, and with it its shared ssh connection
+/// (likely dead too, and new sessions would wait on it), to connect anew:
+/// ending what carries it ends the connection, and `remote_lost` follows.
+pub fn reconnect_now(server: ServerId, cx: &mut App) {
+    if let Some(exit) = remote_config(server, cx).and_then(|r| r.shared("exit", None)) {
+        std::thread::spawn(move || artty_core::remote::ssh_process(&exit).output());
+    }
+    if let Some(connection) = cx.global_mut::<Shared>().connections.get_mut(server as usize)
+        && let Some(child) = connection.child.as_mut()
+    {
+        let _ = child.kill();
+    }
+}
+
+/// How long connected `server` (another machine's) has answered nothing
+/// though asked, once that's long enough to say: it's stalling.
+pub fn no_reply_for(server: ServerId, cx: &App) -> Option<Duration> {
+    const SAY_AFTER: Duration = Duration::from_secs(3);
+    let connection = cx.global::<Shared>().connections.get(server as usize)?;
+    if connection.remote.is_none() || connection.status != Status::Connected {
+        return None;
+    }
+    let quiet = connection.unanswered_since?.elapsed();
+    (quiet >= SAY_AFTER).then_some(quiet)
+}
+
+/// Whether the "no reply" line of `server` was hidden (till it answers).
+pub fn quiet_dismissed(server: ServerId, cx: &App) -> bool {
+    cx.global::<Shared>().quiet_dismissed.contains(&server)
+}
+
+pub fn dismiss_quiet(server: ServerId, cx: &mut App) {
+    cx.global_mut::<Shared>().quiet_dismissed.insert(server);
+}
+
+/// Where hidden notes are kept: beside the server's saved state.
+fn dismissed_path() -> Option<PathBuf> {
+    Some(artty_core::SavedState::path()?.with_file_name("dismissed-notes.json"))
+}
+
+fn note_key(server: ServerId, note: &str, cx: &App) -> String {
+    let shared = cx.global::<Shared>();
+    let name = shared.connections.get(server as usize).map(|c| c.name.as_str());
+    format!("{}\t{}\t{note}", name.unwrap_or_default(), shared.build)
+}
+
+fn dismissed_notes(cx: &mut App) -> &mut std::collections::HashSet<String> {
+    cx.global_mut::<Shared>().dismissed_notes.get_or_insert_with(|| {
+        dismissed_path()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    })
+}
+
+/// Whether `note` on `server`'s line was hidden with a click (ever).
+pub fn note_dismissed(server: ServerId, note: &str, cx: &mut App) -> bool {
+    let key = note_key(server, note, cx);
+    dismissed_notes(cx).contains(&key)
+}
+
+/// Hide `note` on `server`'s line: this same note, while this build runs
+/// (another build may have something new to say).
+pub fn dismiss_note(server: ServerId, note: &str, cx: &mut App) {
+    let key = note_key(server, note, cx);
+    let notes = dismissed_notes(cx);
+    notes.insert(key);
+    let mut list: Vec<&String> = notes.iter().collect();
+    list.sort();
+    if let (Some(path), Ok(json)) = (dismissed_path(), serde_json::to_vec_pretty(&list)) {
+        let saved = path
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| std::fs::write(&path, json));
+        if let Err(err) = saved {
+            log::warn!("couldn't keep a hidden note: {err}");
+        }
     }
 }
 
@@ -1362,18 +1458,18 @@ pub fn typed(pane: PaneId, bytes: &[u8], cx: &mut App) {
 pub fn expire_echoes(cx: &mut App) -> bool {
     let now = Instant::now();
     let shared = cx.global_mut::<Shared>();
-    let latency = |pane: PaneId| {
-        shared
-            .connections
-            .get(ids::server_of(pane) as usize)
-            .and_then(|c| c.latency)
-            .unwrap_or_default()
+    // Its round trip, and when it was last heard from.
+    let link = |pane: PaneId| {
+        let connection = shared.connections.get(ids::server_of(pane) as usize);
+        let trip = connection.and_then(|c| c.latency).unwrap_or_default();
+        (trip, connection.map_or(now, |c| c.last_heard))
     };
-    let trips: Vec<(PaneId, Duration)> = shared.echoes.keys().map(|&p| (p, latency(p))).collect();
+    let trips: Vec<(PaneId, (Duration, Instant))> =
+        shared.echoes.keys().map(|&p| (p, link(p))).collect();
     let mut changed = false;
-    for (pane, trip) in trips {
+    for (pane, (trip, heard)) in trips {
         if let Some(echo) = shared.echoes.get_mut(&pane) {
-            changed |= echo.expire(trip, now);
+            changed |= echo.expire(trip, heard, now);
         }
     }
     changed
@@ -1903,8 +1999,10 @@ fn remote_lost(server: ServerId, cx: &mut App) {
 }
 
 /// Show a server's windows in the app's windows: each view gets back the
-/// one it showed before (after a reconnect), or a detached one, in order.
-/// If it has none for any view, the first view gets a new one.
+/// one it showed before (after a reconnect), else one no app shows, else
+/// (as `artty attach` does, as tmux does) the newest one another app shows,
+/// shared with it: all of the server's workspaces, not a fresh window beside
+/// them. If it has none for any view, the first view gets a new one.
 fn attach_remote(server: ServerId, cx: &mut App) {
     let all = query_on(server, Query::AllWindows, cx);
     cx.spawn(async move |cx| {
@@ -1914,9 +2012,8 @@ fn attach_remote(server: ServerId, cx: &mut App) {
         };
         let _ = cx.update(|cx| {
             let views = app_views(cx);
-            let mut free: VecDeque<WindowId> =
-                windows.iter().filter(|w| w.apps == 0).map(|w| w.window).collect();
             let mut waiting = Vec::new();
+            let mut taken = Vec::new();
             let mut attached = false;
             for view in views.iter() {
                 let remembered = view.read(cx).remembered(server);
@@ -1926,7 +2023,7 @@ fn attach_remote(server: ServerId, cx: &mut App) {
                     // server only lets go after a minute's silence (it
                     // would otherwise get a new window, a fresh shell).
                     Some(window) => {
-                        free.retain(|&w| w != window);
+                        taken.push(window);
                         attach(server, view, Some(window), PaneSpec::default(), None, true, cx);
                         attached = true;
                     },
@@ -1934,8 +2031,9 @@ fn attach_remote(server: ServerId, cx: &mut App) {
                 }
             }
             for view in &waiting {
-                let Some(window) = free.pop_front() else { break };
-                attach(server, view, Some(window), PaneSpec::default(), None, false, cx);
+                let Some(window) = window_to_join(&windows, &taken) else { break };
+                taken.push(window);
+                attach(server, view, Some(window), PaneSpec::default(), None, true, cx);
                 attached = true;
             }
             if !attached && let Some(view) = views.first() {
@@ -1944,6 +2042,81 @@ fn attach_remote(server: ServerId, cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// Of a server's `windows`, the one to show in a view that has none of it,
+/// `taken` being those the app's views show: one no app shows (the oldest
+/// first, as before), else the newest one another app shows (shared then).
+fn window_to_join(
+    windows: &[artty_core::protocol::WindowSummary],
+    taken: &[WindowId],
+) -> Option<WindowId> {
+    let open = || windows.iter().filter(|w| !taken.contains(&w.window));
+    let free = open().filter(|w| w.apps == 0).min_by_key(|w| w.window);
+    free.or_else(|| open().max_by_key(|w| w.window)).map(|w| w.window)
+}
+
+/// Show `server` in `view`, which has none of it: a window of it no view
+/// here shows (as [`attach_remote`] picks one), else a new one. Joining one,
+/// a new workspace goes in it with `new_workspace` (a new window has one).
+pub fn show_server(
+    server: ServerId,
+    view: &gpui::Entity<WindowView>,
+    new_workspace: bool,
+    cx: &mut App,
+) {
+    let all = query_on(server, Query::AllWindows, cx);
+    let view = view.clone();
+    cx.spawn(async move |cx| {
+        let windows = match all.await {
+            Ok(Reply::Windows(windows)) => windows,
+            _ => Vec::new(),
+        };
+        let _ = cx.update(|cx| {
+            let taken: Vec<WindowId> = app_views(cx)
+                .iter()
+                .flat_map(|v| v.read(cx).server_windows())
+                .filter(|&w| ids::server_of(w) == server)
+                .collect();
+            match window_to_join(&windows, &taken) {
+                Some(window) => {
+                    if new_workspace {
+                        view.update(cx, |view, _| view.new_workspace_on_attach(window));
+                    }
+                    attach(server, &view, Some(window), PaneSpec::default(), None, true, cx);
+                },
+                None => attach_new(server, &view, cx),
+            }
+        });
+    })
+    .detach();
+}
+
+/// Show `window` of `server`, which another app shows, in `view` too.
+pub fn attach_shared(
+    server: ServerId,
+    view: &gpui::Entity<WindowView>,
+    window: WindowId,
+    cx: &mut App,
+) {
+    attach(server, view, Some(window), PaneSpec::default(), None, true, cx);
+}
+
+/// Stop showing a server's `window` (its view moves to another one of that
+/// server); it keeps running.
+pub fn detach_view_window(window: WindowId, cx: &mut App) {
+    send(ClientMessage::DetachWindow { window }, cx);
+    cx.global_mut::<Shared>().windows.remove(&window);
+}
+
+/// The windows of `server` that this app's views show.
+pub fn shown_windows(server: ServerId, cx: &App) -> Vec<WindowId> {
+    cx.global::<Shared>()
+        .windows
+        .iter()
+        .filter(|&(&window, view)| ids::server_of(window) == server && view.upgrade().is_some())
+        .map(|(&window, _)| window)
+        .collect()
 }
 
 /// Show windows that were closed while the app kept running.
@@ -2092,6 +2265,20 @@ mod tests {
 
     /// A server of its own (in a directory of its own), reached through a
     /// command as through ssh. `None` without the app binary built.
+    /// Wait for `child` (an app's `artty server --stdio`) to end, failing
+    /// the test instead of hanging should it not.
+    fn ends(child: &mut std::process::Child) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while child.try_wait().ok().flatten().is_none() {
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the app's connection didn't end");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn scratch_server(tag: &str) -> Option<(artty_core::remote::Opened, Scratch)> {
         // The app binary, built beside the tests.
         let exe = std::env::current_exe().unwrap();
@@ -2144,7 +2331,7 @@ mod tests {
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         write_message(&mut opened.writer, &stop).unwrap();
         while read_message::<ServerMessage>(&mut opened.reader).is_ok() {}
-        let _ = opened.child.wait();
+        ends(&mut opened.child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2282,7 +2469,7 @@ mod tests {
         // The phone lets it go; the Mac still shows it.
         phone.send(&ClientMessage::DetachWindow { window });
         drop(phone.writer);
-        let _ = phone.child.wait();
+        ends(&mut phone.child);
         mac.send(&ClientMessage::Query { id: 9, query: Query::AllWindows });
         let apps = mac.until(|m| match m {
             ServerMessage::Reply { id: 9, reply: Reply::Windows(windows) } => {
@@ -2295,8 +2482,132 @@ mod tests {
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         mac.send(&stop);
         drop(mac.writer);
-        let _ = mac.child.wait();
+        ends(&mut mac.child);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A view with nothing of a server takes a window no app shows, else
+    /// shares the newest one: never a fresh window beside one in use.
+    #[test]
+    fn a_second_app_shares_a_window_rather_than_open_a_new_one() {
+        use artty_core::protocol::WindowSummary;
+        let summary = |window, apps| WindowSummary {
+            window,
+            tabs: 1,
+            bounds: None,
+            apps,
+            titles: Vec::new(),
+        };
+        // Free ones first, the oldest of them.
+        let windows = [summary(1, 1), summary(2, 0), summary(3, 0)];
+        assert_eq!(window_to_join(&windows, &[]), Some(2));
+        assert_eq!(window_to_join(&windows, &[2]), Some(3));
+        // Then the newest another app shows.
+        assert_eq!(window_to_join(&windows, &[2, 3]), Some(1));
+        let shown = [summary(1, 1), summary(4, 2)];
+        assert_eq!(window_to_join(&shown, &[]), Some(4));
+        // All shown here already, or none: a new one.
+        assert_eq!(window_to_join(&shown, &[1, 4]), None);
+        assert_eq!(window_to_join(&[], &[]), None);
+    }
+
+    /// Joining a window another app shows, as `WindowView::join_window`
+    /// does: this app's own window's workspaces move in and it closes; the
+    /// other app keeps its window, now with both.
+    #[test]
+    fn joining_another_apps_window_brings_this_ones_workspaces_along() {
+        let Some((opened, dir)) = scratch_server("join") else { return };
+        let config = |dir: &Path| {
+            let d = dir.display();
+            let exe = std::env::current_exe().unwrap();
+            let artty = exe.parent().and_then(Path::parent).unwrap().join("artty");
+            ServerConfig {
+                name: "test".into(),
+                command: vec![
+                    "env".into(),
+                    format!("HOME={d}"),
+                    format!("XDG_STATE_HOME={d}/state"),
+                    format!("TMPDIR={d}/t/"),
+                    artty.display().to_string(),
+                    "server".into(),
+                    "--stdio".into(),
+                ],
+                ..Default::default()
+            }
+        };
+        let new_window = |app: &mut TestApp| {
+            app.send(&ClientMessage::AttachWindow {
+                window: None,
+                spec: PaneSpec::default(),
+                bounds: None,
+                share: false,
+            });
+            let window = app.until(|m| match m {
+                ServerMessage::Attached { window, .. } => Some(*window),
+                _ => None,
+            });
+            let workspace = app.until(|m| match m {
+                ServerMessage::Layout { window: w, layout } if *w == window => {
+                    layout.workspaces.first().map(|w| w.id)
+                },
+                _ => None,
+            });
+            (window, workspace)
+        };
+        let mut mac = TestApp::on(opened);
+        let (theirs, _) = new_window(&mut mac);
+        let mut other =
+            TestApp::on(artty_core::remote::open(&config(&dir), Prompts::Never).unwrap());
+        let (own, workspace) = new_window(&mut other);
+        assert_ne!(own, theirs);
+
+        other.send(&ClientMessage::DetachWindow { window: own });
+        other.send(&ClientMessage::AttachWindow {
+            window: Some(theirs),
+            spec: PaneSpec::default(),
+            bounds: None,
+            share: true,
+        });
+        let joined = other.until(|m| match m {
+            ServerMessage::Attached { window, .. } => Some(*window),
+            _ => None,
+        });
+        assert_eq!(joined, theirs);
+        other.send(&ClientMessage::MoveWorkspace { workspace, window: theirs, to: usize::MAX });
+        other.send(&ClientMessage::OpenWorkspace { workspace, window: theirs });
+
+        // Both see the one window with both workspaces, the moved one shown.
+        for app in [&mut mac, &mut other] {
+            app.until(|m| match m {
+                ServerMessage::WindowClosed { window } if *window == theirs => {
+                    panic!("the other app's window closed")
+                },
+                ServerMessage::Layout { window, layout }
+                    if *window == theirs
+                        && layout.workspaces.len() == 2
+                        && layout.workspaces[layout.active].id == workspace =>
+                {
+                    Some(())
+                },
+                _ => None,
+            });
+        }
+        mac.send(&ClientMessage::Query { id: 9, query: Query::AllWindows });
+        let windows = mac.until(|m| match m {
+            ServerMessage::Reply { id: 9, reply: Reply::Windows(windows) } => {
+                Some(windows.iter().map(|w| (w.window, w.apps)).collect::<Vec<_>>())
+            },
+            _ => None,
+        });
+        assert_eq!(windows, vec![(theirs, 2)]);
+
+        drop(other.writer);
+        ends(&mut other.child);
+        let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
+        mac.send(&stop);
+        drop(mac.writer);
+        ends(&mut mac.child);
+        drop(dir);
     }
 
     /// Through a command, as through ssh: greeting, a window, then stopped.
@@ -2671,7 +2982,7 @@ mod tests {
 
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         exchange(stop, &|m| matches!(m, ServerMessage::Stopping { .. }).then_some(m));
-        let _ = child.wait();
+        ends(&mut child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2695,7 +3006,7 @@ mod tests {
         assert_eq!(agent.as_deref(), Some("claude"));
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         app.send(&stop);
-        let _ = app.child.wait();
+        ends(&mut app.child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2711,7 +3022,7 @@ mod tests {
         }
         // That app goes away, leaving them printing for a while.
         let _ = busy.child.kill();
-        let _ = busy.child.wait();
+        ends(&mut busy.child);
         std::thread::sleep(Duration::from_secs(1));
 
         // (The same server again: kept, not dropped, or it'd be stopped.)
@@ -2747,7 +3058,7 @@ mod tests {
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         write_message(&mut writer, &stop).unwrap();
         while rx.recv_timeout(Duration::from_secs(2)).is_ok() {}
-        let _ = child.wait();
+        ends(&mut child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2809,7 +3120,7 @@ mod tests {
         let stop = ClientMessage::Control { id: 1, request: encode_request(&Request::StopServer) };
         write_message(&mut writer, &stop).unwrap();
         while rx.recv_timeout(Duration::from_secs(2)).is_ok() {}
-        let _ = child.wait();
+        ends(&mut child);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

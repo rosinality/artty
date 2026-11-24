@@ -386,6 +386,16 @@ pub struct WindowView {
     remembered: HashMap<ServerId, WindowId>,
     /// Asked a server for a new window here: show it when it comes.
     front_on_attach: Option<ServerId>,
+    /// Joining a window another app shows, for a new workspace: start it
+    /// there once attached.
+    new_workspace_on_attach: Option<WindowId>,
+    /// Joining a window another app shows, to see a workspace of it: once
+    /// attached, bring this view's former window's workspaces (by id) into
+    /// it too, then show that workspace.
+    merge_on_attach: Option<(WindowId, Vec<WorkspaceId>, WorkspaceId)>,
+    /// Per (remote) server, its workspaces in windows other apps show and no
+    /// view here does (ids tagged): listed in its section, below its own.
+    elsewhere: HashMap<ServerId, Vec<WorkspaceInfo>>,
     /// Detach from the server's window when this view goes away.
     detach: bool,
     layout: WindowLayout,
@@ -569,6 +579,10 @@ impl WindowView {
                 let focused = this.window_active && server == this.front;
                 app_state::send(ClientMessage::WindowFocused { window: id, focused }, cx);
             }
+            // Back from another Mac, say: what it opened there.
+            if this.window_active {
+                this.fetch_elsewhere(cx);
+            }
             cx.notify();
         });
 
@@ -602,6 +616,9 @@ impl WindowView {
             servers: std::collections::BTreeMap::new(),
             front: LOCAL,
             front_on_attach: None,
+            new_workspace_on_attach: None,
+            merge_on_attach: None,
+            elsewhere: HashMap::new(),
             remembered: HashMap::new(),
             detach: true,
             layout: WindowLayout::default(),
@@ -696,7 +713,207 @@ impl WindowView {
             self.front_on_attach = None;
             self.set_front(server, cx);
         }
+        if self.new_workspace_on_attach.take_if(|&mut w| w == window).is_some() {
+            self.naming_new_workspace = true;
+            self.send(
+                ClientMessage::NewWorkspace { window, name: None, spec: PaneSpec::default() },
+                cx,
+            );
+        }
+        if let Some((_, moving, show)) = self.merge_on_attach.take_if(|m| m.0 == window) {
+            // The last one's move closes the former window, which no app
+            // here shows any more.
+            for workspace in moving {
+                self.send(ClientMessage::MoveWorkspace { workspace, window, to: usize::MAX }, cx);
+            }
+            self.send(ClientMessage::OpenWorkspace { workspace: show, window }, cx);
+            self.set_front(server, cx);
+        }
+        self.fetch_elsewhere(cx);
         cx.notify();
+    }
+
+    /// Join `window` of `server`, which another app shows, bringing this
+    /// view's own window of that server along (its workspaces move in, and
+    /// the window, emptied, closes), and show `workspace` there. Every
+    /// workspace stays on screen everywhere: none is taken from the other app.
+    fn join_window(
+        &mut self,
+        server: ServerId,
+        window: WindowId,
+        workspace: WorkspaceId,
+        cx: &mut Context<Self>,
+    ) {
+        let own = self.servers.get(&server).map(|(own, layout)| {
+            (*own, layout.workspaces.iter().map(|w| w.id).collect::<Vec<_>>())
+        });
+        let all = app_state::query_on(server, Query::AllWindows, cx);
+        cx.spawn(async move |this, cx| {
+            let windows = match all.await {
+                Ok(Reply::Windows(windows)) => windows,
+                _ => return,
+            };
+            let _ = this.update(cx, |this, cx| {
+                let moving = match own {
+                    Some((own, moving)) => {
+                        // Shown by someone else too (a phone, another Mac):
+                        // it stays as it is for them, this view only moves.
+                        let alone = windows.iter().any(|w| w.window == own && w.apps <= 1);
+                        app_state::detach_view_window(own, cx);
+                        if alone { moving } else { Vec::new() }
+                    },
+                    None => Vec::new(),
+                };
+                this.merge_on_attach = Some((window, moving, workspace));
+                let view = cx.entity();
+                app_state::attach_shared(server, &view, window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Workspaces not here for "N more workspaces…": hidden ones; and, in
+    /// the switcher style (whose sidebar has no sections), those in windows
+    /// other apps show.
+    fn more_workspaces(&self) -> usize {
+        if self.config.sidebar_style != artty_core::SidebarStyle::Switcher {
+            return self.layout.hidden;
+        }
+        self.layout.hidden + self.servers.keys().map(|s| self.elsewhere_on(*s).len()).sum::<usize>()
+    }
+
+    /// `server`'s workspaces open in other apps (none once it's gone from
+    /// this view).
+    fn elsewhere_on(&self, server: ServerId) -> &[WorkspaceInfo] {
+        match self.servers.contains_key(&server) {
+            true => self.elsewhere.get(&server).map_or(&[], Vec::as_slice),
+            false => &[],
+        }
+    }
+
+    /// Ask each remote server shown here for its workspaces in windows
+    /// other apps show and no view here does (they come by no layout: a
+    /// window's go only to the apps showing it).
+    fn fetch_elsewhere(&mut self, cx: &mut Context<Self>) {
+        let servers: Vec<ServerId> = self.servers.keys().copied().filter(|&s| s != LOCAL).collect();
+        for server in servers {
+            let answer = app_state::control_on(server, Request::Workspaces, cx);
+            cx.spawn(async move |this, cx| {
+                let Ok(Response::Workspaces { workspaces }) = answer.await else { return };
+                let _ = this.update(cx, |this, cx| {
+                    let mine = app_state::shown_windows(server, cx);
+                    let theirs: Vec<WorkspaceInfo> = workspaces
+                        .into_iter()
+                        .filter(|w| w.attached)
+                        .filter_map(|mut w| {
+                            let window = ids::tag(server, w.window?);
+                            w.id = ids::tag(server, w.id);
+                            w.window = Some(window);
+                            (!mine.contains(&window)).then_some(w)
+                        })
+                        .collect();
+                    let same = this.elsewhere.get(&server).is_some_and(|old| {
+                        old.len() == theirs.len()
+                            && old.iter().zip(&theirs).all(|(a, b)| {
+                                (a.id, &a.title, a.tabs, &a.status, a.needs_attention, &a.color)
+                                    == (
+                                        b.id,
+                                        &b.title,
+                                        b.tabs,
+                                        &b.status,
+                                        b.needs_attention,
+                                        &b.color,
+                                    )
+                            })
+                    });
+                    if !same {
+                        this.elsewhere.insert(server, theirs);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// Rows for `server`'s workspaces open in other apps, after its own: as
+    /// folded sections, dimmed; a click shows that window here, with this one's
+    /// workspaces (see [`Self::join_window`]).
+    fn elsewhere_rows(&self, server: ServerId, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        self.elsewhere_on(server)
+            .iter()
+            .filter_map(|workspace| {
+                let id = workspace.id;
+                let window = workspace.window?;
+                let color = workspace.color.as_deref().and_then(workspace_color);
+                // Statuses (`working`, ...) as the sidebar's icons (`busy`, ...).
+                let icon = match workspace.status.as_str() {
+                    "working" | "running" => "busy",
+                    "waiting" | "failed" | "done" => workspace.status.as_str(),
+                    _ if workspace.needs_attention => "attention",
+                    _ => "",
+                };
+                let tabs = workspace.tabs;
+                let row = div()
+                    .id(("elsewhere", id as usize))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .mt(px(4.))
+                    .h(px(28.))
+                    .px_1()
+                    .rounded(px(7.))
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .hover(|d| d.bg(ui(0xffffff10)))
+                    .child(
+                        div()
+                            .w(px(10.))
+                            .h(px(16.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(chevron(false, ui(0xffffff50))),
+                    )
+                    .child(
+                        Self::one_line(workspace.title.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(ui(0xffffff50))
+                            .when(workspace.needs_attention, |d| d.text_color(ui(0xe0af68c0))),
+                    )
+                    .when_some(color, |d, color| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .size(px(7.))
+                                .rounded_full()
+                                .bg(rgba(color << 8 | 0x99)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.))
+                            .text_color(ui(0xffffff50))
+                            .child(tabs.to_string()),
+                    )
+                    .child(self.icon(icon))
+                    .tooltip(move |_, cx| {
+                        let tabs =
+                            if tabs == 1 { "1 tab".to_owned() } else { format!("{tabs} tabs") };
+                        let tip =
+                            format!("Open in another app · {tabs} · click to show it here too");
+                        cx.new(|_| Tooltip(tip.into())).into()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.join_window(server, window, id, cx);
+                    }));
+                Some(row.into_any_element())
+            })
+            .collect()
     }
 
     /// A server's layout of its window here.
@@ -1200,9 +1417,21 @@ impl WindowView {
         // Into this window's window on the workspace's server.
         if let Some(choice) = picker.matches().get(picker.selected) {
             let server = ids::server_of(choice.id);
-            if let Some(window) = self.window_on(server) {
-                self.set_front(server, cx);
-                self.send(ClientMessage::OpenWorkspace { workspace: choice.id, window }, cx);
+            let mine = app_state::shown_windows(server, cx);
+            match (self.window_on(server), choice.window) {
+                // In a window another app shows (on another Mac, say): asked
+                // to bring it here, the server would bring that one forward
+                // there instead. Show that window here, with this one's.
+                (_, Some(theirs))
+                    if server != LOCAL && choice.attached && !mine.contains(&theirs) =>
+                {
+                    self.join_window(server, theirs, choice.id, cx)
+                },
+                (Some(window), _) => {
+                    self.set_front(server, cx);
+                    self.send(ClientMessage::OpenWorkspace { workspace: choice.id, window }, cx);
+                },
+                (None, _) => {},
             }
         }
         self.marked_text = None;
@@ -1240,6 +1469,12 @@ impl WindowView {
                 let place = match (workspace.window, workspace.attached) {
                     (None, _) => "hidden".to_owned(),
                     (Some(_), false) => "closed window".to_owned(),
+                    (Some(window), true)
+                        if !app_state::shown_windows(ids::server_of(window), cx)
+                            .contains(&window) =>
+                    {
+                        "open in another app".to_owned()
+                    },
                     (Some(_), true) => format!("window {}", workspace.window_number),
                 };
                 let tabs = if workspace.tabs == 1 {
@@ -1715,11 +1950,11 @@ impl WindowView {
             self.toast = None;
             cx.notify();
         }
-        // A server's "again in Ns" counts down.
-        if app_state::servers(cx)
-            .iter()
-            .any(|(_, _, s)| matches!(s, app_state::Status::Waiting { .. }))
-        {
+        // A server's "again in Ns" counts down, and "no reply for Ns" up.
+        if app_state::servers(cx).iter().any(|(server, _, s)| {
+            matches!(s, app_state::Status::Waiting { .. })
+                || app_state::no_reply_for(*server, cx).is_some()
+        }) {
             cx.notify();
         }
         let modified = config_modified();
@@ -2766,9 +3001,29 @@ impl WindowView {
     ) -> gpui::Stateful<gpui::Div> {
         use app_state::Status;
         let group: SharedString = format!("server-{server}").into();
+        // Connected but answering nothing: said (till it answers, or the
+        // line's hidden), a click to reconnect.
+        let silent = match &status {
+            Status::Connected => app_state::no_reply_for(server, cx),
+            _ => None,
+        };
+        let quiet = silent.filter(|_| !app_state::quiet_dismissed(server, cx));
+        // What updating artty there came to, till hidden with a click.
+        let update = match (&status, silent) {
+            (Status::Connected, None) => app_state::update_note(server, cx)
+                .filter(|note| !app_state::note_dismissed(server, note, cx)),
+            _ => None,
+        };
         let (dot, note): (u32, Option<String>) = match &status {
-            // (What updating artty there came to, if anything.)
-            Status::Connected => (0x9ece6aff, app_state::update_note(server, cx)),
+            // (Its dot says so even with the line hidden.)
+            Status::Connected => match (quiet, silent) {
+                (Some(quiet), _) => (
+                    0xe0af68ff,
+                    Some(format!("no reply for {}s · click to reconnect", quiet.as_secs())),
+                ),
+                (None, Some(_)) => (0xe0af68ff, None),
+                (None, None) => (0x9ece6aff, update.clone()),
+            },
             Status::Connecting => (0xe0af68ff, Some("connecting…".to_owned())),
             Status::Waiting { error, retry_at } => {
                 let seconds = retry_at.saturating_duration_since(Instant::now()).as_secs();
@@ -2911,15 +3166,46 @@ impl WindowView {
                     }),
             )
             .when_some(note, |d, note| {
+                let dismissable = quiet.is_some() || update.is_some();
                 d.child(
-                    // Under its name.
-                    Self::one_line(note)
+                    // Under its name; one that can be hidden, with an × for it.
+                    div()
+                        .flex()
+                        .items_center()
                         .pl(px(18.))
-                        .pr_2()
+                        .pr_1()
                         .pb(px(4.))
                         .text_size(px(10.5))
-                        .text_color(ui(0xffffff50)),
+                        .text_color(ui(0xffffff50))
+                        .child(Self::one_line(note).flex_1().min_w_0())
+                        .when(dismissable, |d| {
+                            d.child(
+                                div()
+                                    .id(("server-note-hide", server as usize))
+                                    .flex_none()
+                                    .opacity(0.)
+                                    .group_hover(group.clone(), |s| s.opacity(1.))
+                                    .px_1()
+                                    .rounded(px(3.))
+                                    .hover(|d| d.bg(ui(0xffffff14)))
+                                    .child("×")
+                                    .tooltip(|_, cx| cx.new(|_| Tooltip("Hide".into())).into())
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.stop_propagation();
+                                        match &update {
+                                            Some(note) => app_state::dismiss_note(server, note, cx),
+                                            None => app_state::dismiss_quiet(server, cx),
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
                 )
+            })
+            .when(quiet.is_some(), |d| {
+                d.cursor_pointer().on_click(cx.listener(move |_, _, _, cx| {
+                    app_state::reconnect_now(server, cx);
+                }))
             })
             // Its menu: connect or disconnect; for one reached by ssh, a
             // fresh connection (the host's key checked again).
@@ -2958,6 +3244,11 @@ impl WindowView {
 
     /// A new workspace on `server`: in its window here, or in a new window
     /// of it shown here.
+    /// Joining `window` (another app's) for a new workspace: start one in it.
+    pub fn new_workspace_on_attach(&mut self, window: WindowId) {
+        self.new_workspace_on_attach = Some(window);
+    }
+
     fn new_workspace_on(&mut self, server: ServerId, cx: &mut Context<Self>) {
         match self.window_on(server) {
             Some(window) => {
@@ -2970,7 +3261,7 @@ impl WindowView {
             None => {
                 self.front_on_attach = Some(server);
                 let view = cx.entity();
-                app_state::attach_new(server, &view, cx);
+                app_state::show_server(server, &view, true, cx);
             },
         }
     }
@@ -3437,7 +3728,7 @@ impl WindowView {
                 .hover(|d| d.bg(ui(0xffffff10)).text_color(ui(0xffffffee)))
                 .child(label)
         };
-        let hidden = self.layout.hidden;
+        let hidden = self.more_workspaces();
         let panel = div()
             .id("switcher")
             .absolute()
@@ -3474,9 +3765,9 @@ impl WindowView {
             )))
             .when(hidden > 0, |d| {
                 let label = if hidden == 1 {
-                    "1 hidden workspace…".to_owned()
+                    "1 more workspace…".to_owned()
                 } else {
-                    format!("{hidden} hidden workspaces…")
+                    format!("{hidden} more workspaces…")
                 };
                 d.child(action("switcher-hidden", label).on_click(cx.listener(|this, _, _, cx| {
                     this.switcher_open = false;
@@ -3558,6 +3849,9 @@ impl WindowView {
         if self.config.sidebar_style == artty_core::SidebarStyle::Switcher {
             return None;
         }
+        if !self.elsewhere_on(server).is_empty() {
+            return None;
+        }
         let mut on_server =
             self.layout.workspaces.iter().filter(|w| ids::server_of(w.id) == server);
         match (on_server.next(), on_server.next()) {
@@ -3617,8 +3911,9 @@ impl WindowView {
             }
             let server = ids::server_of(workspace.id);
             // (A server's past conversations after its workspaces.)
-            if past_of.is_some_and(|s| s != server) {
-                rows.extend(self.server_past(past_of.unwrap(), cx));
+            if let Some(done) = past_of.filter(|&s| s != server) {
+                rows.extend(self.elsewhere_rows(done, cx));
+                rows.extend(self.server_past(done, cx));
             }
             past_of = Some(server).filter(|s| !(several && self.folded_servers.contains(s)));
             while let Some((id, name, status)) = headers.next_if(|(id, _, _)| *id <= server) {
@@ -3652,13 +3947,14 @@ impl WindowView {
             }
         }
         if let Some(server) = past_of {
+            rows.extend(self.elsewhere_rows(server, cx));
             rows.extend(self.server_past(server, cx));
         }
         for (id, name, status) in headers {
             rows.push(self.server_header(id, name, status, cx).into_any_element());
         }
-        if self.layout.hidden > 0 {
-            let hidden = self.layout.hidden;
+        let hidden = self.more_workspaces();
+        if hidden > 0 {
             rows.push(
                 div()
                     .id("hidden-workspaces")

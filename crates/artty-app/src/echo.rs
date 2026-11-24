@@ -17,9 +17,13 @@ use artty_core::vt::ansi::CursorShape;
 use artty_core::vt::term::TermMode;
 
 /// Guesses older than this many round trips (and at least `MIN_WAIT`)
-/// without the server showing them were wrong.
+/// without the server showing them were wrong — counted from when the
+/// server was first heard from after they were typed: one stalling (seconds
+/// with nothing back) shows them late, so they wait for it, up to
+/// `STALL_WAIT`.
 const ROUND_TRIPS: u32 = 4;
 const MIN_WAIT: Duration = Duration::from_millis(300);
+const STALL_WAIT: Duration = Duration::from_secs(30);
 
 /// A pane's guesses.
 #[derive(Debug, Default)]
@@ -37,6 +41,8 @@ struct Guess {
     column: usize,
     character: char,
     at: Instant,
+    /// When the server was first heard from since.
+    heard: Option<Instant>,
 }
 
 impl Echo {
@@ -79,7 +85,7 @@ impl Echo {
                     if !single || column + 1 >= frame.columns {
                         return;
                     }
-                    self.guesses.push(Guess { line, column, character, at: now });
+                    self.guesses.push(Guess { line, column, character, at: now, heard: None });
                     column += 1;
                 }
             },
@@ -93,6 +99,7 @@ impl Echo {
     /// the rest of the line, not the echo. Overdue, or the cursor off the
     /// line: wrong.
     pub fn confirm(&mut self, frame: &Frame, round_trip: Duration, now: Instant) {
+        self.hear(now);
         let (Some(first), Some(last)) = (self.guesses.first(), self.guesses.last()) else { return };
         let Some(cursor) = frame.cursor.filter(|c| c.line == first.line) else {
             return self.wrong();
@@ -112,24 +119,39 @@ impl Echo {
                 self.trusted = true;
             }
         }
-        if self.overdue(round_trip, now) {
+        if self.overdue(round_trip, now, now) {
             self.wrong();
         }
     }
 
-    /// Time passing without screens: overdue guesses were wrong. Returns
-    /// whether anything changed.
-    pub fn expire(&mut self, round_trip: Duration, now: Instant) -> bool {
-        if self.overdue(round_trip, now) {
+    /// Time passing without screens, the server last heard from at
+    /// `heard`: overdue guesses were wrong. Returns whether anything changed.
+    pub fn expire(&mut self, round_trip: Duration, heard: Instant, now: Instant) -> bool {
+        self.hear(heard);
+        if self.overdue(round_trip, heard, now) {
             self.wrong();
             return true;
         }
         false
     }
 
-    fn overdue(&self, round_trip: Duration, now: Instant) -> bool {
+    /// The server was heard from `at`: the guesses typed before then have
+    /// their wait start, if it hadn't.
+    fn hear(&mut self, at: Instant) {
+        for guess in self.guesses.iter_mut().filter(|g| g.heard.is_none() && g.at <= at) {
+            guess.heard = Some(at);
+        }
+    }
+
+    /// Whether the server, heard from (lastly at `heard`) for long enough
+    /// since the first guess, hasn't shown it; or it's waited for a stall
+    /// too long.
+    fn overdue(&self, round_trip: Duration, heard: Instant, now: Instant) -> bool {
         let wait = (round_trip * ROUND_TRIPS).max(MIN_WAIT);
-        self.guesses.first().is_some_and(|g| now.duration_since(g.at) > wait)
+        self.guesses.first().is_some_and(|g| {
+            g.heard.is_some_and(|first| heard.saturating_duration_since(first) > wait)
+                || now.saturating_duration_since(g.at) > STALL_WAIT
+        })
     }
 
     fn wrong(&mut self) {
@@ -343,6 +365,40 @@ mod tests {
         assert!(echo.is_empty(), "off until Enter");
     }
 
+    /// The server stalls (nothing at all comes back for seconds): the
+    /// guesses stay, and its screens, when they come, confirm them.
+    #[test]
+    fn guesses_wait_out_a_stalled_server() {
+        let now = Instant::now();
+        let mut echo = Echo::default();
+        echo.typed(&screen("$ "), TermMode::empty(), b"a", now);
+        echo.confirm(&screen("$ a"), TRIP, now);
+        // Typed as it stalls (last heard from just before): five seconds
+        // of nothing.
+        let typing = now + Duration::from_millis(10);
+        echo.typed(&screen("$ a"), TermMode::empty(), b"b", typing);
+        echo.typed(&screen("$ a"), TermMode::empty(), b"c", typing);
+        echo.typed(&screen("$ a"), TermMode::empty(), b"d", typing);
+        let back = now + Duration::from_secs(5);
+        assert!(!echo.expire(TRIP, now, back));
+        assert!(!echo.is_empty());
+        // Then its screens, a character at a time.
+        echo.confirm(&screen("$ ab"), TRIP, back);
+        echo.confirm(&screen("$ abc"), TRIP, back + Duration::from_millis(20));
+        assert!(!echo.is_empty(), "d still to come");
+        assert!(!echo.expire(
+            TRIP,
+            back + Duration::from_millis(30),
+            back + Duration::from_millis(30)
+        ));
+        echo.confirm(&screen("$ abcd"), TRIP, back + Duration::from_millis(40));
+        assert!(echo.is_empty(), "all confirmed");
+        echo.typed(&screen("$ abcd"), TermMode::empty(), b"e", back);
+        assert!(!echo.is_empty(), "still guessing");
+        // But not for ever.
+        assert!(echo.expire(TRIP, now, back + Duration::from_secs(31)));
+    }
+
     #[test]
     fn unconfirmed_guesses_turn_guessing_off_until_enter() {
         let now = Instant::now();
@@ -351,8 +407,12 @@ mod tests {
         echo.confirm(&screen("$ a"), TRIP, now);
         // A program that doesn't echo: the guess never shows up.
         echo.typed(&screen("$ a"), TermMode::empty(), b"b", now);
-        assert!(!echo.expire(TRIP, now + Duration::from_millis(200)));
-        assert!(echo.expire(TRIP, now + Duration::from_secs(1)));
+        // Heard from (a ping's answer) just after, and since.
+        let heard = now + Duration::from_millis(5);
+        assert!(!echo.expire(TRIP, heard, heard));
+        let (soon, later) = (now + Duration::from_millis(200), now + Duration::from_millis(500));
+        assert!(!echo.expire(TRIP, soon, soon));
+        assert!(echo.expire(TRIP, later, later));
         echo.typed(&screen("$ a"), TermMode::empty(), b"c", now);
         assert!(echo.is_empty(), "off until Enter");
         echo.typed(&screen("$ a"), TermMode::empty(), b"\r", now);
