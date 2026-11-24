@@ -153,7 +153,7 @@ ssh machines (without artty) have none: it's their server's config that says.
 ### Status in the sidebar
 
 artty recognizes coding agents by their process name (`claude`, `codex`,
-`gemini`, … — configurable; scripts run by node or python are named after the
+`gemini`, `agy`, … — configurable; scripts run by node or python are named after the
 script). Without help it can tell an agent is running and when it rings the
 bell or sends a notification. For exact working / needs-input / done status,
 let the agent report it through its hooks:
@@ -172,6 +172,7 @@ installed) with Install / Update / Uninstall buttons.
 | Claude Code | `~/.claude/settings.json` | |
 | Codex | `~/.codex/hooks.json` | approve them once with `/hooks` in Codex |
 | Gemini CLI | `~/.gemini/settings.json` | |
+| Antigravity CLI | `~/.gemini/config/hooks.json` | it says itself when it waits for you (OSC 7501) |
 
 The hooks call `artty status …` and do nothing outside artty. They also tell
 artty the conversation id, which is what lets restored tabs resume the right
@@ -419,7 +420,7 @@ answer). Run from an agent's pane, that agent is the new one's starter:
 its thread gets the task's card, and the new agent's thread shows who
 started it. Agents started by agents go two deep at most, unless the
 `max-agent-depth` setting says otherwise (0: no limit). In the Agents
-view (or the thread panel), `/new [claude|codex|gemini] [-w BRANCH] TASK`
+view (or the thread panel), `/new [claude|codex|gemini|agy] [-w BRANCH] TASK`
 starts one in the chosen agent's folder, its task's card in the chosen
 agent's thread (⌘⏎: and its answer brought back there).
 

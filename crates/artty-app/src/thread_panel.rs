@@ -211,7 +211,7 @@ impl WindowView {
             (None, None) if !agents.loaded => div().flex_1(),
             (None, None) => {
                 div().flex_1().p(px(16.)).text_size(px(12.5)).text_color(ui(0xffffff90)).child(
-                    "No agent in this pane. Start Claude Code, Codex or Gemini CLI here (with \
+                    "No agent in this pane. Start Claude Code, Codex, Gemini CLI or Antigravity CLI here (with \
                  artty's hooks installed: artty hooks install) and its thread shows here.",
                 )
             },

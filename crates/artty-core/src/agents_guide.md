@@ -3,7 +3,7 @@
 <!-- Written by artty (`artty guide` prints it). Edits here are overwritten. -->
 
 You run in a pane of artty, a terminal; other coding agents (Claude Code,
-Codex, Gemini CLI) may run in its other panes, each in its own session. Your
+Codex, Gemini CLI, Antigravity CLI) may run in its other panes, each in its own session. Your
 own pane's id is in `$ARTTY_SESSION_ID`.
 
 ## Commands
@@ -40,7 +40,7 @@ own pane's id is in `$ARTTY_SESSION_ID`.
   requests, the files it changed. `artty thread --search TEXT` searches
   every agent's thread (newest matches first; `--tab N` for one).
 - `artty new --background --agent claude --cwd DIR --task "..."` starts an
-  agent (codex, gemini too) in a new tab with that task; it prints the new
+  agent (codex, gemini, agy too) in a new tab with that task; it prints the new
   pane's id, and the task's ask id on stderr. With `--worktree BRANCH`, it
   runs in a git worktree of the repository, `REPO.worktrees/BRANCH` on that
   branch; the worktree is removed when its tab closes if it has no changes

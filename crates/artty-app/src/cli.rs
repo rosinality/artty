@@ -165,7 +165,7 @@ artty, your own pane is found automatically:
                                          in that workspace, creating it if needed
   artty new --agent NAME [--task TEXT | --task -] [--worktree BRANCH] [...]
                                          ... running agent NAME (claude, codex,
-                                         gemini), given TEXT as its first
+                                         gemini, agy), given TEXT as its first
                                          message (an ask: its id on stderr).
                                          From an agent's pane, it's the new
                                          agent's starter (max-agent-depth deep
@@ -248,7 +248,8 @@ artty, your own pane is found automatically:
   artty hooks status                     which agents have artty's hooks
   artty hooks install [AGENT...]         add (or update) status hooks in the
                                          agents' settings (default: every
-                                         installed agent: claude, codex, gemini),
+                                         installed agent: claude, codex, gemini,
+                                         agy),
                                          so artty shows exact status and resumes
                                          the right conversation
   artty hooks uninstall [AGENT...]       remove them (default: everywhere)
@@ -635,7 +636,7 @@ fn run(args: Vec<String>) -> Result<i32, String> {
             }
         },
         "status" => {
-            let state = match rest.first().map(String::as_str) {
+            let mut state = match rest.first().map(String::as_str) {
                 Some("working") => AgentState::Working,
                 Some("waiting") => AgentState::Waiting,
                 Some("done") => AgentState::Done,
@@ -647,7 +648,9 @@ fn run(args: Vec<String>) -> Result<i32, String> {
                 return Ok(0);
             }
             let (message, agent_session, hook) = if switches.contains("hook") {
-                hook_event()
+                let (message, session, hook, still) = hook_event();
+                state = still.unwrap_or(state);
+                (message, session, hook)
             } else {
                 (flags.get("message").cloned(), None, None)
             };
@@ -1551,10 +1554,15 @@ fn approve(agent: Option<String>) -> Result<i32, String> {
 }
 
 /// The message and session id of an agent's hook event on stdin (Claude
-/// Code, Codex and Gemini CLI all send `session_id`), and what tells its
-/// turns apart.
-fn hook_event() -> (Option<String>, Option<String>, Option<HookEvent>) {
-    let Some(event) = hook_input() else { return (None, None, None) };
+/// Code, Codex and Gemini CLI all send `session_id`), what tells its turns
+/// apart, and the state it's really in, if not the hook's.
+fn hook_event() -> (Option<String>, Option<String>, Option<HookEvent>, Option<AgentState>) {
+    let Some(event) = hook_input() else { return (None, None, None, None) };
+    // Antigravity CLI's, camelCase.
+    if event.get("hookEventName").is_some() {
+        let (session, hook, state) = antigravity_event(&event);
+        return (None, session, hook, state);
+    }
     let text = |key: &str| event.get(key).and_then(Value::as_str).map(str::to_owned);
     let used = text("hook_event_name").as_deref() == Some("PostToolUse");
     let hook = text("hook_event_name").map(|name| HookEvent {
@@ -1569,7 +1577,62 @@ fn hook_event() -> (Option<String>, Option<String>, Option<HookEvent>) {
         tool_input: used.then(|| event.get("tool_input").cloned()).flatten(),
         notification_type: text("notification_type"),
     });
-    (hook_message(&event), text("session_id"), hook)
+    (hook_message(&event), text("session_id"), hook, None)
+}
+
+/// Antigravity CLI's hook event as the events artty knows: its session is
+/// its conversation; a turn begins at its first model call (`invocationNum`
+/// 0, again each turn), with the prompt it was given, and ends at a `Stop`
+/// with nothing left running (`fullyIdle`), the transcript's last response
+/// its reply. A `Stop` with tasks still running in the background is a turn
+/// still at work. (No event says it waits for you: it says so itself, OSC
+/// 7501.)
+fn antigravity_event(event: &Value) -> (Option<String>, Option<HookEvent>, Option<AgentState>) {
+    let text = |key: &str| event.get(key).and_then(Value::as_str).map(str::to_owned);
+    let session = text("conversationId");
+    let Some(name) = text("hookEventName") else { return (session, None, None) };
+    let named = |event: &str| HookEvent { event: event.to_owned(), ..HookEvent::default() };
+    let hook = match name.as_str() {
+        "PreInvocation" if event.get("invocationNum").and_then(Value::as_u64) == Some(0) => {
+            HookEvent { prompt: text("lastUserInput"), ..named("UserPromptSubmit") }
+        },
+        "Stop" if event.get("fullyIdle").and_then(Value::as_bool) == Some(false) => {
+            return (session, None, Some(AgentState::Working));
+        },
+        "Stop" => {
+            let reply = text("transcriptPath").and_then(|path| last_response(path.as_ref()));
+            HookEvent { reply, ..named("Stop") }
+        },
+        other => named(other),
+    };
+    (session, Some(hook), None)
+}
+
+/// The last thing the model said in an Antigravity CLI transcript, in this
+/// turn (none after the last prompt: it said nothing). Read from its end.
+fn last_response(path: &std::path::Path) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    const TAIL: u64 = 1 << 20;
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TAIL))).ok()?;
+    let mut tail = Vec::new();
+    file.take(TAIL).read_to_end(&mut tail).ok()?;
+    // (The first line may be cut: it doesn't parse.)
+    for line in String::from_utf8_lossy(&tail).lines().rev() {
+        let Ok(step) = serde_json::from_str::<Value>(line) else { continue };
+        match step.get("type").and_then(Value::as_str) {
+            Some("USER_INPUT") => return None,
+            Some("PLANNER_RESPONSE") => {
+                let said = step.get("content").and_then(Value::as_str).map(str::trim);
+                if let Some(said) = said.filter(|s| !s.is_empty()) {
+                    return Some(said.to_owned());
+                }
+            },
+            _ => {},
+        }
+    }
+    None
 }
 
 /// What to show for a hook event: its message, or for a permission request
@@ -2176,5 +2239,69 @@ mod tests {
         let gemini = json!({"hook_event_name": "Notification", "message": "Allow shell?"});
         assert_eq!(hook_message(&gemini).as_deref(), Some("Allow shell?"));
         assert_eq!(hook_message(&json!({"hook_event_name": "Stop"})), None);
+    }
+
+    /// Antigravity CLI 1.5.16's events, as it sends them (trimmed).
+    #[test]
+    fn antigravity_turns() {
+        let dir = std::env::temp_dir().join(format!("artty-agy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = dir.join("transcript_full.jsonl");
+        let steps = [
+            json!({"step_index": 0, "type": "USER_INPUT", "content": "<USER_REQUEST>\nsay done\n</USER_REQUEST>"}),
+            json!({"step_index": 1, "type": "PLANNER_RESPONSE", "content": "done"}),
+            json!({"step_index": 2, "type": "USER_INPUT", "content": "<USER_REQUEST>\nlist it\n</USER_REQUEST>"}),
+            json!({"step_index": 3, "type": "PLANNER_RESPONSE", "content": "It's\n- a\n- b\n"}),
+            json!({"step_index": 4, "type": "PLANNER_RESPONSE", "tool_calls": [{"name": "run_command"}]}),
+            json!({"step_index": 5, "type": "GENERIC", "content": "Created At: ..."}),
+        ];
+        let lines: Vec<String> = steps.iter().map(Value::to_string).collect();
+        std::fs::write(&transcript, lines.join("\n") + "\n").unwrap();
+        let event = |name: &str, more: Value| {
+            let mut event = json!({
+                "hookEventName": name,
+                "conversationId": "e6435c3c-f9c0-4e70-ad66-7a3281033fa7",
+                "cwd": "/src/web",
+                "lastUserInput": "list it",
+                "transcriptPath": transcript.display().to_string(),
+            });
+            event.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+            antigravity_event(&event)
+        };
+
+        let (session, hook, state) = event("PreInvocation", json!({"invocationNum": 0}));
+        assert_eq!(session.as_deref(), Some("e6435c3c-f9c0-4e70-ad66-7a3281033fa7"));
+        let hook = hook.unwrap();
+        assert_eq!(
+            (hook.event.as_str(), hook.prompt.as_deref()),
+            ("UserPromptSubmit", Some("list it"))
+        );
+        assert_eq!((hook.turn(), state), (Some(true), None));
+        // Its next model calls in the turn start nothing.
+        let (_, hook, _) = event("PreInvocation", json!({"invocationNum": 2}));
+        assert_eq!(hook.unwrap().turn(), None);
+
+        let (_, hook, state) =
+            event("Stop", json!({"fullyIdle": true, "terminationReason": "NO_TOOL_CALL"}));
+        let hook = hook.unwrap();
+        assert_eq!((hook.turn(), state), (Some(false), None));
+        assert_eq!(hook.reply.as_deref(), Some("It's\n- a\n- b"));
+        // Something still running in the background: at work still.
+        assert_eq!(
+            event("Stop", json!({"fullyIdle": false})),
+            (
+                Some("e6435c3c-f9c0-4e70-ad66-7a3281033fa7".to_owned()),
+                None,
+                Some(AgentState::Working)
+            )
+        );
+        let (_, hook, _) = event("SessionStart", json!({}));
+        assert_eq!(hook.unwrap().turn(), Some(false));
+
+        // A turn with nothing said yet has no reply.
+        std::fs::write(&transcript, lines[..3].join("\n")).unwrap();
+        assert_eq!(last_response(&transcript), None);
+        assert_eq!(last_response(&dir.join("missing.jsonl")), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

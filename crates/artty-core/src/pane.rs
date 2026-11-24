@@ -246,6 +246,7 @@ impl Pane {
             "claude-code" | "claude" => Some("claude"),
             "codex" => Some("codex"),
             "gemini" | "gemini-cli" => Some("gemini"),
+            "antigravity" | "agy" => Some("agy"),
             _ => None,
         }
     }

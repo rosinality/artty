@@ -65,6 +65,35 @@ pub fn claude_title(session: &str) -> Option<String> {
     claude_title_in(&claude, session)
 }
 
+/// An Antigravity CLI conversation's title, as its conversation list has
+/// it (made up for it, or given with `/rename`); none while it has none.
+pub fn agy_title(session: &str) -> Option<String> {
+    agy_title_in(&home()?.join(".gemini/antigravity-cli"), session)
+}
+
+fn agy_title_in(dir: &Path, session: &str) -> Option<String> {
+    use rusqlite::{Connection, OpenFlags};
+    let path = dir.join("conversation_summaries.db");
+    if !path.is_file() {
+        return None;
+    }
+    let db = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    // (Antigravity CLI may be writing it: not long.)
+    db.busy_timeout(std::time::Duration::from_millis(200)).ok()?;
+    let title: String = db
+        .query_row(
+            "SELECT title FROM conversation_summaries WHERE conversation_id = ?1",
+            [session],
+            |row| row.get(0),
+        )
+        .ok()?;
+    Some(title.trim().to_owned()).filter(|t| !t.is_empty())
+}
+
 /// Where a Claude Code conversation was had: the folder its transcript's
 /// first entries name.
 pub fn claude_cwd(session: &str) -> Option<PathBuf> {
@@ -591,6 +620,33 @@ mod tests {
         assert_eq!(title("ccc-3").as_deref(), Some("Early"));
         assert_eq!(title("none"), None);
         assert_eq!(title("../x"), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Antigravity CLI 1.5.16's conversation list (its columns that matter).
+    #[test]
+    fn agy_titles() {
+        let dir = std::env::temp_dir().join(format!("artty-agy-titles-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(agy_title_in(&dir, "db6922ec"), None, "no list yet");
+        let db = rusqlite::Connection::open(dir.join("conversation_summaries.db")).unwrap();
+        db.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             CREATE TABLE `conversation_summaries` (`conversation_id` text,
+               `title` text NOT NULL DEFAULT \"\", `preview` text NOT NULL DEFAULT \"\",
+               `last_modified_time` datetime NOT NULL, `workspace_uris` text NOT NULL,
+               PRIMARY KEY (`conversation_id`));
+             INSERT INTO conversation_summaries VALUES
+               ('db6922ec', 'Code Scaling And Efficiency Audit', 'Could you audit', '2026-11-24', '[]'),
+               ('e6435c3c', '', 'Reply with just the word done.', '2026-11-24', '[]');",
+        )
+        .unwrap();
+        // (Read while Antigravity CLI holds it open.)
+        let title = |session: &str| agy_title_in(&dir, session);
+        assert_eq!(title("db6922ec").as_deref(), Some("Code Scaling And Efficiency Audit"));
+        assert_eq!(title("e6435c3c"), None, "not made up yet");
+        assert_eq!(title("none"), None);
+        drop(db);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

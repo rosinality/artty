@@ -89,7 +89,7 @@ local-echo = true
 auto-forward-ports = false
 
 # Foreground programs shown as coding agents in the sidebar.
-agents = ["claude", "codex", "gemini", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"]
+agents = ["claude", "codex", "gemini", "agy", "aider", "opencode", "amp", "goose", "cursor-agent", "qwen", "crush", "droid"]
 
 # macOS notifications when a tab needs you while you're in another tab or app.
 notifications = true
@@ -118,7 +118,7 @@ key-sequence-timeout = 0
 
 # How to resume an agent, by name. `session` is used when the agent's hooks
 # reported its conversation id ({session}); `latest` otherwise. Claude Code,
-# Codex and Gemini CLI are built in; add others the same way.
+# Codex, Gemini CLI and Antigravity CLI are built in; add others the same way.
 [resume.claude]
 session = "claude --resume {session}"
 latest = "claude --continue"
@@ -130,6 +130,9 @@ latest = "codex resume --last"
 [resume.gemini]
 session = "gemini --resume {session}"
 latest = "gemini --resume latest"
+
+[resume.agy]
+session = "agy --conversation {session}"
 
 [colors]
 # foreground = "#d8dee9"

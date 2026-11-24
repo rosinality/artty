@@ -3645,6 +3645,9 @@ impl Server {
                 pane.process = pane.session.process();
                 pane.report(state, message.clone(), agent_session, agent);
                 Self::title_session(pane);
+                if hook.is_some() {
+                    Self::retitle_agy(pane);
+                }
                 // A turn cut short (`artty acp`: the agent said it was
                 // cancelled): no answer for its ask.
                 if let Some(hook) = hook.as_ref().filter(|h| h.event == "Interrupt") {
@@ -4061,14 +4064,31 @@ impl Server {
     }
 
     /// Once a second: processes, statuses, `artty run` timeouts, config.
-    /// A Claude Code conversation (resumed, or carried over from an earlier
-    /// build): its title, till its agent titles the terminal (Claude Code
-    /// does once given a message). Looked up once a conversation.
+    /// A Claude Code or Antigravity CLI conversation (resumed, or carried
+    /// over from an earlier build): its title, till its agent titles the
+    /// terminal (Claude Code does once given a message; Antigravity CLI
+    /// only with `/title on`). Looked up once a conversation.
     fn title_session(pane: &mut Pane) {
-        if matches!(&pane.status, Status::Agent { name, .. } if name == "claude")
-            && let Some(session) = pane.untitled_session().map(str::to_owned)
+        let lookup = match &pane.status {
+            Status::Agent { name, .. } if name == "claude" => crate::sessions::claude_title,
+            Status::Agent { name, .. } if name == "agy" => crate::sessions::agy_title,
+            _ => return,
+        };
+        if let Some(session) = pane.untitled_session().map(str::to_owned) {
+            pane.set_session_title(&session, lookup(&session));
+        }
+    }
+
+    /// An Antigravity CLI conversation's title, looked up again as its hooks
+    /// report: it's made up after the conversation starts, and renamed.
+    fn retitle_agy(pane: &mut Pane) {
+        if !matches!(&pane.status, Status::Agent { name, .. } if name == "agy") {
+            return;
+        }
+        if let Some(session) = pane.agent_session().map(str::to_owned)
+            && let Some(title) = crate::sessions::agy_title(&session)
         {
-            pane.set_session_title(&session, crate::sessions::claude_title(&session));
+            pane.set_session_title(&session, Some(title));
         }
     }
 

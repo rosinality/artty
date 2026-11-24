@@ -378,6 +378,7 @@ pub const DEFAULT_AGENTS: &[&str] = &[
     "claude",
     "codex",
     "gemini",
+    "agy",
     "aider",
     "opencode",
     "amp",
@@ -454,6 +455,15 @@ impl Default for Config {
                     ResumeCommand {
                         session: Some("gemini --resume {session}".to_owned()),
                         latest: Some("gemini --resume latest".to_owned()),
+                    },
+                ),
+                (
+                    "agy".to_owned(),
+                    ResumeCommand {
+                        session: Some("agy --conversation {session}".to_owned()),
+                        // (Not `agy --continue`: its latest conversation
+                        // anywhere, maybe another pane's.)
+                        latest: None,
                     },
                 ),
             ]),

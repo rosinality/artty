@@ -880,7 +880,7 @@ impl WindowView {
                             .child("No agents running"),
                     )
                     .child(
-                        "Start Claude Code, Codex or Gemini CLI in a tab. With artty's hooks \
+                        "Start Claude Code, Codex, Gemini CLI or Antigravity CLI in a tab. With artty's hooks \
                          installed (artty hooks install), each shows up here with what it was \
                          asked, what it said, and what it needs from you.",
                     ),

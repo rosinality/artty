@@ -570,6 +570,7 @@ impl Settings {
                 let hint: &'static str = match agent.id {
                     "claude" => "~/.claude/settings.json",
                     "codex" => "~/.codex/hooks.json · approve with /hooks",
+                    "agy" => "~/.gemini/config/hooks.json",
                     _ => "~/.gemini/settings.json",
                 };
                 Self::row(

@@ -13,11 +13,16 @@ pub struct Agent {
     pub id: &'static str,
     /// Display name.
     pub name: &'static str,
-    /// Hooks file, relative to the home directory; its `hooks` key is ours.
+    /// Hooks file, relative to the home directory; its `hooks` key is ours
+    /// (its `artty` key, for an agent whose file names its hooks).
     pub file: &'static str,
+    /// The file maps names to hooks, each its handlers by event (Antigravity
+    /// CLI's), rather than events to handlers: ours are named `artty`, and
+    /// only tool events' handlers go under a matcher.
+    named: bool,
     /// Hook event → the state it reports.
     events: &'static [(&'static str, &'static str)],
-    /// The agent parses hook output as JSON (Gemini CLI).
+    /// The agent parses hook output as JSON (Gemini CLI, Antigravity CLI).
     json_output: bool,
     /// The event whose hook may answer a permission request
     /// (`artty approve`), for agents that show their own prompt meanwhile.
@@ -31,6 +36,7 @@ pub const AGENTS: &[Agent] = &[
         id: "claude",
         name: "Claude Code",
         file: ".claude/settings.json",
+        named: false,
         events: &[
             ("SessionStart", "idle"),
             ("UserPromptSubmit", "working"),
@@ -47,6 +53,7 @@ pub const AGENTS: &[Agent] = &[
         id: "codex",
         name: "Codex",
         file: ".codex/hooks.json",
+        named: false,
         events: &[
             ("SessionStart", "idle"),
             ("UserPromptSubmit", "working"),
@@ -63,6 +70,7 @@ pub const AGENTS: &[Agent] = &[
         id: "gemini",
         name: "Gemini CLI",
         file: ".gemini/settings.json",
+        named: false,
         events: &[
             ("SessionStart", "idle"),
             ("BeforeAgent", "working"),
@@ -70,6 +78,24 @@ pub const AGENTS: &[Agent] = &[
             ("Notification", "waiting"),
             ("AfterAgent", "done"),
             ("SessionEnd", "idle"),
+        ],
+        json_output: true,
+        approve: None,
+        note: None,
+    },
+    Agent {
+        id: "agy",
+        name: "Antigravity CLI",
+        file: ".gemini/config/hooks.json",
+        named: true,
+        // No event for a prompt, nor for waiting on you: `artty status`
+        // takes a turn's first model call for its prompt, and what it waits
+        // for it says itself (OSC 7501).
+        events: &[
+            ("SessionStart", "idle"),
+            ("PreInvocation", "working"),
+            ("PostToolUse", "working"),
+            ("Stop", "done"),
         ],
         json_output: true,
         approve: None,
@@ -105,12 +131,15 @@ pub fn agent(id: &str) -> Result<&'static Agent, String> {
     AGENTS
         .iter()
         .find(|agent| agent.id == id)
-        .ok_or_else(|| format!("unknown agent {id} (claude, codex or gemini)"))
+        .ok_or_else(|| format!("unknown agent {id} (claude, codex, gemini or agy)"))
 }
 
 fn home() -> Result<PathBuf, String> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| "HOME is not set".to_owned())
 }
+
+/// Where a named hooks file keeps artty's hooks (see [`Agent::named`]).
+const NAMED: &str = "artty";
 
 /// Whether a hook entry is one of artty's.
 fn ours(entry: &Value) -> bool {
@@ -139,10 +168,15 @@ impl Agent {
         };
         let mut hooks = Map::new();
         for (event, state) in self.events {
-            hooks.insert(
-                (*event).to_owned(),
-                json!([{ "hooks": [{ "type": "command", "command": command(state) }] }]),
-            );
+            let handler = json!({ "type": "command", "command": command(state) });
+            let entry = match (self.named, *event) {
+                (true, "PreToolUse" | "PostToolUse") => {
+                    json!({ "matcher": "*", "hooks": [handler] })
+                },
+                (true, _) => handler,
+                (false, _) => json!({ "hooks": [handler] }),
+            };
+            hooks.insert((*event).to_owned(), json!([entry]));
         }
         if let Some(event) = self.approve {
             let approve = format!(
@@ -154,6 +188,11 @@ impl Agent {
             hooks.insert(event.to_owned(), json!([{ "hooks": [entry] }]));
         }
         Value::Object(hooks)
+    }
+
+    /// The key of the file's that holds our hooks.
+    fn key(&self) -> &'static str {
+        if self.named { NAMED } else { "hooks" }
     }
 
     fn path_in(&self, home: &Path) -> PathBuf {
@@ -176,7 +215,7 @@ impl Agent {
             Ok(settings) => settings,
             Err(err) => return Status::Error(err),
         };
-        let hooks = settings.get("hooks").and_then(Value::as_object);
+        let hooks = settings.get(self.key()).and_then(Value::as_object);
         let wanted = self.entries();
         let wanted = wanted.as_object().unwrap();
         let mut found = 0;
@@ -216,16 +255,17 @@ impl Agent {
         let mut settings = read(&path)?;
         let root =
             settings.as_object_mut().ok_or(format!("{} is not a JSON object", path.display()))?;
-        let hooks = root.entry("hooks").or_insert_with(|| json!({}));
+        let key = self.key();
+        let hooks = root.entry(key).or_insert_with(|| json!({}));
         let hooks = hooks
             .as_object_mut()
-            .ok_or(format!("{}: \"hooks\" is not an object", path.display()))?;
+            .ok_or(format!("{}: \"{key}\" is not an object", path.display()))?;
         remove_ours(hooks);
         for (event, entries) in self.entries().as_object().unwrap() {
             let list = hooks.entry(event.clone()).or_insert_with(|| json!([]));
             let list = list
                 .as_array_mut()
-                .ok_or(format!("{}: hooks.{event} is not a list", path.display()))?;
+                .ok_or(format!("{}: {key}.{event} is not a list", path.display()))?;
             list.extend(entries.as_array().unwrap().iter().cloned());
         }
         let backup = write(&path, &settings)?;
@@ -253,10 +293,10 @@ impl Agent {
         let Some(root) = settings.as_object_mut() else {
             return Err(format!("{} is not a JSON object", path.display()));
         };
-        if let Some(hooks) = root.get_mut("hooks").and_then(Value::as_object_mut) {
+        if let Some(hooks) = root.get_mut(self.key()).and_then(Value::as_object_mut) {
             remove_ours(hooks);
             if hooks.is_empty() {
-                root.remove("hooks");
+                root.remove(self.key());
             }
         }
         let backup = write(&path, &settings)?;
@@ -316,7 +356,9 @@ fn select(ids: &[&str], default: impl Fn(&Agent) -> bool) -> Result<Vec<&'static
 pub fn install(ids: &[&str]) -> Result<String, String> {
     let agents = select(ids, |agent| agent.status() != Status::AgentNotFound)?;
     if agents.is_empty() {
-        return Err("no supported agent found (~/.claude, ~/.codex or ~/.gemini)".into());
+        return Err(
+            "no supported agent found (~/.claude, ~/.codex, ~/.gemini or ~/.gemini/config)".into(),
+        );
     }
     Ok(agents
         .iter()
@@ -400,6 +442,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(back, mine, "uninstall leaves exactly the user's settings");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn antigravity_hooks_are_named_ours() {
+        let home = scratch_home("agy");
+        let agy = agent("agy").unwrap();
+        assert_eq!(agy.status_in(&home), Status::AgentNotFound);
+
+        // The user's own hook, named as Antigravity CLI names them.
+        std::fs::create_dir_all(home.join(".gemini/config")).unwrap();
+        let mine = json!({"lint": {"PostToolUse": [{"matcher": "run_command",
+            "hooks": [{"type": "command", "command": "./lint.sh"}]}]}});
+        let file = home.join(".gemini/config/hooks.json");
+        std::fs::write(&file, mine.to_string()).unwrap();
+        assert_eq!(agy.status_in(&home), Status::NotInstalled);
+
+        agy.install_in(&home).unwrap();
+        assert_eq!(agy.status_in(&home), Status::Installed);
+        let installed: Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(installed["lint"], mine["lint"]);
+        // Handlers straight under the event, but a tool event's under a matcher.
+        let command = installed["artty"]["Stop"][0]["command"].as_str().unwrap();
+        assert_eq!(
+            command,
+            "[ -n \"$ARTTY_SOCKET\" ] && artty status done --hook --agent agy >/dev/null; echo '{}'"
+        );
+        let tool = &installed["artty"]["PostToolUse"][0];
+        assert_eq!(tool["matcher"], "*");
+        assert!(tool["hooks"][0]["command"].as_str().unwrap().contains("artty status working"));
+        assert!(installed["artty"]["PreInvocation"][0]["command"].is_string());
+
+        agy.uninstall_in(&home).unwrap();
+        let back: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(back, mine, "uninstall leaves exactly the user's hooks");
         let _ = std::fs::remove_dir_all(home);
     }
 

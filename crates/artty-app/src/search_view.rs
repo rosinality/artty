@@ -52,6 +52,7 @@ pub(super) fn agent_mark(agent: &str) -> (&'static str, u32) {
         "claude" => ("✳", 0xd97757),
         "codex" => ("◇", 0x10a37f),
         "gemini" => ("✦", 0x4796e3),
+        "agy" => ("▲", 0x3186ff),
         _ => ("●", 0x9aa0a6),
     }
 }

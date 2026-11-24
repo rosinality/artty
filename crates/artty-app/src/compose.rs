@@ -128,7 +128,7 @@ pub(super) fn targets(
 }
 
 /// The agents `/new` starts by name (else Claude Code).
-const AGENTS: [&str; 4] = ["claude", "codex", "gemini", "claude-acp"];
+const AGENTS: [&str; 5] = ["claude", "codex", "gemini", "agy", "claude-acp"];
 
 /// `/new [AGENT] [-w BRANCH] TASK`.
 #[derive(Debug, PartialEq, Eq)]
