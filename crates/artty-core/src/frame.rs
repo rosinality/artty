@@ -334,7 +334,9 @@ impl LineBuilder {
         }
 
         // Placeholders (kitty's, for images in tmux) show an image, not a glyph.
-        if cell.c == ' ' && cell.zerowidth().is_none()
+        // A tab's first cell keeps the tab (for copying) but shows a space: drawn
+        // as a tab, it would push the rest of its run off the grid.
+        if matches!(cell.c, ' ' | '\t') && cell.zerowidth().is_none()
             || flags.contains(Flags::HIDDEN)
             || cell.c == PLACEHOLDER
         {
@@ -498,6 +500,14 @@ mod tests {
         let frame = frame_for(b"ab \x1b[31mred\x1b[0m  x");
         assert_eq!(texts(&frame.lines[0]), vec![(0, "ab"), (3, "red"), (8, "x")]);
         assert_eq!(frame.lines[0].runs[1].fg, Theme::default().ansi[1]);
+    }
+
+    #[test]
+    fn tabs_show_as_spaces_on_the_grid() {
+        // The cell a tab starts on keeps the tab; drawn, it'd be wider than a
+        // cell and push what follows in its run along.
+        let frame = frame_for(b"ab\tc\td");
+        assert_eq!(texts(&frame.lines[0]), vec![(0, "ab      c       d")]);
     }
 
     #[test]

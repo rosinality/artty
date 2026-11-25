@@ -296,6 +296,10 @@ fn paint_text(
     {
         return;
     }
+    // A tab's cell from an older server (`Frame` shows it as a space now):
+    // shaped as a tab, it'd push the rest of the run off the grid.
+    let text: std::borrow::Cow<str> =
+        if text.contains('\t') { text.replace('\t', " ").into() } else { text.into() };
     let text_run = TextRun {
         len: text.len(),
         font: styled_font(metrics, run),
@@ -308,7 +312,7 @@ fn paint_text(
             .then_some(StrikethroughStyle { thickness: px(1.), color: Some(color) }),
     };
     let shaped = window.text_system().shape_line(
-        text.to_owned().into(),
+        text.into_owned().into(),
         metrics.font_size,
         &[text_run],
         None,

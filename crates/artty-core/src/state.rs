@@ -276,7 +276,8 @@ pub(crate) fn styled_text<T>(term: &Term<T>, lines: usize) -> String {
                 next.write_sgr(&mut out);
                 style = next;
             }
-            out.push(cell.c);
+            // (A tab's cell, as a space: a tab would skip the cells after it.)
+            out.push(if cell.c == '\t' { ' ' } else { cell.c });
             if let Some(extra) = cell.zerowidth() {
                 out.extend(extra);
             }
@@ -294,7 +295,7 @@ pub(crate) fn styled_text<T>(term: &Term<T>, lines: usize) -> String {
 
 /// A cell that shows nothing: a default-background space.
 fn is_blank(cell: &Cell) -> bool {
-    cell.c == ' '
+    matches!(cell.c, ' ' | '\t')
         && cell.bg == Color::Named(NamedColor::Background)
         && !cell.flags.contains(Flags::INVERSE)
 }
@@ -415,6 +416,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn tabs_are_saved_as_the_spaces_they_cover() {
+        // As Antigravity CLI lines up a table: tab stops, then a bar.
+        let saved = styled_text(&term(20, b"ab\t|\tc"), 100);
+        assert_eq!(saved, "ab      |       c");
+        let replayed = term(20, saved.as_bytes());
+        assert_eq!(replayed.grid()[Line(0)][Column(8)].c, '|');
+        assert_eq!(replayed.grid()[Line(0)][Column(16)].c, 'c');
     }
 
     #[test]
